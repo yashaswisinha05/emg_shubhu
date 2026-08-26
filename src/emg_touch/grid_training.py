@@ -13,6 +13,9 @@ from .metrics import merge_metric_batches
 from .utils import move_batch_to_device
 
 
+VARIATE_NAMES = ("AD", "LD", "BB", "TB", "S0", "S4", "S8", "S12")
+
+
 def grid_targets(
     target: torch.Tensor,
     grid_width: int,
@@ -474,6 +477,15 @@ def evaluate_grid_model(
         reliability = outputs.get("emg_reliability")
         lookback = outputs.get("emg_lookback_weights")
         grid_prediction = outputs.get("grid_prediction")
+        variate_attention = outputs.get("variate_attention")
+        cross_variate = outputs.get("cross_variate_attention")
+        scale_gate = outputs.get("scale_gate")
+        if variate_attention is not None:
+            variate_attention = variate_attention.detach().cpu()
+        if cross_variate is not None:
+            cross_variate = cross_variate.detach().cpu()
+        if scale_gate is not None:
+            scale_gate = scale_gate.detach().cpu()
         imu_gate = outputs.get("imu_gate")
         if imu_gate is not None:
             imu_gate = imu_gate.detach().cpu().reshape(-1)
@@ -525,6 +537,29 @@ def evaluate_grid_model(
                 record["emg_reliability"] = float(reliability[index])
             if imu_gate is not None:
                 record["imu_gate"] = float(imu_gate[index])
+            if variate_attention is not None:
+                for position, name in enumerate(VARIATE_NAMES):
+                    record[f"variate_attention_{name}"] = float(
+                        variate_attention[index, position]
+                    )
+            if cross_variate is not None:
+                # Mass each variate sends to the other modality: the quantity
+                # a scalar reliability gate cannot represent.
+                emg_block = cross_variate[index, :4, 4:].sum(dim=-1)
+                imu_block = cross_variate[index, 4:, :4].sum(dim=-1)
+                record["cross_emg_to_imu"] = float(emg_block.mean())
+                record["cross_imu_to_emg"] = float(imu_block.mean())
+                for position, name in enumerate(VARIATE_NAMES):
+                    for other, other_name in enumerate(VARIATE_NAMES):
+                        record[f"cv_{name}_to_{other_name}"] = float(
+                            cross_variate[index, position, other]
+                        )
+            if scale_gate is not None:
+                labels = ("emg_p16", "emg_p32", "emg_p64", "imu_p16", "imu_p32", "imu_p64")
+                for position in range(min(scale_gate.size(-1), len(labels))):
+                    record[f"scale_{labels[position]}"] = float(
+                        scale_gate[index, position]
+                    )
             if lookback is not None:
                 names = (
                     ("full", "500ms", "300ms")

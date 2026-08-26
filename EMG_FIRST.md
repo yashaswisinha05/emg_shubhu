@@ -130,8 +130,12 @@ comparison against the baseline table above is controlled.
 
 ## How to run
 
+Activate the environment first. Omit `--device` to let CUDA be
+selected automatically on a GPU host; use `--device mps` on Apple silicon.
+
 ```bash
-caffeinate -i /opt/homebrew/Caskroom/miniconda/base/envs/smss/bin/python scripts/run_grid_point_sweep.py --config configs/emg_first.yaml --configuration a1 --fold 0 --device mps --models grid_emg grid_emg_first
+conda activate smss
+python scripts/run_grid_point_sweep.py --config configs/emg_first.yaml --configuration a1 --fold 0 --models grid_emg grid_emg_first
 ```
 
 Outputs land in `runs/emg_first/a1/fold-0/` and `evaluation/emg_first/`.

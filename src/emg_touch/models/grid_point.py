@@ -10,10 +10,17 @@ from ..data.grid_trajectory import (
     grid_imu_feature_dim,
     grid_imu_sensor_indices,
 )
+from .cross_variate import CrossVariateBackbone
 from .layers import PatchTransformerEncoder
 
 
-GRID_MODEL_KINDS = ("grid_imu", "grid_emg", "grid_fusion", "grid_emg_first")
+GRID_MODEL_KINDS = (
+    "grid_imu",
+    "grid_emg",
+    "grid_fusion",
+    "grid_emg_first",
+    "grid_crossvar",
+)
 
 
 def masked_channel_statistics(
@@ -745,6 +752,65 @@ class GridEMGFirstRegressor(nn.Module):
         return outputs
 
 
+class GridCrossVariateRegressor(nn.Module):
+    """Multi-scale patching plus one cross-variate mix over eight sensor tokens.
+
+    EMG and IMU are mixed at the patch level rather than combined as late,
+    scalar-gated logits. Their per-trial errors are nearly uncorrelated
+    (r = 0.09-0.21 on a1), so the complementary information is per trial and per
+    time, which a single scalar reliability cannot route.
+    """
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        model = config["model"]
+        grid_width, grid_height = map(int, model.get("grid_size", [8, 5]))
+        self.grid_width = grid_width
+        self.grid_height = grid_height
+        self.direct_prediction = str(
+            model.get("prediction_mode", "grid")
+        ).lower() == "direct_aux_grid"
+        self.backbone = CrossVariateBackbone(config)
+        self.time_conditioner = (
+            ElapsedTimeConditioner(int(model["d_model"]))
+            if bool(config.get("continual", {}).get("enabled", False))
+            else None
+        )
+        self.head = SpatialPointHead(
+            int(model["d_model"]),
+            grid_width,
+            grid_height,
+            float(model["dropout"]),
+            direct_prediction=self.direct_prediction,
+        )
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        context, variate_attention, cross_attention, scale_gate = self.backbone(
+            batch["emg"],
+            batch["emg_mask"],
+            batch["imu"],
+            batch["imu_mask"],
+            batch["lengths"],
+        )
+        if self.time_conditioner is not None:
+            context = context + self.time_conditioner(elapsed_from_batch(batch))
+        outputs = self.head(context)
+        outputs.update(
+            decode_grid_outputs(
+                outputs["heatmap_logits"],
+                outputs["offset_logits"],
+                self.grid_width,
+                self.grid_height,
+            )
+        )
+        finalize_point_prediction(outputs)
+        outputs["context"] = context
+        outputs["variate_attention"] = variate_attention
+        outputs["cross_variate_attention"] = cross_attention
+        outputs["scale_gate"] = scale_gate
+        return outputs
+
+
 def build_grid_model(kind: str, config: dict[str, Any]) -> nn.Module:
     if kind == "grid_imu":
         return GridIMURegressor(config)
@@ -754,4 +820,6 @@ def build_grid_model(kind: str, config: dict[str, Any]) -> nn.Module:
         return GridFusionRegressor(config)
     if kind == "grid_emg_first":
         return GridEMGFirstRegressor(config)
+    if kind == "grid_crossvar":
+        return GridCrossVariateRegressor(config)
     raise ValueError(f"Unknown grid model kind: {kind}")

@@ -25,6 +25,10 @@ For the EMG-dominant variant, which gives the EMG encoder the full causal prefix
 and admits IMU only through a priced, zero-initialized residual gate, see
 [`EMG_FIRST.md`](EMG_FIRST.md).
 
+For multi-scale patching plus patch-level cross-variate attention over the four
+EMG electrodes and four IMU sensors, adapted from MCV-PatchTST, see
+[`CROSS_VARIATE.md`](CROSS_VARIATE.md).
+
 The default final model is:
 
 - a multi-scale causal EMG encoder;
@@ -53,9 +57,30 @@ The manifest derives the configuration from `participant_id`, not the current di
 
 The enclosing participant folder is treated as the canonical participant ID. This safely corrects known summary-metadata typos such as `priyan_4` versus folder `priyan_a4` and `dev_mix77` versus folder `dev_mix7`, without modifying the original JSON files. The audit reports every such mismatch.
 
+## Repository layout and the data path
+
+Every config uses `data_root: "../MERGED DATA"`, a path relative to the
+repository root. Clone the repository so that its root sits **beside** the
+`MERGED DATA` directory:
+
+```text
+<parent>/
+├── <repo root>/        # this repository
+└── MERGED DATA/        # a1 a2 a3 a4 b1 b2 b3 mix1 mix2 mix3 mix5 mix6 mix7
+```
+
+For example, on a machine where the data lives at
+`/home/<user>/shubham/MERGED DATA`, clone into `/home/<user>/shubham/emg_shubhu`
+and the relative path resolves with no config edits.
+
+The recorded data is not part of this repository, and neither are
+`artifacts/`, `runs/`, or `evaluation/`. On a new machine, rebuild the manifest
+and cache (steps 3 onward) before training; `artifacts/manifest.csv` stores
+absolute paths and is therefore machine-specific.
+
 ## Installation
 
-Run all commands from this `emg_touch` directory.
+Run all commands from the repository root.
 
 ```bash
 python3 -m venv .venv
@@ -177,6 +202,23 @@ python scripts/train_baseline.py \
 ```
 
 PatchTST is a baseline, not the final multimodal model.
+
+## Running on Linux with CUDA
+
+`choose_device` prefers CUDA when it is available, so **omit `--device`** and the
+right accelerator is selected automatically. Passing `--device cuda` is
+equivalent; `--device mps` is Apple-only.
+
+Two settings are tuned for macOS and are worth raising on a Linux GPU host:
+
+- `training.num_workers: 0` avoids a macOS `torch_shm_manager` restriction. On
+  Linux, 4-8 workers is usually faster.
+- `training.amp: true` only takes effect on CUDA (`train_grid_model.py` gates it
+  on `device.type == "cuda"`), so mixed precision activates automatically there
+  and is inert on MPS.
+
+`caffeinate -i` in the documented commands is a macOS sleep-inhibitor. Drop it on
+Linux, or use `nohup ... &` / `tmux` instead.
 
 ## 7. Masked multimodal pretraining
 
