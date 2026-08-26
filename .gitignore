@@ -8,3 +8,4 @@ evaluation/
 *.npz
 
 .DS_Store
+*.egg-info/
