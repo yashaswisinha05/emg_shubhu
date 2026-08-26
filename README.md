@@ -220,6 +220,19 @@ Two settings are tuned for macOS and are worth raising on a Linux GPU host:
 `caffeinate -i` in the documented commands is a macOS sleep-inhibitor. Drop it on
 Linux, or use `nohup ... &` / `tmux` instead.
 
+If `build_manifest.py` or `prepare_cache.py` fails with
+`ModuleNotFoundError: No module named 'numpy._core...'`, the environment has
+NumPy <2.0. The recorded `.pkl` trial files were written under NumPy 2.x, whose
+private module layout (`numpy._core`) does not exist before 2.0, so an older
+NumPy cannot unpickle them. `pip install -e .` pulls in a compatible NumPy from
+`pyproject.toml`; if a pre-existing environment (e.g. a `base` conda env with an
+older NumPy already installed) is being reused instead of a fresh one, upgrade
+it directly:
+
+```bash
+pip install -U "numpy>=2,<3"
+```
+
 ## 7. Masked multimodal pretraining
 
 Pretraining uses only the training partition of the fold, preventing test-participant leakage.
