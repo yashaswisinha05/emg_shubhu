@@ -13,6 +13,17 @@ ATTENTION_PREFIXES = {
     "attention_imu_sensor_": "imu_sensor",
     "attention_imu_channel_": "imu_channel",
     "attention_emg_channel_": "emg_channel",
+    # grid_crossvar: each is its own single-row softmax group, so the
+    # per-prefix argmax below is valid for these three. The cv_<from>_to_<to>
+    # columns are deliberately excluded: they are eight independent 8-way
+    # softmaxes (one per "from" variate) flattened into 64 columns, and an
+    # argmax across all of them would compare entries from different
+    # distributions. Summarize those separately, e.g. by grouping columns on
+    # their "from" prefix, or by reading cross_emg_to_imu/cross_imu_to_emg
+    # directly.
+    "variate_attention_": "variate",
+    "scale_emg_": "patch_scale_emg",
+    "scale_imu_": "patch_scale_imu",
 }
 
 
