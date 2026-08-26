@@ -120,6 +120,16 @@ class MultiScalePatchEmbedder(nn.Module):
             nn.GELU(),
             nn.Linear(d_model, scales),
         )
+        # The stem ends in LayerNorm, but the per-scale Conv1d projections
+        # that follow it do not, so the gated-fusion output has no normalized
+        # scale. Two independently trained embedders (this one, and a second
+        # instance for the other modality) can then drift to very different
+        # output norms - measured at 2.2x on a real checkpoint (IMU tokens
+        # vs EMG tokens) - which biases the unnormalized dot-product
+        # cross-variate attention toward whichever modality's norm is larger,
+        # independent of content. Matches PatchTransformerEncoder's own
+        # final-norm convention.
+        self.output_norm = nn.LayerNorm(d_model)
 
     def forward(
         self, values: torch.Tensor, mask: torch.Tensor
@@ -158,6 +168,7 @@ class MultiScalePatchEmbedder(nn.Module):
             gate[:, index : index + 1].unsqueeze(-1) * tokens
             for index, tokens in enumerate(aligned)
         )
+        fused = self.output_norm(fused)
         return fused, patch_mask, gate
 
 

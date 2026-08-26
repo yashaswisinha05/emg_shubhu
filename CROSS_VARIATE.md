@@ -212,10 +212,111 @@ Verified before accepting the fix:
   cleanly, so this is not treated as blocking, but is recorded here in case
   it resurfaces on a long multi-configuration sweep.
 
+## Results (before the token-norm fix below)
+
+The Linux 5-fold `a1` pooled sweep (1200 trials, 6 participants) completed
+before the fix documented in the next section:
+
+| cutoff | median px | mean px | p90 px |
+|---|---|---|---|
+| 0.0s | 300.0 | 359.3 | 690.3 |
+| 0.2s | 194.4 | 230.0 | 433.9 |
+| 0.4s | 189.4 | 228.4 | 451.5 |
+| touch | 178.2 | 203.0 | 376.4 |
+
+Not yet comparable to the `grid_fusion`/`grid_imu` fold-0-only numbers quoted
+earlier in this document - those are single-fold, this is 5-fold pooled. A
+matched 5-fold `grid_imu`/`grid_fusion` baseline is running to make that
+comparison fair, and is superseded in priority by the fix below.
+
+Directional error on the same pooled predictions showed a real, independently
+interpretable pattern regardless of the pooling question: predictions are
+inward-biased 65-81% of trials and under-predict edge targets by 8-17 points
+at every cutoff (`edge_prediction_gap` -0.08 to -0.17) - classic
+regression-to-center hedging, worst at the 0.2s cutoff.
+
+## Bug found: unnormalized token-scale asymmetry biases cross-variate attention
+
+`analyze_channel_attention.py` on that same 5-fold sweep showed the final
+`variate_attention` pooling had collapsed almost entirely onto the four IMU
+sensor tokens:
+
+| variate | mean attention (touch) | top_attention_fraction |
+|---|---|---|
+| S8 | 0.382 | 0.487 |
+| S4 | 0.205 | 0.202 |
+| S12 | 0.197 | 0.138 |
+| S0 | 0.185 | 0.174 |
+| AD | 0.008 | 0.000 |
+| LD | 0.008 | 0.000 |
+| TB | 0.008 | 0.000 |
+| BB | 0.008 | 0.000 |
+
+All four EMG electrodes: essentially zero weight, never once the argmax
+across 1200 trials, at every cutoff. This alone does not distinguish "EMG is
+ignored" from "EMG's contribution was already absorbed into IMU tokens
+upstream, through the cross-variate residual" - both would look similar at
+final pooling. Checking further surfaced something else.
+
+The multi-scale gate result was also worth recording honestly against my own
+prior reasoning: I argued for coarse EMG patch scales because linear timing
+features (onset, onset differences) carry no signal at any granularity. The
+learned gate instead strongly prefers the *shortest* EMG scale (p16, 108 ms:
+mean weight 0.77-0.78, top_attention_fraction 0.93-0.97) and gives p64
+essentially nothing (~0.07, top-fraction ~0). This is not a contradiction of
+the linear-feature finding - a self-attention temporal encoder integrates
+across the patch sequence itself and generally prefers more, finer tokens
+over fewer coarse ones, since attention does the aggregation a coarse patch
+would otherwise pre-compute. "Informative timescale for a hand-built linear
+feature" and "tokenization a self-attention model prefers" are different
+questions; I had conflated them.
+
+**Checked directly, on the real trained checkpoint** (epoch 14 of the local
+`a1` fold-0 run, real validation data, not synthetic): token norms entering
+cross-variate attention, which has no pre-attention normalization.
+
+| | mean token norm |
+|---|---|
+| EMG tokens | 19.475 |
+| IMU tokens | 42.975 |
+| ratio | **2.21x** |
+
+`MultiScalePatchEmbedder`'s stem ends in `ChannelLayerNorm1d`, but the
+per-scale `Conv1d` projections and the gated-fusion sum that follow it do
+not, so the returned `fused` tokens carry no normalized scale. Two
+independently parameterized instances (`emg_embedder`, `imu_embedder`, with
+different fan-ins: 2 input channels vs 44) can drift to different output
+norms over training, and `nn.MultiheadAttention` has no internal pre-norm to
+correct for it - `Q @ K^T` is directly biased toward whichever modality's
+keys have larger norm, independent of content. This is inconsistent with the
+project's own convention: `PatchTransformerEncoder` ends in
+`self.norm = nn.LayerNorm(d_model)` for exactly this reason.
+
+Given the near-total (not just skewed) collapse pattern - uniformly ~0.008
+for all four EMG positions, at every cutoff, across 1200 trials - the
+2.21x norm gap is very unlikely to be the sole cause; a `variate_score`
+head can also learn to discount a variate by its position/modality
+identity (via the added `modality_embedding`) rather than its content, which
+a 2.2x norm gap alone would not fully explain. Both are real; the fix below
+addresses the norm confound so the remaining collapse, if any, can be
+attributed to content.
+
+### Fix
+
+Added `self.output_norm = nn.LayerNorm(d_model)` to `MultiScalePatchEmbedder`,
+applied to `fused` before it is returned - matching
+`PatchTransformerEncoder`'s existing convention. Verified on a fresh
+(untrained) model: token norms are now **exactly 1.000x** (both
+`sqrt(128) = 11.31`, as expected for an untrained LayerNorm with unit affine
+weight). The unfixed checkpoint (epoch 14, ratio 2.21x) is preserved at
+`runs/crossvar_a1_fold0_BEFORE_norm_fix/` for a direct before/after
+comparison once the fixed run completes.
+
 ## Results
 
-_Pending - the a1 fold-0 sweep is running on both the Linux/CPU machine and
-locally on MPS after the fix above._
+_Pending - re-running a1 fold-0 with the fix. The Linux 5-fold sweep above
+predates the fix and should be re-run once the fold-0 before/after
+comparison confirms the direction of the effect._
 
 ## Log
 
