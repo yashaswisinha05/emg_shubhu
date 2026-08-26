@@ -163,9 +163,59 @@ Beat `grid_fusion` at **0.0s (213.7 px) and 0.2s (166.7 px)**, where the measure
 oracle headroom is largest (+20.7 and +26.0 px). Touch-time is near-saturated for
 kinematics and is not the target.
 
+## MPS portability fix
+
+The first run on Apple Silicon (Mac, MPS backend) crashed immediately:
+
+```
+RuntimeError: Adaptive pool MPS: input sizes must be divisible by output
+sizes. Non-divisible input sizes are not implemented on MPS device yet.
+```
+
+`_align`/`_align_mask` originally used `F.adaptive_avg_pool1d` /
+`F.adaptive_max_pool1d`, and MPS refuses non-divisible adaptive pooling -
+which stride-based multi-scale patch counts rarely satisfy. The same run
+completed cleanly on the Linux/CPU machine, confirming the failure was
+backend-specific, not a logic bug.
+
+Replaced both with an explicit, cached bin-partition + matmul/any
+implementation (`_bin_boundaries`, rewritten `_align`, `_align_mask`) that
+reproduces the same "aligned contiguous interval" semantics the paper's
+Eq. 6-8 describes, without depending on any adaptive-pool kernel. A second
+MPS gap surfaced immediately after (`float64` is unsupported on MPS); bin
+edges are now computed as plain Python integers via floor division, which is
+both exact and avoids the float64 path entirely.
+
+Verified before accepting the fix:
+
+- **Exact match to reshape-mean** for every divisible (source_length, length)
+  pair - the unambiguous ground truth case.
+- **Partition correctness** for five non-divisible pairs: bins are
+  contiguous, non-overlapping, gap-free, and cover the full source range;
+  spot-checked against a plain per-bin mean/any.
+- Confirms `F.adaptive_avg_pool1d` was never bit-exact to begin with in the
+  non-divisible case - it uses PyTorch's own overlapping-window algorithm,
+  not Eq. 7's clean partition - so the new implementation is a closer match
+  to the paper's stated equation than the code it replaced, not just a
+  portability patch.
+- **`grid_crossvar` runs the real `train_grid_model.py` script end to end on
+  MPS**: 2 epochs on `a1` fold-0, train + validation + test-cutoff evaluation,
+  checkpoint written, exit code 0, no NaNs.
+- One caveat found and not chased further: an adhoc synthetic script that
+  loops three very different trajectory lengths (200, 40, 173) through one
+  model instance back-to-back, switching `.train()`/`.eval()` between them,
+  triggered a separate Metal kernel assertion
+  (`MPSNDArrayConvolutionA14.mm: Weights tensor and ndArray input channel
+  mismatch`) not reproduced by the real training script or by a same-shape
+  train-then-eval repro. Real per-fold training already varies trajectory
+  length continuously across bucketed batches within an epoch and completed
+  cleanly, so this is not treated as blocking, but is recorded here in case
+  it resurfaces on a long multi-configuration sweep.
+
 ## Results
 
-_Pending._
+_Pending - the a1 fold-0 sweep is running on both the Linux/CPU machine and
+locally on MPS after the fix above._
 
 ## Log
 

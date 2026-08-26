@@ -33,20 +33,60 @@ EMG_CHANNELS = 4
 IMU_SENSORS = 4
 
 
+_BIN_CACHE: dict[tuple[int, int, torch.device], tuple[torch.Tensor, torch.Tensor]] = {}
+
+
+def _bin_boundaries(
+    source_length: int, length: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Contiguous, order-preserving partition of source_length into `length`
+    bins of near-equal width (paper Eq. 7), cached per shape and device.
+    """
+    key = (source_length, length, device)
+    cached = _BIN_CACHE.get(key)
+    if cached is not None:
+        return cached
+    # Integer bin edges via Python ints (exact, no float64 needed - MPS has no
+    # float64 support), then moved to the target device as plain index tensors.
+    edges = [(index * source_length) // length for index in range(length + 1)]
+    starts_list = edges[:-1]
+    ends_list = [max(edges[index + 1], edges[index] + 1) for index in range(length)]
+    ends_list[-1] = source_length
+    starts = torch.tensor(starts_list, device=device, dtype=torch.long)
+    ends = torch.tensor(ends_list, device=device, dtype=torch.long)
+    _BIN_CACHE[key] = (starts, ends)
+    return starts, ends
+
+
 def _align(tokens: torch.Tensor, length: int) -> torch.Tensor:
-    """Adaptive average pool along the patch-token dimension (paper Eq. 6-8)."""
-    if tokens.size(1) == length:
+    """Bin-averaged alignment along the patch-token dimension (paper Eq. 6-8).
+
+    Equivalent to F.adaptive_avg_pool1d, implemented as an explicit partition
+    and matmul instead: the MPS backend rejects adaptive pooling whenever the
+    input size does not evenly divide the output size, which stride-based
+    multi-scale patch counts rarely satisfy. This is backend-portable and
+    exactly reproduces the same contiguous, non-overlapping bin averaging.
+    """
+    source_length = tokens.size(1)
+    if source_length == length:
         return tokens
-    return F.adaptive_avg_pool1d(tokens.transpose(1, 2), length).transpose(1, 2)
+    starts, ends = _bin_boundaries(source_length, length, tokens.device)
+    weights = torch.zeros(length, source_length, device=tokens.device, dtype=tokens.dtype)
+    for index, (start, end) in enumerate(zip(starts.tolist(), ends.tolist())):
+        weights[index, start:end] = 1.0 / (end - start)
+    return torch.einsum("qs,bsd->bqd", weights, tokens)
 
 
 def _align_mask(mask: torch.Tensor, length: int) -> torch.Tensor:
-    if mask.size(1) == length:
+    """A bin is valid iff any source position it covers is valid."""
+    source_length = mask.size(1)
+    if source_length == length:
         return mask
-    pooled = F.adaptive_max_pool1d(
-        mask.to(torch.float32).unsqueeze(1), length
-    ).squeeze(1)
-    return pooled > 0.5
+    starts, ends = _bin_boundaries(source_length, length, mask.device)
+    out = torch.zeros(mask.size(0), length, dtype=torch.bool, device=mask.device)
+    for index, (start, end) in enumerate(zip(starts.tolist(), ends.tolist())):
+        out[:, index] = mask[:, start:end].any(dim=1)
+    return out
 
 
 class MultiScalePatchEmbedder(nn.Module):
