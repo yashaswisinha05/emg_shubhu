@@ -1,0 +1,113 @@
+seed: 42
+experiment_name: "hf_patchtst_exact"
+
+paths:
+  data_root: "../MERGED DATA"
+  artifacts_dir: "artifacts"
+  manifest: "artifacts/manifest.csv"
+  cache_dir: "artifacts/cache"
+  split_file: "artifacts/trajectory_cv/a1/fold-0/split.json"
+  scaler: "artifacts/hf_patchtst_exact/a1/fold-0/scaler.npz"
+  output_dir: "runs/hf_patchtst_exact"
+
+data:
+  sample_rate_hz: 148.14814813792788
+  median_kernel: 3
+  emg_log1p: true
+  target: "click"
+  trajectory_end: "touch_time"
+  temporal_anchor: "touch_time"
+  imu_calibration_window_s: 0.3
+  include_raw_imu: true
+  min_duration_s: 0.25
+  max_duration_s: 10.0
+  outlier_policy: "exclude"
+  subject_aliases: {}
+
+cross_validation:
+  folds: 5
+  stratification_grid: [8, 5]
+
+# The task head and loss are unchanged from the continual-attention study.
+model:
+  prediction_mode: "direct_aux_grid"
+  grid_size: [8, 5]
+  d_model: 128
+  dropout: 0.15
+
+# These settings are passed directly to transformers.PatchTSTConfig. A fixed
+# 256-sample context covers 1.728 seconds at the dataset sample rate. Longer
+# trajectories retain their most recent 256 samples, including the endpoint.
+hf_patchtst:
+  context_length: 256
+  patch_length: 16
+  patch_stride: 8
+  num_hidden_layers: 3
+  d_model: 64
+  num_attention_heads: 4
+  channel_attention: true
+  share_embedding: true
+  ffn_dim: 256
+  norm_type: "layernorm"
+  norm_eps: 0.00001
+  attention_dropout: 0.10
+  positional_dropout: 0.10
+  path_dropout: 0.10
+  ff_dropout: 0.10
+  bias: true
+  activation_function: "gelu"
+  pre_norm: true
+  positional_encoding_type: "sincos"
+  use_cls_token: true
+  scaling: null
+
+continual:
+  enabled: true
+  interval_s: 0.2
+  random_prefixes_per_trajectory: 2
+  include_start_prediction: true
+  include_endpoint: true
+  minimum_prefix_weight: 0.5
+  start_prefix_weight: 0.35
+  prefix_weight_power: 1.0
+  validation_cutoffs_s: [0.0, 0.2, 0.4]
+  evaluation_cutoffs_s: [0.0, 0.2, 0.4]
+
+loss:
+  gaussian_sigma_cells: 0.5
+  gaussian_soft_fraction: 0.15
+  edge_weight: 0.5
+  heatmap_weight: 1.0
+  offset_weight: 0.5
+  pixel_weight: 1.0
+  radial_weight: 0.5
+  transport_weight: 0.5
+  offset_huber_beta: 0.1
+  pixel_huber_beta: 0.25
+  pixel_normalizer_px: 80.0
+  charbonnier_epsilon_px: 1.0
+
+training:
+  batch_size: 8
+  bucket_size_multiplier: 10
+  num_workers: 0
+  epochs: 25
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
+  patience: 7
+  scheduler_patience: 3
+  scheduler_factor: 0.5
+  minimum_learning_rate: 0.000001
+  amp: true
+  selection_metric: "weighted_mean_pixel_error"
+
+hf_patchtst_study:
+  epochs:
+    hf_patchtst_imu: 25
+    hf_patchtst_emg: 25
+    hf_patchtst_fusion: 25
+  patience:
+    hf_patchtst_imu: 7
+    hf_patchtst_emg: 7
+    hf_patchtst_fusion: 7

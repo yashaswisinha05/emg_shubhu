@@ -1,0 +1,61 @@
+seed: 42
+
+paths:
+  data_root: "../MERGED DATA"
+  artifacts_dir: "artifacts"
+  manifest: "artifacts/manifest.csv"
+  cache_dir: "artifacts/cache"
+  split_file: "artifacts/split.json"
+  scaler: "artifacts/scaler.npz"
+  output_dir: "runs/default"
+
+data:
+  sample_rate_hz: 148.14814813792788
+  context_length: 320
+  median_kernel: 3
+  future_imu_samples: 32
+  train_cutoffs_s: [0.1, 0.2, 0.3, 0.5, 0.75, 1.0]
+  eval_cutoffs_s: [0.0, 0.1, 0.2, 0.3, 0.5, -1.0]
+  full_trial_probability: 0.25
+  emg_log1p: true
+  target: "click"
+  # If yash1 and yash2 are the same physical participant, uncomment these.
+  subject_aliases: {}
+  # subject_aliases:
+  #   yash1: yash
+  #   yash2: yash
+
+model:
+  d_model: 128
+  num_layers: 4
+  num_heads: 4
+  ffn_dim: 512
+  dropout: 0.15
+  patch_length: 16
+  patch_stride: 8
+  tcn_kernel_sizes: [3, 7, 15]
+  imu_lookbacks_s: [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
+  head: "mdn"
+  mdn_components: 3
+  cvae_latent_dim: 8
+  screen_grid: [8, 5]
+
+training:
+  batch_size: 64
+  num_workers: 4
+  epochs: 80
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
+  patience: 12
+  amp: true
+  coord_huber_weight: 0.5
+  probabilistic_weight: 1.0
+  zone_weight: 0.1
+  future_imu_weight: 0.1
+  kl_beta: 0.01
+  kl_warmup_epochs: 15
+  distill_prediction_weight: 1.0
+  distill_feature_weight: 0.25
+  modality_dropout_probability: 0.15
+

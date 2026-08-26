@@ -1,0 +1,9 @@
+numpy<3,>=1.26
+pandas<3,>=2.1
+PyYAML<7,>=6.0
+scipy<2,>=1.11
+scikit-learn<2,>=1.4
+joblib<2,>=1.3
+torch<3,>=2.2
+tqdm<5,>=4.66
+transformers<6,>=4.57

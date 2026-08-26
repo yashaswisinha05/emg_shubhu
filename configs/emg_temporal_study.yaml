@@ -1,0 +1,75 @@
+seed: 42
+
+paths:
+  data_root: "../MERGED DATA"
+  artifacts_dir: "artifacts"
+  manifest: "artifacts/manifest.csv"
+  cache_dir: "artifacts/cache"
+  split_file: "artifacts/trajectory_cv/a1/fold-0/split.json"
+  scaler: "artifacts/emg_temporal_touch/a1/fold-0/scaler.npz"
+  output_dir: "runs/emg_temporal_touch"
+
+data:
+  sample_rate_hz: 148.14814813792788
+  median_kernel: 3
+  emg_log1p: true
+  target: "click"
+  min_duration_s: 0.25
+  max_duration_s: 10.0
+  outlier_policy: "exclude"
+  subject_aliases: {}
+  # touch_time_s maps the GUI click/save monotonic timestamp into signal time.
+  # reaction_time_s alone is cue-to-click duration and omits the recording pre-buffer.
+  trajectory_end: "touch_time"
+  temporal_anchor: "touch_time"
+  temporal_label: "causal_all"
+  emg_window_s: [null, 0.0]
+
+cross_validation:
+  folds: 5
+  stratification_grid: [8, 5]
+
+model:
+  d_model: 128
+  num_layers: 4
+  num_heads: 4
+  ffn_dim: 512
+  dropout: 0.15
+  patch_length: 16
+  patch_stride: 8
+  tcn_kernel_sizes: [3, 7, 15]
+
+training:
+  batch_size: 32
+  bucket_size_multiplier: 10
+  num_workers: 0
+  epochs: 40
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
+  patience: 10
+  huber_beta: 0.05
+  scheduler_patience: 4
+  scheduler_factor: 0.5
+  minimum_learning_rate: 0.000001
+  amp: true
+
+temporal_study:
+  # All times are seconds relative to touch (touch = 0).
+  windows:
+    - {name: causal_all, start_s: null, end_s: 0.0}
+    - {name: early_before_500ms, start_s: null, end_s: -0.5}
+    - {name: pre_touch_500_300ms, start_s: -0.5, end_s: -0.3}
+    - {name: pre_touch_300_150ms, start_s: -0.3, end_s: -0.15}
+    - {name: final_150ms, start_s: -0.15, end_s: 0.0}
+    - {name: final_300ms, start_s: -0.3, end_s: 0.0}
+    - {name: final_500ms, start_s: -0.5, end_s: 0.0}
+  epochs:
+    imu_patch: 15
+    emg_patch: 40
+    emg_residual: 8
+  patience:
+    imu_patch: 6
+    emg_patch: 10
+    emg_residual: 5
+  bootstrap_repeats: 5000
