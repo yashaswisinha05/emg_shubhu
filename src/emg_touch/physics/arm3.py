@@ -355,16 +355,36 @@ class ThreeDofArm(nn.Module):
     def acceleration(
         self, angles: torch.Tensor, velocity: torch.Tensor, torque: torch.Tensor
     ) -> torch.Tensor:
-        """Solve M @ theta_ddot = tau - C@qd - G - damping*qd for theta_ddot."""
-        residual = (
-            torque
-            - self.coriolis(angles, velocity)
-            - self.gravity(angles)
-            - self.damping * velocity
-        )
-        mass = self.mass_matrix(angles)
-        mass = _floor_min_eigenvalue_3x3(mass, floor=0.02)
-        return torch.linalg.solve(mass, residual.unsqueeze(-1)).squeeze(-1)
+        """Solve M @ theta_ddot = tau - C@qd - G - damping*qd for theta_ddot.
+
+        Forced to run outside autocast: under CUDA AMP, mass_matrix()'s
+        matmuls autocast to fp16 while the elementwise residual terms stay
+        fp32, so torch.linalg.solve sees mismatched dtypes (this integration
+        loop is numerically sensitive besides - the same reason substeps
+        exist - so full precision here regardless of the outer training
+        loop's autocast setting is the right call anyway, not just a dtype
+        workaround).
+        """
+        with torch.autocast(device_type=angles.device.type, enabled=False):
+            # Match the module's own buffer dtype (float32 normally; float64
+            # in precision-sensitive verification/testing that casts the
+            # whole module), not a hardcoded float32 - autocast only wraps
+            # ops, it never touches parameter/buffer dtypes, so this is the
+            # dtype every buffer below (link_mass, coriolis_k, ...) actually
+            # is.
+            compute_dtype = self.link_mass.dtype
+            angles = angles.to(compute_dtype)
+            velocity = velocity.to(compute_dtype)
+            torque = torque.to(compute_dtype)
+            residual = (
+                torque
+                - self.coriolis(angles, velocity)
+                - self.gravity(angles)
+                - self.damping * velocity
+            )
+            mass = self.mass_matrix(angles)
+            mass = _floor_min_eigenvalue_3x3(mass, floor=0.02)
+            return torch.linalg.solve(mass, residual.unsqueeze(-1)).squeeze(-1)
 
 
 def _jacobi_eigh_3x3(mass: torch.Tensor, sweeps: int = 4) -> tuple[torch.Tensor, torch.Tensor]:
