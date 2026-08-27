@@ -73,8 +73,14 @@ loss:
   pixel_huber_beta: 0.25
   pixel_normalizer_px: 80.0
   charbonnier_epsilon_px: 1.0
-  # Supervise the Hill rollout's own endpoint against the same click.
-  physics_weight: 0.1
+  # Supervise the physics rollout's own endpoint against the same click.
+  # Raised 10x from 0.1: at 0.1, physics_loss (~7-10 unweighted, from a real
+  # 15-epoch run) contributed only ~5-6% of total loss, and physics_blend
+  # stayed pinned at its ~0.018 init the whole run - not enough pressure to
+  # make physics_prediction accurate enough to be worth leaning on. This is
+  # a deliberate stress test of whether the branch is capable of an accurate
+  # endpoint at all, not a claim that 1.0 is the right operating point.
+  physics_weight: 1.0
   # Charge for residual torque so the Hill terms explain the motion rather
   # than the residual quietly absorbing all of it.
   physics_residual_weight: 0.01
