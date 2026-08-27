@@ -143,7 +143,8 @@ def main() -> None:
     for epoch in range(1, maximum_epochs + 1):
         model.train()
         if args.freeze_base_imu:
-            model.imu_model.eval()
+            frozen = model.fusion if hasattr(model, "fusion") else model
+            frozen.imu_model.eval()
         meters = {
             name: AverageMeter()
             for name in (
