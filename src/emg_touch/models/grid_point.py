@@ -12,6 +12,7 @@ from ..data.grid_trajectory import (
     grid_imu_sensor_indices,
 )
 from ..physics.rollout import PhysicsBranch
+from ..physics.rollout3 import PhysicsBranch3
 from .cross_variate import CrossVariateBackbone
 from .layers import PatchTransformerEncoder
 
@@ -23,6 +24,7 @@ GRID_MODEL_KINDS = (
     "grid_emg_first",
     "grid_crossvar",
     "grid_fusion_physics",
+    "grid_fusion_physics3",
 )
 
 
@@ -869,6 +871,48 @@ class GridFusionPhysicsRegressor(nn.Module):
         return outputs
 
 
+class GridFusionPhysics3Regressor(nn.Module):
+    """grid_fusion with a 3-DOF rigid-body physics branch sharing its encoder.
+
+    Same auxiliary-blend structure as GridFusionPhysicsRegressor, but the
+    physics branch is arm3.ThreeDofArm (2-shoulder + elbow, screw-theory
+    dynamics) driven by a plain torque MLP instead of the Hill muscle chain -
+    see physics/rollout3.py for why.
+    """
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        self.fusion = GridFusionRegressor(config)
+        self.physics = PhysicsBranch3(config)
+        physics = config.get("physics", {})
+        self.raw_blend = nn.Parameter(torch.tensor(float(physics.get("blend_init", -4.0))))
+
+    @property
+    def blend(self) -> torch.Tensor:
+        return torch.sigmoid(self.raw_blend)
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        outputs = self.fusion(batch)
+        physics = self.physics(
+            batch["emg"],
+            batch["emg_mask"],
+            batch["lengths"],
+            outputs["emg_context"],
+        )
+        outputs.update(physics)
+        outputs["fusion_prediction"] = outputs["prediction"]
+        blend = self.blend
+        outputs["physics_blend"] = blend.expand(outputs["prediction"].size(0))
+        blended = (
+            (1.0 - blend) * outputs["prediction"]
+            + blend * physics["physics_prediction"].clamp(0.0, 1.0)
+        )
+        outputs["prediction"] = blended
+        if "direct_prediction" in outputs:
+            outputs["direct_prediction"] = blended
+        return outputs
+
+
 def build_grid_model(kind: str, config: dict[str, Any]) -> nn.Module:
     if kind == "grid_imu":
         return GridIMURegressor(config)
@@ -882,4 +926,6 @@ def build_grid_model(kind: str, config: dict[str, Any]) -> nn.Module:
         return GridCrossVariateRegressor(config)
     if kind == "grid_fusion_physics":
         return GridFusionPhysicsRegressor(config)
+    if kind == "grid_fusion_physics3":
+        return GridFusionPhysics3Regressor(config)
     raise ValueError(f"Unknown grid model kind: {kind}")

@@ -343,9 +343,14 @@ def grid_point_loss(
     # An EMG-first model may lean on the IMU residual instead of learning from
     # EMG. Charging for the gate keeps IMU a last resort and makes the mean
     # gate a reportable measure of how much IMU the task requires.
-    # Physics branch: supervise the Hill rollout's own endpoint against the
-    # same click, and charge for residual torque so the Hill terms stay
-    # responsible for the motion rather than the residual absorbing it.
+    # Physics branch: supervise the rollout's own endpoint against the same
+    # click. The torque-magnitude charge keeps the branch physically honest -
+    # for the Hill model it is the residual torque (the part the Hill terms
+    # can't explain), for the plain-torque branch (rollout3) it is the whole
+    # commanded torque, since there is no separate physiological term to defer
+    # to; either way it discourages torque that only cancels out through
+    # clamping/eigenvalue-flooring rather than actually driving sensible
+    # motion.
     physics_loss = outputs["heatmap_logits"].new_zeros(())
     residual_loss = outputs["heatmap_logits"].new_zeros(())
     if "physics_prediction" in outputs:
@@ -355,9 +360,11 @@ def grid_point_loss(
         physics_loss = weighted_mean(
             torch.sqrt(physics_delta.square().sum(dim=-1) + epsilon * epsilon)
         )
-        residual_loss = weighted_mean(
-            outputs["physics_residual_torque"].square().mean(dim=-1)
-        )
+        torque_term = outputs.get("physics_residual_torque", outputs.get("physics_torque"))
+        # physics_residual_torque is (batch, joints); physics_torque is
+        # (batch, decimated_steps, joints) - flatten every trailing dim so
+        # both reduce to one scalar per trial before weighted_mean.
+        residual_loss = weighted_mean(torque_term.square().flatten(1).mean(dim=-1))
         total = (
             total
             + float(loss_config.get("physics_weight", 0.1)) * physics_loss
@@ -572,8 +579,13 @@ def evaluate_grid_model(
             if physics_prediction is not None:
                 record["physics_prediction_x"] = float(physics_prediction[index, 0])
                 record["physics_prediction_y"] = float(physics_prediction[index, 1])
-                record["physics_shoulder_rad"] = float(physics_angles[index, 0])
-                record["physics_elbow_rad"] = float(physics_angles[index, 1])
+                if physics_angles.size(-1) == 2:
+                    record["physics_shoulder_rad"] = float(physics_angles[index, 0])
+                    record["physics_elbow_rad"] = float(physics_angles[index, 1])
+                else:
+                    record["physics_shoulder1_rad"] = float(physics_angles[index, 0])
+                    record["physics_shoulder2_rad"] = float(physics_angles[index, 1])
+                    record["physics_elbow_rad"] = float(physics_angles[index, 2])
                 record["physics_blend"] = float(physics_blend[index])
                 record["fusion_prediction_x"] = float(fusion_prediction[index, 0])
                 record["fusion_prediction_y"] = float(fusion_prediction[index, 1])

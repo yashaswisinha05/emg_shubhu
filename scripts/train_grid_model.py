@@ -73,10 +73,11 @@ def main() -> None:
     if (args.pretrained_imu or args.freeze_base_imu) and args.kind not in (
         "grid_fusion",
         "grid_fusion_physics",
+        "grid_fusion_physics3",
     ):
         raise ValueError(
-            "Pretrained/frozen base IMU options require --kind grid_fusion "
-            "or grid_fusion_physics"
+            "Pretrained/frozen base IMU options require --kind grid_fusion, "
+            "grid_fusion_physics, or grid_fusion_physics3"
         )
     if args.freeze_base_imu and not args.pretrained_imu:
         raise ValueError("--freeze-base-imu requires --pretrained-imu")
