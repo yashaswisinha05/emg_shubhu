@@ -131,7 +131,12 @@ class HillMuscle(nn.Module):
         # Moment-arm magnitudes (m), paper Table 3 scale.
         self.raw_moment_arm = nn.Parameter(torch.zeros(muscles, 2))
         # Peak isometric force scale, multiplying the nominal values.
-        self.raw_force_scale = nn.Parameter(torch.zeros(muscles))
+        # raw=0 -> sigmoid(0)=0.5 -> the midpoint of [0.25,4.0] = 2.125x
+        # nominal, not 1.0x: at full-range init every muscle produced near
+        # its own peak isometric force at rest, which is where the outsized
+        # torques driving the dynamics unstable were traced to. Initialised
+        # instead so scale starts at 1.0x (raw = logit(0.75/3.75)).
+        self.raw_force_scale = nn.Parameter(torch.full((muscles,), -1.386294))
         self.register_buffer(
             "nominal_force",
             torch.tensor(NOMINAL_FORCE[:muscles], dtype=torch.float32),

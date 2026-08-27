@@ -34,6 +34,15 @@ class PhysicsBranch(nn.Module):
         # dynamics are far slower than 148 Hz.
         self.decimation = int(physics.get("decimation", 4))
         self.residual_scale = float(physics.get("residual_torque_scale", 5.0))
+        # Muscle torque divided by this arm's rotational inertia gives
+        # accelerations of order 10^2 rad/s^2 (measured: mass matrix diagonal
+        # ~0.03-0.5 kg*m^2 against ~15 N*m of elbow torque). A single
+        # semi-implicit Euler step at the decimated interval (~27 ms) can then
+        # change velocity by several rad/s in one step - unconditionally
+        # unstable, not merely inaccurate. Sub-stepping the integration within
+        # each recorded interval keeps the physics stable without changing
+        # what gets recorded in physics_trajectory.
+        self.substeps = int(physics.get("substeps", 8))
 
         self.activation = ActivationDynamics(4, self.sample_rate_hz)
         self.muscle = HillMuscle(4)
@@ -77,23 +86,35 @@ class PhysicsBranch(nn.Module):
         velocity = state[:, 2:] * 0.5
         residual = torch.tanh(self.residual_torque(context)) * self.residual_scale
 
-        dt = self.decimation / self.sample_rate_hz
+        dt = self.decimation / self.sample_rate_hz / self.substeps
         indices = list(range(0, steps, self.decimation))
+        lower = torch.tensor([-1.8, 0.0], device=angles.device, dtype=angles.dtype)
+        upper = torch.tensor([1.8, 2.8], device=angles.device, dtype=angles.dtype)
         # Only integrate while a sample is inside the trial's causal prefix;
         # padded steps must not advance the state.
         trajectory = []
         for step in indices:
             active = (step < lengths).to(angles.dtype).unsqueeze(-1)
-            torque = self.muscle.torque(activation[:, step], angles, velocity) + residual
-            acceleration = self.arm.acceleration(angles, velocity, torque)
-            # Semi-implicit Euler: symplectic, and stable at this step size
-            # where explicit Euler drifts.
-            velocity = velocity + active * dt * acceleration
-            velocity = velocity.clamp(-25.0, 25.0)
-            angles = angles + active * dt * velocity
-            angles = torch.stack(
-                [angles[..., 0].clamp(-1.8, 1.8), angles[..., 1].clamp(0.0, 2.8)], dim=-1
-            )
+            for _ in range(self.substeps):
+                torque = (
+                    self.muscle.torque(activation[:, step], angles, velocity) + residual
+                )
+                acceleration = self.arm.acceleration(angles, velocity, torque)
+                # Semi-implicit Euler: symplectic, and stable at this step
+                # size where explicit Euler drifts.
+                velocity = velocity + active * dt * acceleration
+                velocity = velocity.clamp(-25.0, 25.0)
+                unclamped = angles + active * dt * velocity
+                angles = unclamped.clamp(lower, upper)
+                # An inelastic joint stop: clamping position alone leaves
+                # velocity driving into the wall untouched, so the next step
+                # reclamps to the same limit and the joint is pinned there
+                # permanently, independent of any later change in torque.
+                # Zeroing the velocity component that caused the clamp lets a
+                # torque reversal - a change in EMG - lift the joint off the
+                # stop on a later step.
+                at_limit = unclamped != angles
+                velocity = torch.where(at_limit, torch.zeros_like(velocity), velocity)
             trajectory.append(angles)
 
         final = angles
