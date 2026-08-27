@@ -125,7 +125,7 @@ def main() -> None:
     epoch_config = sweep.get("epochs", {})
     patience_config = sweep.get("patience", {})
     required_models = set(args.models)
-    if "grid_fusion" in required_models:
+    if required_models & {"grid_fusion", "grid_fusion_physics"}:
         required_models.add("grid_imu")
     ordered_models = [kind for kind in GRID_MODEL_KINDS if kind in required_models]
 
@@ -186,7 +186,7 @@ def main() -> None:
                     "--patience",
                     str(int(patience_config.get(kind, config["training"]["patience"]))),
                 ]
-                if kind == "grid_fusion":
+                if kind in ("grid_fusion", "grid_fusion_physics"):
                     imu_checkpoint = fold_runs / "grid_imu" / "best.pt"
                     if not imu_checkpoint.is_file():
                         failures.append(

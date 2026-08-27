@@ -11,6 +11,7 @@ from ..data.grid_trajectory import (
     grid_imu_feature_dim,
     grid_imu_sensor_indices,
 )
+from ..physics.rollout import PhysicsBranch
 from .cross_variate import CrossVariateBackbone
 from .layers import PatchTransformerEncoder
 
@@ -21,6 +22,7 @@ GRID_MODEL_KINDS = (
     "grid_fusion",
     "grid_emg_first",
     "grid_crossvar",
+    "grid_fusion_physics",
 )
 
 
@@ -813,6 +815,60 @@ class GridCrossVariateRegressor(nn.Module):
         return outputs
 
 
+class GridFusionPhysicsRegressor(nn.Module):
+    """grid_fusion with a Hill-model physics branch sharing its encoder.
+
+    The fusion coordinate head is unchanged and still carries the prediction.
+    The physics branch integrates the Hill-driven two-link arm from EMG and
+    emits its own endpoint estimate, supervised against the same click. It is
+    auxiliary by construction: forward kinematics needs roughly 3 degrees of
+    arm-orientation accuracy to match what the learned head already achieves,
+    and IMU orientation here is 12-19 degrees, so physics cannot be trusted to
+    carry the coordinate. What it can do is give EMG a structured pathway -
+    activation, force, torque, joint angle - and shape the shared encoder
+    through the auxiliary loss.
+    """
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        self.fusion = GridFusionRegressor(config)
+        self.physics = PhysicsBranch(config)
+        physics = config.get("physics", {})
+        # Blend weight for folding the physics endpoint into the reported
+        # coordinate. Zero-initialised, so the model starts as exactly
+        # grid_fusion and physics has to earn any influence.
+        self.raw_blend = nn.Parameter(torch.tensor(float(physics.get("blend_init", -4.0))))
+
+    @property
+    def blend(self) -> torch.Tensor:
+        return torch.sigmoid(self.raw_blend)
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        outputs = self.fusion(batch)
+        physics = self.physics(
+            batch["emg"],
+            batch["emg_mask"],
+            batch["lengths"],
+            outputs["emg_context"],
+        )
+        outputs.update(physics)
+        outputs["fusion_prediction"] = outputs["prediction"]
+        blend = self.blend
+        outputs["physics_blend"] = blend.expand(outputs["prediction"].size(0))
+        blended = (
+            (1.0 - blend) * outputs["prediction"]
+            + blend * physics["physics_prediction"].clamp(0.0, 1.0)
+        )
+        outputs["prediction"] = blended
+        # grid_point_loss optimises direct_prediction while evaluation reads
+        # prediction. Both must be the blended coordinate, otherwise the blend
+        # weight receives no gradient and the model is scored on a quantity it
+        # never trained.
+        if "direct_prediction" in outputs:
+            outputs["direct_prediction"] = blended
+        return outputs
+
+
 def build_grid_model(kind: str, config: dict[str, Any]) -> nn.Module:
     if kind == "grid_imu":
         return GridIMURegressor(config)
@@ -824,4 +880,6 @@ def build_grid_model(kind: str, config: dict[str, Any]) -> nn.Module:
         return GridEMGFirstRegressor(config)
     if kind == "grid_crossvar":
         return GridCrossVariateRegressor(config)
+    if kind == "grid_fusion_physics":
+        return GridFusionPhysicsRegressor(config)
     raise ValueError(f"Unknown grid model kind: {kind}")

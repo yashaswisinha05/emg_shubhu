@@ -38,7 +38,8 @@ def load_grid_imu(model: torch.nn.Module, checkpoint_path: str) -> None:
         raise ValueError(
             f"Expected grid_imu checkpoint, found {checkpoint.get('model_kind')!r}"
         )
-    model.imu_model.load_state_dict(checkpoint["model_state"], strict=True)
+    target = model.fusion if hasattr(model, "fusion") else model
+    target.imu_model.load_state_dict(checkpoint["model_state"], strict=True)
     print(f"Initialized exact grid IMU model from {checkpoint_path}")
 
 
@@ -69,8 +70,14 @@ def main() -> None:
         config["training"]["epochs"] = args.epochs
     if args.patience is not None:
         config["training"]["patience"] = args.patience
-    if (args.pretrained_imu or args.freeze_base_imu) and args.kind != "grid_fusion":
-        raise ValueError("Pretrained/frozen base IMU options require --kind grid_fusion")
+    if (args.pretrained_imu or args.freeze_base_imu) and args.kind not in (
+        "grid_fusion",
+        "grid_fusion_physics",
+    ):
+        raise ValueError(
+            "Pretrained/frozen base IMU options require --kind grid_fusion "
+            "or grid_fusion_physics"
+        )
     if args.freeze_base_imu and not args.pretrained_imu:
         raise ValueError("--freeze-base-imu requires --pretrained-imu")
 
@@ -83,7 +90,8 @@ def main() -> None:
     if args.pretrained_imu:
         load_grid_imu(model, args.pretrained_imu)
     if args.freeze_base_imu:
-        for parameter in model.imu_model.parameters():
+        frozen = model.fusion if hasattr(model, "fusion") else model
+        for parameter in frozen.imu_model.parameters():
             parameter.requires_grad_(False)
         print("Frozen exact pretrained grid IMU model")
 

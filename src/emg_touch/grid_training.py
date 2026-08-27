@@ -343,6 +343,27 @@ def grid_point_loss(
     # An EMG-first model may lean on the IMU residual instead of learning from
     # EMG. Charging for the gate keeps IMU a last resort and makes the mean
     # gate a reportable measure of how much IMU the task requires.
+    # Physics branch: supervise the Hill rollout's own endpoint against the
+    # same click, and charge for residual torque so the Hill terms stay
+    # responsible for the motion rather than the residual absorbing it.
+    physics_loss = outputs["heatmap_logits"].new_zeros(())
+    residual_loss = outputs["heatmap_logits"].new_zeros(())
+    if "physics_prediction" in outputs:
+        physics_delta = (
+            outputs["physics_prediction"] - batch["target"]
+        ) * batch["canvas_size"] / pixel_unit
+        physics_loss = weighted_mean(
+            torch.sqrt(physics_delta.square().sum(dim=-1) + epsilon * epsilon)
+        )
+        residual_loss = weighted_mean(
+            outputs["physics_residual_torque"].square().mean(dim=-1)
+        )
+        total = (
+            total
+            + float(loss_config.get("physics_weight", 0.1)) * physics_loss
+            + float(loss_config.get("physics_residual_weight", 0.01)) * residual_loss
+        )
+
     gate_penalty = outputs["heatmap_logits"].new_zeros(())
     gate_weight = float(loss_config.get("imu_gate_weight", 0.0))
     if "imu_gate" in outputs:
@@ -358,6 +379,8 @@ def grid_point_loss(
         "radial_loss": radial_loss,
         "transport_loss": transport_loss,
         "imu_gate_penalty": gate_penalty,
+        "physics_loss": physics_loss,
+        "physics_residual_loss": residual_loss,
     }
 
 
@@ -486,6 +509,15 @@ def evaluate_grid_model(
             cross_variate = cross_variate.detach().cpu()
         if scale_gate is not None:
             scale_gate = scale_gate.detach().cpu()
+        physics_prediction = outputs.get("physics_prediction")
+        physics_angles = outputs.get("physics_angles")
+        physics_blend = outputs.get("physics_blend")
+        fusion_prediction = outputs.get("fusion_prediction")
+        if physics_prediction is not None:
+            physics_prediction = physics_prediction.detach().cpu()
+            physics_angles = physics_angles.detach().cpu()
+            physics_blend = physics_blend.detach().cpu()
+            fusion_prediction = fusion_prediction.detach().cpu()
         imu_gate = outputs.get("imu_gate")
         if imu_gate is not None:
             imu_gate = imu_gate.detach().cpu().reshape(-1)
@@ -537,6 +569,14 @@ def evaluate_grid_model(
                 record["emg_reliability"] = float(reliability[index])
             if imu_gate is not None:
                 record["imu_gate"] = float(imu_gate[index])
+            if physics_prediction is not None:
+                record["physics_prediction_x"] = float(physics_prediction[index, 0])
+                record["physics_prediction_y"] = float(physics_prediction[index, 1])
+                record["physics_shoulder_rad"] = float(physics_angles[index, 0])
+                record["physics_elbow_rad"] = float(physics_angles[index, 1])
+                record["physics_blend"] = float(physics_blend[index])
+                record["fusion_prediction_x"] = float(fusion_prediction[index, 0])
+                record["fusion_prediction_y"] = float(fusion_prediction[index, 1])
             if variate_attention is not None:
                 for position, name in enumerate(VARIATE_NAMES):
                     record[f"variate_attention_{name}"] = float(
