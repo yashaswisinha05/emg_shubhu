@@ -46,6 +46,9 @@ def main() -> None:
     raw_emg_mask: list[np.ndarray] = []
     raw_sessions: list[str] = []
     derived = bool(config["data"].get("emg_derived_channels", False))
+    derivative = bool(config["data"].get("emg_derivative_channels", False))
+    derivative_window = int(config["data"].get("emg_derivative_window", 21))
+    sample_rate = float(config["data"]["sample_rate_hz"])
     session_normalise = bool(
         config["data"].get("emg_session_normalise", False)
     )
@@ -104,8 +107,15 @@ def main() -> None:
             reference_by_session[session] if session_normalise else None,
             derived,
             log1p,
+            derivative=derivative,
+            sample_rate_hz=sample_rate,
+            derivative_window=derivative_window,
         ).astype(np.float64)
-        full_mask = extend_emg_mask(mask) if derived else mask
+        full_mask = (
+            extend_emg_mask(mask, derivative=derivative, derived=derived)
+            if (derived or derivative)
+            else mask
+        )
         features[~full_mask] = np.nan
         emg_values.append(features)
 
@@ -121,6 +131,9 @@ def main() -> None:
         imu_scale=imu_scale,
         emg_log1p=np.asarray(log1p),
         emg_derived=np.asarray(derived),
+        emg_derivative=np.asarray(derivative),
+        emg_derivative_window=np.asarray(derivative_window),
+        emg_sample_rate_hz=np.asarray(sample_rate),
         session_keys=np.asarray(session_keys if session_normalise else [], dtype="<U64"),
         session_reference=session_reference
         if session_normalise
@@ -130,7 +143,8 @@ def main() -> None:
     print(
         f"Wrote grid scaler to {output.resolve()} "
         f"(EMG={len(emg_center)}, IMU={len(imu_center)}, "
-        f"sessions={len(session_keys) if session_normalise else 0}, derived={derived})"
+        f"sessions={len(session_keys) if session_normalise else 0}, "
+        f"derived={derived}, derivative={derivative})"
     )
 
 

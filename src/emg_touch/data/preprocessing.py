@@ -112,6 +112,9 @@ class RobustScaler:
     session_reference: np.ndarray | None = None
     session_fallback: np.ndarray | None = None
     emg_derived: bool = False
+    emg_derivative: bool = False
+    emg_derivative_window: int = 21
+    emg_sample_rate_hz: float = 148.14814813792788
 
     @classmethod
     def load(cls, path: str | Path) -> "RobustScaler":
@@ -135,6 +138,15 @@ class RobustScaler:
             emg_derived=bool(data["emg_derived"].item())
             if "emg_derived" in data
             else False,
+            emg_derivative=bool(data["emg_derivative"].item())
+            if "emg_derivative" in data
+            else False,
+            emg_derivative_window=int(data["emg_derivative_window"].item())
+            if "emg_derivative_window" in data
+            else 21,
+            emg_sample_rate_hz=float(data["emg_sample_rate_hz"].item())
+            if "emg_sample_rate_hz" in data
+            else 148.14814813792788,
         )
 
     def emg_session_reference(self, participant_id: str | None) -> np.ndarray | None:
@@ -166,6 +178,9 @@ class RobustScaler:
             self.emg_session_reference(participant_id),
             self.emg_derived,
             self.emg_log1p,
+            derivative=self.emg_derivative,
+            sample_rate_hz=self.emg_sample_rate_hz,
+            derivative_window=self.emg_derivative_window,
         )
         return (features - self.emg_center) / self.emg_scale
 

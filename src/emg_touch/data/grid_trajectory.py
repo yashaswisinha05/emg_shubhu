@@ -56,17 +56,17 @@ EMG_DERIVED_NAMES = (
 
 
 def emg_channel_count(data_config: dict[str, Any]) -> int:
-    base = len(EMG_COLUMNS)
-    if bool(data_config.get("emg_derived_channels", False)):
-        return base + len(EMG_DERIVED_NAMES)
-    return base
+    return len(emg_channel_names(data_config))
 
 
 def emg_channel_names(data_config: dict[str, Any]) -> tuple[str, ...]:
-    base = tuple(SENSORS)
+    """Channel order must match raw_emg_features: amplitude, derivative, derived."""
+    names = tuple(SENSORS)
+    if bool(data_config.get("emg_derivative_channels", False)):
+        names = names + tuple(f"d_{sensor}" for sensor in SENSORS)
     if bool(data_config.get("emg_derived_channels", False)):
-        return base + EMG_DERIVED_NAMES
-    return base
+        names = names + EMG_DERIVED_NAMES
+    return names
 
 
 def append_emg_derived_channels(
@@ -98,13 +98,59 @@ def append_emg_derived_channels(
     )
 
 
-def extend_emg_mask(emg_mask: np.ndarray) -> np.ndarray:
-    """Validity for the derived channels: both source electrodes must be valid."""
-    valid = [
-        emg_mask[:, agonist] & emg_mask[:, antagonist]
-        for agonist, antagonist in EMG_ANTAGONIST_PAIRS
-    ]
-    return np.concatenate([emg_mask, np.stack(valid + valid, axis=1)], axis=1)
+def extend_emg_mask(
+    emg_mask: np.ndarray, derivative: bool = False, derived: bool = True
+) -> np.ndarray:
+    """Mask for the appended channels, in the same order raw_emg_features emits.
+
+    A derivative sample needs the present and previous amplitude sample; a
+    derived channel needs both of its source electrodes.
+    """
+    parts = [emg_mask]
+    if derivative:
+        shifted = np.zeros_like(emg_mask)
+        shifted[1:] = emg_mask[1:] & emg_mask[:-1]
+        parts.append(shifted)
+    if derived:
+        valid = [
+            emg_mask[:, agonist] & emg_mask[:, antagonist]
+            for agonist, antagonist in EMG_ANTAGONIST_PAIRS
+        ]
+        parts.append(np.stack(valid + valid, axis=1))
+    return np.concatenate(parts, axis=1)
+
+
+def causal_moving_average(values: np.ndarray, window: int) -> np.ndarray:
+    """Trailing mean over `window` samples. Strictly causal: sample t averages
+    only t-window+1..t, so no future sample can influence the present one.
+    """
+    if window <= 1:
+        return values
+    padded = np.concatenate(
+        [np.repeat(values[:1], window - 1, axis=0), values], axis=0
+    )
+    cumulative = np.cumsum(padded, axis=0)
+    cumulative = np.concatenate(
+        [np.zeros((1, values.shape[1]), dtype=cumulative.dtype), cumulative], axis=0
+    )
+    return (cumulative[window:] - cumulative[:-window]) / float(window)
+
+
+def emg_derivative(
+    amplitude: np.ndarray, sample_rate_hz: float, window: int
+) -> np.ndarray:
+    """Causal first derivative of the smoothed envelope, in units per second.
+
+    Smoothing first is not optional: the RMS envelope has a ~540 ms
+    autocorrelation timescale, so a bare sample-to-sample difference at
+    ~148 Hz is dominated by noise. A probe on a1 showed a 21-sample trailing
+    window beating an unsmoothed difference by ~30 px.
+    """
+    smoothed = causal_moving_average(amplitude, window)
+    derivative = np.zeros_like(smoothed)
+    if len(smoothed) > 1:
+        derivative[1:] = np.diff(smoothed, axis=0) * float(sample_rate_hz)
+    return derivative
 
 
 def raw_emg_features(
@@ -113,17 +159,22 @@ def raw_emg_features(
     reference: np.ndarray | None,
     derived: bool,
     log1p: bool,
+    derivative: bool = False,
+    sample_rate_hz: float = 148.14814813792788,
+    derivative_window: int = 21,
 ) -> np.ndarray:
-    """Session-normalise, optionally append antagonist channels, then log1p.
+    """Session-normalise, then append optional derivative and antagonist channels.
 
-    log1p is applied only to the amplitude channels. The derived channels are
-    log-ratios and bounded co-contraction indices, which are already
-    signed/normalised and must not be passed through log1p.
+    log1p is applied only to the amplitude channels. Derivative channels are
+    signed rates and antagonist channels are log-ratios / bounded indices, so
+    neither may pass through log1p.
     """
     base = np.maximum(emg[:, : len(EMG_COLUMNS)], 0.0)
     if reference is not None:
         base = base / np.maximum(reference, 1e-9)
     parts = [np.log1p(base) if log1p else base]
+    if derivative:
+        parts.append(emg_derivative(base, sample_rate_hz, derivative_window))
     if derived:
         stacked, _ = append_emg_derived_channels(base, emg_mask[:, : len(EMG_COLUMNS)])
         parts.append(stacked[:, len(EMG_COLUMNS) :])
@@ -371,15 +422,23 @@ def preprocess_grid_signals(
     # session's gain reference before any normalisation is applied.
     raw_emg_amplitudes = emg.astype(np.float32).copy()
     raw_emg_amplitude_mask = emg_mask.copy()
-    if derived:
-        emg_mask = extend_emg_mask(emg_mask)
+    derivative = bool(data_config.get("emg_derivative_channels", False))
+    if derived or derivative:
+        emg_mask = extend_emg_mask(emg_mask, derivative=derivative, derived=derived)
     if scaler is None:
         # Scaler-fitting pass. Session references are not known yet, so emit
         # the same channel layout the fitted scaler will produce, using the
         # unnormalised amplitudes as the basis for the derived channels.
-        emg = raw_emg_features(emg, emg_mask, None, derived, bool(
-            data_config.get("emg_log1p", True)
-        ))
+        emg = raw_emg_features(
+            emg,
+            emg_mask,
+            None,
+            derived,
+            bool(data_config.get("emg_log1p", True)),
+            derivative=derivative,
+            sample_rate_hz=sample_rate,
+            derivative_window=int(data_config.get("emg_derivative_window", 21)),
+        )
     else:
         emg = scaler.transform_emg(emg, participant_id).astype(np.float32)
         imu_features = scaler.transform_imu(imu_features).astype(np.float32)
