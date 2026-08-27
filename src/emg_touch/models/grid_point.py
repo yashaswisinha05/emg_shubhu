@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 from ..data.grid_trajectory import (
+    emg_channel_count,
     grid_imu_feature_dim,
     grid_imu_sensor_indices,
 )
@@ -383,11 +384,12 @@ class EMGEndpointBackbone(nn.Module):
         model = config["model"]
         data = config["data"]
         d_model = int(model["d_model"])
+        emg_channels = emg_channel_count(data)
         attention = config.get("channel_attention", {})
         self.input_attention = (
             HierarchicalChannelAttention(
-                4,
-                tuple(range(4)),
+                emg_channels,
+                tuple(range(emg_channels)),
                 int(attention.get("hidden_dim", 32)),
                 float(attention.get("residual_strength", 0.5)),
             )
@@ -402,14 +404,14 @@ class EMGEndpointBackbone(nn.Module):
         self.samples_300 = max(
             minimum, int(math.ceil(float(model.get("emg_short_s", 0.3)) * sample_rate))
         )
-        self.encoder_500 = MaskAwarePatchEncoder(4, model)
-        self.encoder_300 = MaskAwarePatchEncoder(4, model)
+        self.encoder_500 = MaskAwarePatchEncoder(emg_channels, model)
+        self.encoder_300 = MaskAwarePatchEncoder(emg_channels, model)
         # Both endpoint windows discard most of a typical reach, so the
         # anticipatory pre-movement burst never reaches the head. When enabled,
         # a third encoder reads the entire causal prefix alongside them.
         self.full_context = bool(model.get("emg_full_context", False))
         self.full_encoder = (
-            MaskAwarePatchEncoder(4, model) if self.full_context else None
+            MaskAwarePatchEncoder(emg_channels, model) if self.full_context else None
         )
         windows = 3 if self.full_context else 2
         quality_dim = 4 * windows

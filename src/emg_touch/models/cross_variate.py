@@ -7,8 +7,8 @@ Three ideas from Qarni et al., MCV-PatchTST, adapted rather than copied:
    times slower than the existing 108 ms patch, so shorter patches would only
    resolve noise. Default scales are {16, 32, 64} samples = {108, 216, 432} ms.
 
-2. Cross-variate patch attention over eight *physical* variate tokens - the four
-   EMG electrodes and the four IMU sensors - instead of over all 92 raw
+2. Cross-variate patch attention over *physical* variate tokens - each EMG
+   channel and each of the four IMU sensors - instead of over all 92 raw
    channels. The paper's O(N C^2 d) term is 8464 at C=92 but 64 at C=8, matching
    the paper's own cost, and the resulting 8x8 attention map is interpretable.
    Applied once, before temporal encoding, as the paper prescribes.
@@ -29,7 +29,6 @@ import torch.nn.functional as F
 
 from .layers import MultiScaleCausalStem
 
-EMG_CHANNELS = 4
 IMU_SENSORS = 4
 
 
@@ -214,9 +213,15 @@ class CrossVariateBackbone(nn.Module):
         dropout = float(model["dropout"])
         self.d_model = d_model
         self.sample_rate = float(data["sample_rate_hz"])
-        self.variates = EMG_CHANNELS + IMU_SENSORS
+        from ..data.grid_trajectory import (
+            emg_channel_count,
+            grid_imu_sensor_indices,
+        )
 
-        from ..data.grid_trajectory import grid_imu_sensor_indices
+        # Each EMG channel is its own variate token, so derived antagonist
+        # channels increase the variate count alongside the four electrodes.
+        self.emg_channels = emg_channel_count(data)
+        self.variates = self.emg_channels + IMU_SENSORS
 
         sensor_indices = torch.tensor(grid_imu_sensor_indices(data), dtype=torch.long)
         self.register_buffer("sensor_indices", sensor_indices, persistent=False)
@@ -289,8 +294,8 @@ class CrossVariateBackbone(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         batch = emg.size(0)
 
-        emg_values = emg.permute(0, 2, 1).unsqueeze(-1).reshape(batch * EMG_CHANNELS, -1, 1)
-        emg_masks = emg_mask.permute(0, 2, 1).unsqueeze(-1).reshape(batch * EMG_CHANNELS, -1, 1)
+        emg_values = emg.permute(0, 2, 1).unsqueeze(-1).reshape(batch * self.emg_channels, -1, 1)
+        emg_masks = emg_mask.permute(0, 2, 1).unsqueeze(-1).reshape(batch * self.emg_channels, -1, 1)
         emg_tokens, emg_patch_mask, emg_gate = self.emg_embedder(emg_values, emg_masks)
 
         imu_grouped, imu_grouped_mask = self._imu_by_sensor(imu, imu_mask)
@@ -300,9 +305,9 @@ class CrossVariateBackbone(nn.Module):
 
         # Both modalities must share one patch axis before channel mixing.
         patches = min(emg_tokens.size(1), imu_tokens.size(1))
-        emg_tokens = _align(emg_tokens, patches).reshape(batch, EMG_CHANNELS, patches, -1)
+        emg_tokens = _align(emg_tokens, patches).reshape(batch, self.emg_channels, patches, -1)
         imu_tokens = _align(imu_tokens, patches).reshape(batch, IMU_SENSORS, patches, -1)
-        emg_patch_mask = _align_mask(emg_patch_mask, patches).reshape(batch, EMG_CHANNELS, patches)
+        emg_patch_mask = _align_mask(emg_patch_mask, patches).reshape(batch, self.emg_channels, patches)
         imu_patch_mask = _align_mask(imu_patch_mask, patches).reshape(batch, IMU_SENSORS, patches)
 
         tokens = torch.cat([emg_tokens, imu_tokens], dim=1)
@@ -345,7 +350,7 @@ class CrossVariateBackbone(nn.Module):
         ).mean(dim=1)
         scale_gate = torch.cat(
             [
-                emg_gate.reshape(batch, EMG_CHANNELS, -1).mean(dim=1),
+                emg_gate.reshape(batch, self.emg_channels, -1).mean(dim=1),
                 imu_gate.reshape(batch, IMU_SENSORS, -1).mean(dim=1),
             ],
             dim=-1,

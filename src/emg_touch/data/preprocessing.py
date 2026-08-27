@@ -104,21 +104,70 @@ class RobustScaler:
     imu_center: np.ndarray
     imu_scale: np.ndarray
     emg_log1p: bool = True
+    # Per-session EMG gain references, keyed by participant_id. A single pooled
+    # scale cannot remove a per-session multiplicative gain, and measured EMG
+    # amplitude varies 2.1x-7.3x between a1 sessions from electrode impedance,
+    # skin preparation, adiposity and placement. Fitted on training trials only.
+    session_keys: tuple[str, ...] = ()
+    session_reference: np.ndarray | None = None
+    session_fallback: np.ndarray | None = None
+    emg_derived: bool = False
 
     @classmethod
     def load(cls, path: str | Path) -> "RobustScaler":
-        data = np.load(path)
+        data = np.load(path, allow_pickle=False)
+        keys: tuple[str, ...] = ()
+        reference = None
+        fallback = None
+        if "session_keys" in data:
+            keys = tuple(str(key) for key in data["session_keys"])
+            reference = data["session_reference"]
+            fallback = data["session_fallback"]
         return cls(
             emg_center=data["emg_center"],
             emg_scale=data["emg_scale"],
             imu_center=data["imu_center"],
             imu_scale=data["imu_scale"],
             emg_log1p=bool(data["emg_log1p"].item()),
+            session_keys=keys,
+            session_reference=reference,
+            session_fallback=fallback,
+            emg_derived=bool(data["emg_derived"].item())
+            if "emg_derived" in data
+            else False,
         )
 
-    def transform_emg(self, values: np.ndarray) -> np.ndarray:
-        values = np.log1p(np.maximum(values, 0.0)) if self.emg_log1p else values
-        return (values - self.emg_center) / self.emg_scale
+    def emg_session_reference(self, participant_id: str | None) -> np.ndarray | None:
+        """Gain reference for one session, or the cross-session median if the
+        session was never seen in training (an unseen participant at test time).
+        """
+        if self.session_reference is None:
+            return None
+        if participant_id is not None:
+            for index, key in enumerate(self.session_keys):
+                if key == participant_id:
+                    return self.session_reference[index]
+        return self.session_fallback
+
+    def transform_emg(
+        self,
+        values: np.ndarray,
+        participant_id: str | None = None,
+        mask: np.ndarray | None = None,
+    ) -> np.ndarray:
+        # Imported lazily: grid_trajectory imports this module at load time.
+        from .grid_trajectory import raw_emg_features
+
+        if mask is None:
+            mask = np.ones(values.shape, dtype=bool)
+        features = raw_emg_features(
+            values,
+            mask,
+            self.emg_session_reference(participant_id),
+            self.emg_derived,
+            self.emg_log1p,
+        )
+        return (features - self.emg_center) / self.emg_scale
 
     def transform_imu(self, values: np.ndarray) -> np.ndarray:
         return (values - self.imu_center) / self.imu_scale

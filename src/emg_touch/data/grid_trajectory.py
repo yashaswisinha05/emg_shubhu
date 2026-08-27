@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, Dataset
 from .full_trajectory import LengthBucketBatchSampler, trajectory_analysis_interval
 from .manifest import load_manifest
 from .preprocessing import RobustScaler, causal_median_filter, previous_sample_resample
-from .schema import IMU_COLUMNS, SENSORS
+from .schema import EMG_COLUMNS, IMU_COLUMNS, SENSORS
 from .splits import subset_from_trial_ids
 from ..utils import load_json
 
@@ -40,6 +40,94 @@ CALIBRATED_FEATURE_NAMES_PER_SENSOR = (
     "jerk_magnitude",
     "angular_acceleration_magnitude",
 )
+
+
+# Physiological antagonist pairings of the four electrodes. Ratios between an
+# agonist and its antagonist are invariant to a common per-session gain, so
+# they survive electrode/impedance/placement differences that raw amplitudes
+# do not. Index order matches schema.SENSORS: S0=AD, S4=LD, S8=BB, S12=TB.
+EMG_ANTAGONIST_PAIRS = ((0, 1), (2, 3))  # (AD, LD) shoulder, (BB, TB) elbow
+EMG_DERIVED_NAMES = (
+    "log_ratio_AD_LD",
+    "log_ratio_BB_TB",
+    "cocontraction_shoulder",
+    "cocontraction_elbow",
+)
+
+
+def emg_channel_count(data_config: dict[str, Any]) -> int:
+    base = len(EMG_COLUMNS)
+    if bool(data_config.get("emg_derived_channels", False)):
+        return base + len(EMG_DERIVED_NAMES)
+    return base
+
+
+def emg_channel_names(data_config: dict[str, Any]) -> tuple[str, ...]:
+    base = tuple(SENSORS)
+    if bool(data_config.get("emg_derived_channels", False)):
+        return base + EMG_DERIVED_NAMES
+    return base
+
+
+def append_emg_derived_channels(
+    emg: np.ndarray, emg_mask: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Append gain-invariant antagonist ratios and co-contraction indices.
+
+    Computed on session-normalised, pre-log1p amplitudes so the ratio is
+    between comparable quantities. A derived channel is valid only where both
+    of its source electrodes are valid.
+    """
+    epsilon = 1e-4
+    safe = np.maximum(emg, 0.0) + epsilon
+    ratios, cocontractions, valid = [], [], []
+    for agonist, antagonist in EMG_ANTAGONIST_PAIRS:
+        ratios.append(np.log(safe[:, agonist] / safe[:, antagonist]))
+        # Co-contraction: how much both sides of the joint fire together.
+        cocontractions.append(
+            np.minimum(safe[:, agonist], safe[:, antagonist])
+            / np.maximum(safe[:, agonist], safe[:, antagonist])
+        )
+        valid.append(emg_mask[:, agonist] & emg_mask[:, antagonist])
+    derived = np.stack(ratios + cocontractions, axis=1).astype(np.float32)
+    derived_mask = np.stack(valid + valid, axis=1)
+    derived[~derived_mask] = 0.0
+    return (
+        np.concatenate([emg, derived], axis=1),
+        np.concatenate([emg_mask, derived_mask], axis=1),
+    )
+
+
+def extend_emg_mask(emg_mask: np.ndarray) -> np.ndarray:
+    """Validity for the derived channels: both source electrodes must be valid."""
+    valid = [
+        emg_mask[:, agonist] & emg_mask[:, antagonist]
+        for agonist, antagonist in EMG_ANTAGONIST_PAIRS
+    ]
+    return np.concatenate([emg_mask, np.stack(valid + valid, axis=1)], axis=1)
+
+
+def raw_emg_features(
+    emg: np.ndarray,
+    emg_mask: np.ndarray,
+    reference: np.ndarray | None,
+    derived: bool,
+    log1p: bool,
+) -> np.ndarray:
+    """Session-normalise, optionally append antagonist channels, then log1p.
+
+    log1p is applied only to the amplitude channels. The derived channels are
+    log-ratios and bounded co-contraction indices, which are already
+    signed/normalised and must not be passed through log1p.
+    """
+    base = np.maximum(emg[:, : len(EMG_COLUMNS)], 0.0)
+    if reference is not None:
+        base = base / np.maximum(reference, 1e-9)
+    parts = [np.log1p(base) if log1p else base]
+    if derived:
+        stacked, _ = append_emg_derived_channels(base, emg_mask[:, : len(EMG_COLUMNS)])
+        parts.append(stacked[:, len(EMG_COLUMNS) :])
+    return np.concatenate(parts, axis=1).astype(np.float32)
 
 
 def grid_imu_feature_dim(data_config: dict[str, Any]) -> int:
@@ -275,18 +363,33 @@ def preprocess_grid_signals(
             [imu.astype(np.float32), imu_features], axis=1
         )
         imu_feature_mask = np.concatenate([imu_mask, imu_feature_mask], axis=1)
+    participant_id = str(
+        row.participant_id if hasattr(row, "participant_id") else row["participant_id"]
+    )
+    derived = bool(data_config.get("emg_derived_channels", False))
+    # Untransformed amplitudes, kept so the scaler pass can measure each
+    # session's gain reference before any normalisation is applied.
+    raw_emg_amplitudes = emg.astype(np.float32).copy()
+    raw_emg_amplitude_mask = emg_mask.copy()
+    if derived:
+        emg_mask = extend_emg_mask(emg_mask)
     if scaler is None:
-        if bool(data_config.get("emg_log1p", True)):
-            emg = np.log1p(np.maximum(emg, 0.0))
-        emg = emg.astype(np.float32)
+        # Scaler-fitting pass. Session references are not known yet, so emit
+        # the same channel layout the fitted scaler will produce, using the
+        # unnormalised amplitudes as the basis for the derived channels.
+        emg = raw_emg_features(emg, emg_mask, None, derived, bool(
+            data_config.get("emg_log1p", True)
+        ))
     else:
-        emg = scaler.transform_emg(emg).astype(np.float32)
+        emg = scaler.transform_emg(emg, participant_id).astype(np.float32)
         imu_features = scaler.transform_imu(imu_features).astype(np.float32)
     emg[~emg_mask] = 0.0
     imu_features[~imu_feature_mask] = 0.0
     return {
         "emg": emg,
         "emg_mask": emg_mask,
+        "raw_emg": raw_emg_amplitudes,
+        "raw_emg_mask": raw_emg_amplitude_mask,
         "imu": imu_features,
         "imu_mask": imu_feature_mask,
         "length": length,
@@ -397,8 +500,12 @@ def pad_grid_trajectories(samples: list[dict[str, Any]]) -> dict[str, Any]:
     imu_channels = samples[0]["imu"].size(1)
     if any(sample["imu"].size(1) != imu_channels for sample in samples):
         raise ValueError("All trajectories in a batch must use the same IMU features")
-    emg = torch.zeros(batch, maximum, 4, dtype=torch.float32)
-    emg_mask = torch.zeros(batch, maximum, 4, dtype=torch.bool)
+    # Not fixed at four: derived antagonist channels widen the EMG stack.
+    emg_channels = samples[0]["emg"].size(1)
+    if any(sample["emg"].size(1) != emg_channels for sample in samples):
+        raise ValueError("All trajectories in a batch must use the same EMG features")
+    emg = torch.zeros(batch, maximum, emg_channels, dtype=torch.float32)
+    emg_mask = torch.zeros(batch, maximum, emg_channels, dtype=torch.bool)
     imu = torch.zeros(batch, maximum, imu_channels, dtype=torch.float32)
     imu_mask = torch.zeros(batch, maximum, imu_channels, dtype=torch.bool)
     lengths = torch.empty(batch, dtype=torch.long)
