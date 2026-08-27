@@ -312,11 +312,63 @@ weight). The unfixed checkpoint (epoch 14, ratio 2.21x) is preserved at
 `runs/crossvar_a1_fold0_BEFORE_norm_fix/` for a direct before/after
 comparison once the fixed run completes.
 
-## Results
+## Results: the fix works mechanically, and the outcome is negative
 
-_Pending - re-running a1 fold-0 with the fix. The Linux 5-fold sweep above
-predates the fix and should be re-run once the fold-0 before/after
-comparison confirms the direction of the effect._
+Full 5-fold `a1` sweep re-run on CUDA with the token-norm fix (1200 held-out
+trials, 6 participants), against the identical sweep before the fix.
+
+**The fix un-collapsed EMG.** Variate attention at the touch cutoff:
+
+| variate | mean before | mean after | top-fraction before | top-fraction after |
+|---|---|---|---|---|
+| AD | 0.0079 | 0.0366 | 0.000000 | 0.0633 |
+| LD | 0.0082 | 0.0331 | 0.000000 | 0.0292 |
+| BB | 0.0076 | 0.0316 | 0.000000 | 0.0317 |
+| TB | 0.0078 | 0.0342 | 0.000000 | 0.0458 |
+
+EMG went from never once being the argmax variate across 1200 trials to
+winning roughly 17% of them. The 2.21x token-norm asymmetry was real and the
+LayerNorm fix genuinely restored EMG participation.
+
+**Accuracy got worse at every cutoff:**
+
+| cutoff | before fix | after fix | delta |
+|---|---|---|---|
+| 0.0s | 300.0 | 329.3 | +29.4 |
+| 0.2s | 194.4 | 199.8 | +5.5 |
+| 0.4s | 189.4 | 193.3 | +3.9 |
+| touch | 178.2 | 188.3 | +10.1 |
+
+Center-regression also worsened: `edge_prediction_gap` -0.134 -> -0.168 and
+`fraction_errors_inward` 0.654 -> 0.673 at touch.
+
+**Interpretation.** When EMG actually participates, it hurts. The original
+collapse-to-zero was not a pathology the model suffered - it was the model
+correctly learning that these four RMS-envelope channels do not carry usable
+signal for this task, and the unnormalized-token bug was what allowed it to
+act on that. This is consistent with every other measurement in this project:
+EMG-only at 303 px against IMU's 152 px, three architecturally unrelated
+encoders all plateauing in the 250-320 px band, no direction information in
+fine EMG timing, and the raw 2148 Hz stream never saved to disk.
+
+### Correction: the coarse-scale argument was retracted on bad evidence
+
+Earlier in this document the "use coarse patch scales" reasoning was walked
+back because the learned gate strongly preferred p16 (108 ms), mean weight
+0.77-0.78 with top-fraction 0.93-0.97. That retraction was based on the
+**buggy** model. Post-fix the EMG scale gate flips to preferring **p32**
+(216 ms): mean 0.638, top-fraction 0.897, while p16 collapses to mean 0.174
+with top-fraction 0.0008. The p16 preference was an artifact of unnormalized
+token scales feeding the gate. The original argument from the ~540 ms
+envelope autocorrelation timescale was closer to correct than its retraction.
+
+### Outstanding comparison
+
+The numbers above are 5-fold pooled (1200 trials). Every `grid_imu` /
+`grid_fusion` number quoted earlier in this document is fold-0 only (239
+trials), so the two are not directly comparable. A matched 5-fold
+`grid_imu` / `grid_fusion` run on `a1` is required to state the size of the
+gap rather than only its direction.
 
 ## Log
 
