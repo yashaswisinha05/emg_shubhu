@@ -7,7 +7,7 @@ import torch
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
-from .data.grid_trajectory import grid_imu_feature_names
+from .data.grid_trajectory import emg_channel_names, grid_imu_feature_names
 from .data.schema import SENSORS
 from .metrics import merge_metric_batches
 from .utils import move_batch_to_device
@@ -593,8 +593,17 @@ def evaluate_grid_model(
                         imu_channel_attention[index, channel_index]
                     )
             if emg_channel_attention is not None:
-                for channel_index, sensor in enumerate(SENSORS):
-                    record[f"attention_emg_channel_{sensor}"] = float(
+                # Not SENSORS: derived antagonist channels widen this stack
+                # beyond the four electrodes, and naming from a fixed 4-tuple
+                # silently drops them from every attention summary.
+                names = emg_channel_names(config["data"])
+                for channel_index in range(emg_channel_attention.size(-1)):
+                    label = (
+                        names[channel_index]
+                        if channel_index < len(names)
+                        else str(channel_index)
+                    )
+                    record[f"attention_emg_channel_{label}"] = float(
                         emg_channel_attention[index, channel_index]
                     )
             if prefix_elapsed is not None:
