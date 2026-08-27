@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hill physics arm rollout</title>
+<style>
+  :root { color-scheme: light dark; --bg:#ffffff; --surface:#f5f5f4; --border:#e0e0dd;
+    --text:#1a1a18; --text-secondary:#6b6b66; --blue:#378ADD; --blue-dark:#185FA5;
+    --teal:#1D9E75; --teal-dark:#0F6E56; --coral:#D85A30; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1a1a18; --surface:#242422; --border:#3a3a36; --text:#f0f0ee; --text-secondary:#a0a09a; }
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg);
+    color: var(--text); margin: 0; padding: 24px; max-width: 720px; margin-inline: auto; }
+  h1 { font-size: 18px; font-weight: 500; margin: 0 0 4px; }
+  .meta { font-size: 13px; color: var(--text-secondary); margin-bottom: 20px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+  button { font-family: inherit; font-size: 14px; padding: 8px 14px; border-radius: 8px;
+    border: 0.5px solid var(--border); background: var(--bg); color: var(--text); cursor: pointer; }
+  button.active { background: var(--surface); }
+  .row { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+  svg { border: 0.5px solid var(--border); border-radius: 8px; flex-shrink: 0; background: var(--bg); }
+  .panel { flex: 1; min-width: 240px; }
+  label { font-size: 13px; color: var(--text-secondary); display: block; margin-bottom: 4px; }
+  input[type=range] { width: 100%; }
+  select { width: 100%; height: 34px; font-family: inherit; font-size: 14px; margin-bottom: 12px;
+    border-radius: 8px; border: 0.5px solid var(--border); background: var(--bg); color: var(--text); }
+  .stat { background: var(--surface); border-radius: 8px; padding: 10px 14px; flex: 1; }
+  .stat p { margin: 0; }
+  .stat .l { font-size: 11px; color: var(--text-secondary); }
+  .stat .v { font-size: 16px; font-weight: 500; }
+  .note { font-size: 13px; color: var(--text-secondary); margin-top: 14px; line-height: 1.5; }
+  .legend { display: flex; gap: 16px; font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+</style>
+</head>
+<body>
+<h1>Hill physics arm rollout</h1>
+<p class="meta">Checkpoint: __CHECKPOINT_LABEL__</p>
+
+<div class="tabs">
+  <button id="tab-manual" class="active">Manual control</button>
+  <button id="tab-trial">Real trial playback</button>
+</div>
+
+<div class="row">
+  <svg id="arm-svg" viewBox="-30 -230 260 260" width="300" height="300" role="img" aria-label="Two-link arm diagram">
+    <line x1="-15" y1="0" x2="230" y2="0" stroke="var(--border)" stroke-width="1"/>
+    <circle cx="0" cy="0" r="4" fill="var(--text-secondary)"/>
+    <line id="upper" x1="0" y1="0" x2="0" y2="0" stroke="var(--blue)" stroke-width="6" stroke-linecap="round"/>
+    <circle id="elbow-dot" cx="0" cy="0" r="4" fill="var(--blue-dark)"/>
+    <line id="forearm" x1="0" y1="0" x2="0" y2="0" stroke="var(--teal)" stroke-width="6" stroke-linecap="round"/>
+    <circle id="tip-dot" cx="0" cy="0" r="5" fill="var(--teal-dark)"/>
+  </svg>
+
+  <div class="panel">
+    <div id="panel-manual">
+      <label>Shoulder angle</label>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+        <input type="range" id="s-theta1" min="-103" max="103" value="20" step="1"/>
+        <span id="s-theta1-out" style="min-width:48px;font-weight:500;font-size:14px;">20 deg</span>
+      </div>
+      <label>Elbow angle</label>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <input type="range" id="s-theta2" min="0" max="160" value="40" step="1"/>
+        <span id="s-theta2-out" style="min-width:48px;font-weight:500;font-size:14px;">40 deg</span>
+      </div>
+      <p class="note">Shoulder 0 deg = arm pointing right, elbow 0 deg = fully extended. Drag either slider to check the kinematics look anatomically sane, independent of any trained weights.</p>
+    </div>
+
+    <div id="panel-trial" style="display:none;">
+      <label>Trial</label>
+      <select id="trial-select"></select>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+        <button id="play-btn">Play</button>
+        <input type="range" id="frame-slider" min="0" max="10" value="0" step="1" style="flex:1;"/>
+        <span id="frame-out" style="font-size:13px;color:var(--text-secondary);min-width:52px;">step 0</span>
+      </div>
+      <div style="display:flex;gap:10px;margin-bottom:10px;">
+        <div class="stat"><p class="l">Shoulder</p><p class="v" id="trial-theta1">0 deg</p></div>
+        <div class="stat"><p class="l">Elbow</p><p class="v" id="trial-theta2">0 deg</p></div>
+      </div>
+      <div style="display:flex;gap:10px;">
+        <div class="stat"><p class="l">Physics blend</p><p class="v" id="trial-blend">0</p></div>
+        <div class="stat"><p class="l">Physics vs click err (norm)</p><p class="v" id="trial-err">0</p></div>
+      </div>
+      <div class="legend">
+        <span><span class="dot" style="background:var(--coral)"></span>click target</span>
+        <span><span class="dot" style="background:var(--blue)"></span>fusion prediction</span>
+        <span><span class="dot" style="background:var(--teal-dark)"></span>physics prediction</span>
+      </div>
+      <p class="note">physics_prediction is the Hill rollout's own endpoint, mapped through its learned screen affine; it is normalized [0,1] screen coordinates, not meters, so it is shown as a small marker beside the arm rather than to scale with it.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+var TRIALS = __TRIALS_JSON__;
+var L1 = 90, L2 = 100;
+
+function setArm(theta1Deg, theta2Deg) {
+  var t1 = theta1Deg * Math.PI / 180;
+  var t2 = theta2Deg * Math.PI / 180;
+  var ex = L1 * Math.cos(t1), ey = -L1 * Math.sin(t1);
+  var fx = ex + L2 * Math.cos(t1 + t2), fy = ey - L2 * Math.sin(t1 + t2);
+  document.getElementById('upper').setAttribute('x2', ex);
+  document.getElementById('upper').setAttribute('y2', ey);
+  document.getElementById('elbow-dot').setAttribute('cx', ex);
+  document.getElementById('elbow-dot').setAttribute('cy', ey);
+  document.getElementById('forearm').setAttribute('x1', ex);
+  document.getElementById('forearm').setAttribute('y1', ey);
+  document.getElementById('forearm').setAttribute('x2', fx);
+  document.getElementById('forearm').setAttribute('y2', fy);
+  document.getElementById('tip-dot').setAttribute('cx', fx);
+  document.getElementById('tip-dot').setAttribute('cy', fy);
+}
+
+var s1 = document.getElementById('s-theta1'), s2 = document.getElementById('s-theta2');
+function updateManual() {
+  document.getElementById('s-theta1-out').textContent = s1.value + ' deg';
+  document.getElementById('s-theta2-out').textContent = s2.value + ' deg';
+  setArm(parseFloat(s1.value), parseFloat(s2.value));
+}
+s1.addEventListener('input', updateManual);
+s2.addEventListener('input', updateManual);
+
+var select = document.getElementById('trial-select');
+TRIALS.forEach(function(t, i) {
+  var opt = document.createElement('option');
+  opt.value = i; opt.textContent = t.id;
+  select.appendChild(opt);
+});
+
+var frameSlider = document.getElementById('frame-slider');
+var frameOut = document.getElementById('frame-out');
+var t1Out = document.getElementById('trial-theta1');
+var t2Out = document.getElementById('trial-theta2');
+var blendOut = document.getElementById('trial-blend');
+var errOut = document.getElementById('trial-err');
+var playing = false, playTimer = null;
+
+function currentTrial() { return TRIALS[parseInt(select.value, 10)]; }
+
+function dist(a, b) {
+  var dx = a[0] - b[0], dy = a[1] - b[1];
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function updateFrame() {
+  var trial = currentTrial();
+  var step = parseInt(frameSlider.value, 10);
+  var theta = trial.theta[step];
+  var d1 = Math.round(theta[0] * 180 / Math.PI);
+  var d2 = Math.round(theta[1] * 180 / Math.PI);
+  t1Out.textContent = d1 + ' deg';
+  t2Out.textContent = d2 + ' deg';
+  frameOut.textContent = 'step ' + step + ' / ' + (trial.theta.length - 1);
+  blendOut.textContent = trial.blend.toFixed(4);
+  errOut.textContent = dist(trial.physics_pred, trial.target).toFixed(3);
+  setArm(d1, d2);
+}
+
+function loadTrial() {
+  var trial = currentTrial();
+  frameSlider.max = trial.theta.length - 1;
+  frameSlider.value = 0;
+  updateFrame();
+}
+select.addEventListener('change', function() { stopPlay(); loadTrial(); });
+frameSlider.addEventListener('input', function() { stopPlay(); updateFrame(); });
+
+var playBtn = document.getElementById('play-btn');
+function stopPlay() {
+  playing = false;
+  if (playTimer) { clearInterval(playTimer); playTimer = null; }
+  playBtn.textContent = 'Play';
+}
+playBtn.addEventListener('click', function() {
+  if (playing) { stopPlay(); return; }
+  playing = true;
+  playBtn.textContent = 'Pause';
+  playTimer = setInterval(function() {
+    var trial = currentTrial();
+    var next = parseInt(frameSlider.value, 10) + 1;
+    if (next >= trial.theta.length) { stopPlay(); return; }
+    frameSlider.value = next;
+    updateFrame();
+  }, 120);
+});
+
+var tabManual = document.getElementById('tab-manual'), tabTrial = document.getElementById('tab-trial');
+var panelManual = document.getElementById('panel-manual'), panelTrial = document.getElementById('panel-trial');
+function showManual() {
+  panelManual.style.display = 'block'; panelTrial.style.display = 'none';
+  tabManual.className = 'active'; tabTrial.className = '';
+  stopPlay(); updateManual();
+}
+function showTrial() {
+  panelManual.style.display = 'none'; panelTrial.style.display = 'block';
+  tabTrial.className = 'active'; tabManual.className = '';
+  loadTrial();
+}
+tabManual.addEventListener('click', showManual);
+tabTrial.addEventListener('click', showTrial);
+
+loadTrial();
+showManual();
+</script>
+</body>
+</html>
