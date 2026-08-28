@@ -18,6 +18,7 @@ from torch import nn
 
 from .arm import EndpointToScreen, TwoLinkArm
 from .hill import ActivationDynamics, HillMuscle
+from .participant_calibration import ParticipantCalibration
 
 
 class PhysicsBranch(nn.Module):
@@ -48,6 +49,7 @@ class PhysicsBranch(nn.Module):
         self.muscle = HillMuscle(4)
         self.arm = TwoLinkArm()
         self.to_screen = EndpointToScreen()
+        self.calibration = ParticipantCalibration(config["paths"]["split_file"])
 
         # EMG arrives robust-scaled, not in [0, 1]; learn the mapping to a
         # neural-excitation range per muscle.
@@ -72,6 +74,7 @@ class PhysicsBranch(nn.Module):
         emg_mask: torch.Tensor,
         lengths: torch.Tensor,
         context: torch.Tensor,
+        subject: list[str],
     ) -> dict[str, torch.Tensor]:
         batch, steps, _ = emg.shape
         amplitude = emg[:, :, :4]
@@ -119,8 +122,15 @@ class PhysicsBranch(nn.Module):
 
         final = angles
         endpoint = self.arm.endpoint(final)
+        subject_indices = self.calibration.indices_for(subject, endpoint.device)
+        participant_scale = self.calibration.scale(subject_indices)
+        participant_offset = self.calibration.offset_for(subject_indices)
+        endpoint = endpoint * participant_scale.unsqueeze(-1)
+        physics_prediction = self.to_screen(endpoint) + participant_offset
         return {
-            "physics_prediction": self.to_screen(endpoint),
+            "physics_prediction": physics_prediction,
+            "physics_participant_scale": participant_scale,
+            "physics_participant_offset": participant_offset,
             "physics_angles": final,
             "physics_velocity": velocity,
             "physics_activation": activation,

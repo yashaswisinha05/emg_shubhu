@@ -520,11 +520,16 @@ def evaluate_grid_model(
         physics_angles = outputs.get("physics_angles")
         physics_blend = outputs.get("physics_blend")
         fusion_prediction = outputs.get("fusion_prediction")
+        participant_scale = outputs.get("physics_participant_scale")
+        participant_offset = outputs.get("physics_participant_offset")
         if physics_prediction is not None:
             physics_prediction = physics_prediction.detach().cpu()
             physics_angles = physics_angles.detach().cpu()
             physics_blend = physics_blend.detach().cpu()
             fusion_prediction = fusion_prediction.detach().cpu()
+        if participant_scale is not None:
+            participant_scale = participant_scale.detach().cpu()
+            participant_offset = participant_offset.detach().cpu()
         imu_gate = outputs.get("imu_gate")
         if imu_gate is not None:
             imu_gate = imu_gate.detach().cpu().reshape(-1)
@@ -589,6 +594,10 @@ def evaluate_grid_model(
                 record["physics_blend"] = float(physics_blend[index])
                 record["fusion_prediction_x"] = float(fusion_prediction[index, 0])
                 record["fusion_prediction_y"] = float(fusion_prediction[index, 1])
+                if participant_scale is not None:
+                    record["physics_participant_scale"] = float(participant_scale[index])
+                    record["physics_participant_offset_x"] = float(participant_offset[index, 0])
+                    record["physics_participant_offset_y"] = float(participant_offset[index, 1])
             if variate_attention is not None:
                 for position, name in enumerate(VARIATE_NAMES):
                     record[f"variate_attention_{name}"] = float(

@@ -24,6 +24,7 @@ import torch
 from torch import nn
 
 from .arm3 import EndpointToScreen3, ThreeDofArm
+from .participant_calibration import ParticipantCalibration
 
 
 class TorqueHead(nn.Module):
@@ -74,6 +75,7 @@ class PhysicsBranch3(nn.Module):
         self.arm = ThreeDofArm()
         self.to_screen = EndpointToScreen3()
         self.torque_head = TorqueHead(d_model)
+        self.calibration = ParticipantCalibration(config["paths"]["split_file"])
 
         self.initial_state = nn.Sequential(
             nn.LayerNorm(d_model), nn.Linear(d_model, 64), nn.GELU(), nn.Linear(64, 6)
@@ -85,6 +87,7 @@ class PhysicsBranch3(nn.Module):
         emg_mask: torch.Tensor,
         lengths: torch.Tensor,
         context: torch.Tensor,
+        subject: list[str],
     ) -> dict[str, torch.Tensor]:
         batch, steps, _ = emg.shape
         amplitude = emg[:, :, :4]
@@ -123,8 +126,15 @@ class PhysicsBranch3(nn.Module):
 
         final = angles
         endpoint = self.arm.endpoint(final)
+        subject_indices = self.calibration.indices_for(subject, endpoint.device)
+        participant_scale = self.calibration.scale(subject_indices)
+        participant_offset = self.calibration.offset_for(subject_indices)
+        endpoint = endpoint * participant_scale.unsqueeze(-1)
+        physics_prediction = self.to_screen(endpoint) + participant_offset
         return {
-            "physics_prediction": self.to_screen(endpoint),
+            "physics_prediction": physics_prediction,
+            "physics_participant_scale": participant_scale,
+            "physics_participant_offset": participant_offset,
             "physics_angles": final,
             "physics_velocity": velocity,
             "physics_torque": torch.stack(torques, dim=1),

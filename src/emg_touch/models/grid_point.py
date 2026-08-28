@@ -852,6 +852,7 @@ class GridFusionPhysicsRegressor(nn.Module):
             batch["emg_mask"],
             batch["lengths"],
             outputs["emg_context"],
+            batch["subject"],
         )
         outputs.update(physics)
         outputs["fusion_prediction"] = outputs["prediction"]
@@ -898,6 +899,7 @@ class GridFusionPhysics3Regressor(nn.Module):
             batch["emg_mask"],
             batch["lengths"],
             outputs["emg_context"],
+            batch["subject"],
         )
         outputs.update(physics)
         outputs["fusion_prediction"] = outputs["prediction"]
