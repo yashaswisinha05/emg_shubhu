@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EMG Touch — Physics &amp; Multimodal Studies</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #07111f;
+    --surface: #0d1a2b;
+    --surface-2: #122238;
+    --surface-3: #182b44;
+    --line: #28405d;
+    --text: #ecf4ff;
+    --muted: #93a7c1;
+    --blue: #55a7ff;
+    --cyan: #50dfd4;
+    --green: #65d68a;
+    --orange: #ffb45e;
+    --pink: #ef7bb4;
+    --purple: #a88cff;
+    --red: #ff7c78;
+    --shadow: 0 20px 70px rgba(0,0,0,.27);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(900px 520px at 8% -10%, rgba(85,167,255,.18), transparent 65%),
+      radial-gradient(800px 520px at 95% 0%, rgba(239,123,180,.10), transparent 62%),
+      var(--bg);
+    color: var(--text);
+    font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    line-height: 1.55;
+  }
+  a { color: var(--cyan); }
+  .shell { max-width: 1180px; margin: 0 auto; padding: 0 28px 90px; }
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; justify-content: space-between; gap: 24px;
+    min-height: 64px; margin: 0 -28px; padding: 0 28px;
+    background: rgba(7,17,31,.88); border-bottom: 1px solid rgba(40,64,93,.7);
+    backdrop-filter: blur(18px);
+  }
+  .brand { display: flex; align-items: center; gap: 12px; font-weight: 750; letter-spacing: -.02em; font-size: 14px; }
+  .brand-mark { width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg,var(--pink),var(--purple)); box-shadow: 0 0 24px rgba(168,140,255,.3); flex: none; }
+  nav { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+  nav a { text-decoration: none; color: var(--muted); font-size: 12.5px; font-weight: 650; padding: 8px 9px; border-radius: 8px; white-space: nowrap; }
+  nav a:hover { color: var(--text); background: var(--surface-2); }
+  .hero { padding: 68px 0 26px; }
+  .eyebrow { color: var(--pink); text-transform: uppercase; letter-spacing: .16em; font-size: 12px; font-weight: 800; }
+  h1 { font-size: clamp(32px,5vw,54px); line-height: 1.04; letter-spacing: -.04em; margin: 12px 0 18px; max-width: 820px; }
+  .hero p { color: var(--muted); font-size: 16px; max-width: 760px; margin: 0 0 10px; }
+  .companion { display: inline-flex; align-items: center; gap: 8px; margin-top: 14px; padding: 9px 14px; border: 1px solid var(--line); border-radius: 99px; font-size: 12.5px; color: var(--muted); background: rgba(13,26,43,.6); }
+  .kpis { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 12px; margin: 26px 0 56px; }
+  .kpi { border: 1px solid var(--line); background: rgba(13,26,43,.82); border-radius: 16px; padding: 18px; }
+  .kpi .label { color: var(--muted); font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+  .kpi .value { margin: 12px 0 4px; font-size: clamp(22px,2.6vw,30px); line-height: 1; letter-spacing: -.03em; font-weight: 780; }
+  .kpi .detail { color: var(--muted); font-size: 12px; }
+  .kpi.neutral .value { color: var(--orange); }
+  .kpi.good .value { color: var(--green); }
+  .kpi.bad .value { color: var(--red); }
+  section { scroll-margin-top: 76px; margin: 0 0 64px; }
+  .study-head { display: flex; gap: 16px; align-items: baseline; margin-bottom: 6px; flex-wrap: wrap; }
+  .study-num { font-size: 13px; font-weight: 800; color: var(--muted); letter-spacing: .06em; }
+  section h2 { font-size: 27px; letter-spacing: -.03em; margin: 0; }
+  .study-status { margin-left: auto; font-size: 11.5px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; padding: 4px 10px; border-radius: 99px; }
+  .study-status.negative { background: rgba(255,124,120,.12); color: var(--red); }
+  .study-status.neutral { background: rgba(255,180,94,.12); color: var(--orange); }
+  .study-status.mixed { background: rgba(168,140,255,.14); color: var(--purple); }
+  .study-status.pending { background: rgba(147,167,193,.14); color: var(--muted); }
+  .lede { color: var(--muted); font-size: 14.5px; margin: 8px 0 20px; max-width: 820px; }
+  .panel { border: 1px solid var(--line); background: rgba(13,26,43,.85); border-radius: 16px; padding: 20px 22px; box-shadow: var(--shadow); margin-bottom: 14px; }
+  .panel h3 { margin: 0 0 8px; font-size: 15px; letter-spacing: -.01em; color: var(--text); }
+  .panel h3 .tag { font-weight: 700; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); background: var(--surface-3); padding: 2px 7px; border-radius: 6px; margin-right: 8px; vertical-align: middle; }
+  .panel p, .panel li { color: #c8d4e4; font-size: 13.8px; margin: 0 0 8px; }
+  .panel ul, .panel ol { margin: 6px 0 6px; padding-left: 20px; }
+  .panel li { margin-bottom: 7px; }
+  .bug-list { display: grid; gap: 10px; margin: 10px 0; }
+  .bug { border-left: 3px solid var(--red); background: rgba(255,124,120,.06); border-radius: 4px 10px 10px 4px; padding: 10px 14px; }
+  .bug .bug-title { font-weight: 700; color: #ffb3b0; font-size: 13px; margin-bottom: 3px; }
+  .bug p { margin: 0; font-size: 13px; color: #d7dee9; }
+  .callout { padding: 13px 16px; border-left: 3px solid var(--purple); background: rgba(168,140,255,.08); color: #e3d9ff; font-size: 13.5px; border-radius: 5px 12px 12px 5px; margin: 14px 0; }
+  .callout .callout-label { display: block; font-weight: 800; font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--purple); margin-bottom: 5px; }
+  .callout.good { border-color: var(--green); background: rgba(101,214,138,.08); color: #bff1ce; }
+  .callout.good .callout-label { color: var(--green); }
+  .callout.warn { border-color: var(--orange); background: rgba(255,180,94,.08); color: #ffd8aa; }
+  .callout.warn .callout-label { color: var(--orange); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.4px; background: var(--surface-3); padding: 1px 5px; border-radius: 5px; color: #d8e6ff; }
+  .metric-row { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+  .metric { border: 1px solid var(--line); border-radius: 11px; padding: 9px 13px; background: var(--surface-2); min-width: 130px; }
+  .metric .m-label { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; font-weight: 700; }
+  .metric .m-value { font-size: 17px; font-weight: 750; margin-top: 3px; }
+  .metric.up .m-value { color: var(--red); }
+  .metric.down .m-value { color: var(--green); }
+  .bars { display: grid; gap: 9px; margin: 14px 0 6px; }
+  .bar-row { display: grid; grid-template-columns: 230px 1fr 74px; gap: 10px; align-items: center; }
+  .bar-row .bl { font-size: 12.5px; color: #c8d4e4; text-align: right; }
+  .bar-track { height: 20px; border-radius: 6px; background: var(--surface-3); overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 6px; }
+  .bar-row .bv { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  table.mini { border-collapse: collapse; width: 100%; font-size: 12.6px; margin: 10px 0; }
+  table.mini th { text-align: left; padding: 8px 10px; color: var(--muted); border-bottom: 1px solid var(--line); font-weight: 700; text-transform: uppercase; font-size: 10.5px; letter-spacing: .05em; }
+  table.mini td { padding: 8px 10px; border-bottom: 1px solid rgba(40,64,93,.5); color: #d3dcea; }
+  table.mini td.num, table.mini th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .timeline { position: relative; padding-left: 22px; margin: 16px 0; }
+  .timeline::before { content: ''; position: absolute; left: 6px; top: 4px; bottom: 4px; width: 2px; background: linear-gradient(var(--purple), var(--line)); }
+  .tl-item { position: relative; margin-bottom: 16px; }
+  .tl-item::before { content: ''; position: absolute; left: -22px; top: 4px; width: 9px; height: 9px; border-radius: 50%; background: var(--purple); border: 2px solid var(--bg); }
+  .tl-item .tl-commit { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); }
+  .tl-item .tl-title { font-weight: 650; font-size: 13.6px; margin: 2px 0 3px; }
+  .tl-item p { margin: 0; }
+  .closing { border: 1px solid var(--line); background: linear-gradient(135deg,rgba(168,140,255,.09),rgba(13,26,43,.9)); border-radius: 18px; padding: 26px 28px; }
+  .closing h2 { font-size: 25px; margin: 0 0 14px; letter-spacing: -.02em; }
+  .foot { border-top: 1px solid var(--line); padding-top: 22px; margin-top: 60px; color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+  @media (max-width: 900px) { .kpis { grid-template-columns: repeat(2,1fr); } .bar-row { grid-template-columns: 120px 1fr 60px; } }
+  @media (max-width: 640px) { .shell { padding: 0 16px 60px; } .topbar { margin: 0 -16px; padding: 0 16px; } nav { display: none; } .kpis { grid-template-columns: 1fr; } .study-head { flex-direction: column; align-items: flex-start; gap: 6px; } .study-status { margin-left: 0; } }
+  @media print { body { background: #fff; color: #111; } .topbar { position: static; } nav { display: none; } .panel, .closing { box-shadow: none; break-inside: avoid; } }
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark"></span>EMG Touch — Physics &amp; Multimodal Studies</div>
+    <nav>
+      <a href="#overview">Overview</a><a href="#crossvar">Cross-variate</a><a href="#emg-norm">EMG norm</a><a href="#hill">Hill physics</a><a href="#physics3">3-DOF physics</a><a href="#weight-test">Weight test</a><a href="#synthesis">Synthesis</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="hero">
+      <div class="eyebrow">Companion report · studies since the results dashboard</div>
+      <h1>Three independent attempts to get EMG to do more, and what each one actually found.</h1>
+      <p>The existing <code>emg_touch_results_dashboard.html</code> (generated 2026‑08‑24) stops before any of this work. Everything below — multi-scale cross-variate attention, per-session EMG normalisation, a Hill muscle-driven physics branch, and a 3-DOF rigid-body physics branch — was built, debugged and evaluated afterward. This document is not a metrics dump: every study section ends with the inference actually drawn from its evidence, including the negative ones.</p>
+      <div class="companion">📊 Companion to <code>reports/emg_touch_results_dashboard.html</code> — that file covers architecture/modality comparisons through PatchTST; this one picks up from there.</div>
+    </div>
+
+    <section id="overview">
+      <div class="kpis">
+        <div class="kpi bad">
+          <div class="label">Cross-variate attention</div>
+          <div class="value">−10.1 px</div>
+          <div class="detail">touch-cutoff accuracy worsened once the norm bug was fixed and EMG could actually participate</div>
+        </div>
+        <div class="kpi good">
+          <div class="label">Per-session EMG norm</div>
+          <div class="value">−97.1 px</div>
+          <div class="detail">leave-one-subject-out probe error, 489.4 → 392.6 px — the only unambiguous win in this document</div>
+        </div>
+        <div class="kpi neutral">
+          <div class="label">Hill physics branch</div>
+          <div class="value">194.9 → 185.2 px</div>
+          <div class="detail">three real bugs fixed; went from actively harmful to statistically indistinguishable from baseline</div>
+        </div>
+        <div class="kpi neutral">
+          <div class="label">3-DOF physics branch</div>
+          <div class="value">184.5 px, blend 0.0185</div>
+          <div class="detail">ties baseline because it's ~98% baseline — the branch never earned real influence</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="crossvar">
+      <div class="study-head"><span class="study-num">Study 1</span><h2>Multi-scale cross-variate attention (grid_crossvar)</h2><span class="study-status negative">Negative result</span></div>
+      <p class="lede">Adapts MCV-PatchTST (Qarni et al., Sci Rep 2026) to this task: coarse multi-scale patching (108/216/432&nbsp;ms, matched to the EMG envelope's ~540&nbsp;ms autocorrelation timescale) and cross-variate attention over eight physical tokens — four EMG electrodes, four IMU sensors — instead of all 92 raw channels, plus a positional encoding keyed to physical seconds-to-cutoff rather than a normalised index, since these are variable-length causal prefixes.</p>
+
+      <div class="panel">
+        <h3><span class="tag">Bug</span>Cross-variate attention had collapsed almost entirely onto IMU</h3>
+        <p>The 5-fold a1 sweep showed all four EMG electrodes stuck at ~0.008 mean attention weight and <strong>never once</strong> the argmax variate across 1,200 trials, at every cutoff. Measured directly on the trained checkpoint: EMG tokens entering attention had mean norm 19.5 vs IMU's 43.0 — a 2.21× gap. <code>MultiScalePatchEmbedder</code>'s stem ends in LayerNorm, but the per-scale Conv1d projections and gated-fusion sum after it don't, so the two independently-parameterised embedder instances (2 EMG channels vs 44 IMU) can drift to different output scales during training. <code>nn.MultiheadAttention</code> has no pre-attention norm, so <code>Q·Kᵀ</code> is biased toward whichever modality's keys carry larger norm — independent of content.</p>
+        <p>Fixed by adding the same final LayerNorm that the rest of this codebase already uses for exactly this reason (<code>PatchTransformerEncoder</code>'s convention). Token norms became exactly 1.000× at initialisation after the fix.</p>
+      </div>
+
+      <div class="metric-row">
+        <div class="metric down"><div class="m-label">EMG mean attention</div><div class="m-value">0.008 → 0.034</div></div>
+        <div class="metric down"><div class="m-label">EMG top-attention fraction</div><div class="m-value">0% → 3–6%</div></div>
+        <div class="metric down"><div class="m-label">EMG wins argmax</div><div class="m-value">never → ~17% of trials</div></div>
+        <div class="metric up"><div class="m-label">Touch-cutoff error</div><div class="m-value">178.2 → 188.3 px</div></div>
+        <div class="metric up"><div class="m-label">0.0s-cutoff error</div><div class="m-value">300.0 → 329.3 px</div></div>
+      </div>
+
+      <div class="callout warn">
+        <span class="callout-label">Inference</span>
+        The fix did exactly what it was meant to — EMG genuinely started participating in attention. But accuracy got <em>worse</em> at every cutoff once it did, and centre-regression bias widened too (<code>edge_prediction_gap</code> −0.134 → −0.168). That means the original collapse wasn't a bug artificially silencing a useful signal — it was the model <strong>correctly discounting a modality that carries little usable signal in RMS-envelope form</strong>. Consistent with EMG-only sitting at ~303&nbsp;px against IMU's ~152&nbsp;px, and three unrelated encoder architectures all independently plateauing at 250–320&nbsp;px on EMG alone. Multi-scale cross-variate attention is a negative result for this task on this data — not because the mechanism was broken, but because there wasn't enough signal underneath it to reward using it. (This also retracted an earlier reading of the same sweep: post-fix, the EMG scale gate actually <em>prefers</em> the 216&nbsp;ms patch scale, so the coarse-scale preference seen pre-fix was a real finding, not an artifact — the finer p16 preference that had briefly looked interesting was the artifact.)
+      </div>
+
+      <div class="panel">
+        <h3><span class="tag">Also fixed</span>Two supporting bugs found along the way</h3>
+        <ul>
+          <li><strong>MPS crash</strong> — <code>F.adaptive_avg_pool1d</code>/<code>adaptive_max_pool1d</code> refuse non-divisible input/output sizes on Apple's MPS backend, which the multi-scale patch counts rarely satisfy; the model ran fine on Linux/CPU but crashed immediately on Apple Silicon. Replaced with an explicit, cached bin-partition, verified exact against reshape-mean on every divisible case and against a manual per-bin mean on five non-divisible ones — and it turned out to match the paper's own non-overlapping partition (Eq. 7) more closely than the adaptive-pool call it replaced.</li>
+          <li><strong>Attention-analysis crash</strong> — <code>analyze_channel_attention.py</code> hard-failed on <code>grid_crossvar</code> output because it only recognised three legacy continual-attention column prefixes. Extended to recognise the new variate/scale-gate softmax groups, deliberately excluding the 64 pairwise cross-attention columns from the same argmax logic since those are eight independent 8-way softmaxes flattened into one namespace, not one 64-way distribution.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="emg-norm">
+      <div class="study-head"><span class="study-num">Study 2</span><h2>Per-session EMG normalisation, antagonist ratios, derivative channels</h2><span class="study-status mixed">Mixed — one clear win, two neutral additions</span></div>
+      <p class="lede">EMG amplitude varies 2.1×–7.3× between a1 sessions (95th-percentile reference per electrode) — electrode impedance, skin preparation, adiposity, placement. The scaler fitted a single pooled centre/scale per channel, which structurally cannot remove a per-session multiplicative gain.</p>
+
+      <div class="bars">
+        <div class="bar-row"><div class="bl">Within-participant, before</div><div class="bar-track"><div class="bar-fill" style="width:82.7%;background:var(--red)"></div></div><div class="bv">405.4 px</div></div>
+        <div class="bar-row"><div class="bl">Within-participant, after</div><div class="bar-track"><div class="bar-fill" style="width:75.6%;background:var(--green)"></div></div><div class="bv">370.7 px</div></div>
+        <div class="bar-row"><div class="bl">Leave-one-subject-out, before</div><div class="bar-track"><div class="bar-fill" style="width:99.9%;background:var(--red)"></div></div><div class="bv">489.4 px</div></div>
+        <div class="bar-row"><div class="bl">Leave-one-subject-out, after</div><div class="bar-track"><div class="bar-fill" style="width:80.1%;background:var(--green)"></div></div><div class="bv">392.6 px</div></div>
+        <div class="bar-row"><div class="bl">Mean-coordinate baseline</div><div class="bar-track"><div class="bar-fill" style="width:88.4%;background:var(--muted)"></div></div><div class="bv">433 px</div></div>
+      </div>
+
+      <div class="callout good">
+        <span class="callout-label">Inference</span>
+        The LOSO case is the important one: <strong>before the fix it scored worse than a mean-coordinate baseline that ignores the input entirely</strong> — the raw per-session amplitude gain wasn't just noisy, it was actively misleading the model across participants. Removing it made cross-participant generalisation possible for the first time in this probe. This is the one unambiguous win across all four studies in this document.
+      </div>
+
+      <div class="panel">
+        <h3><span class="tag">Added, neutral so far</span>Antagonist log-ratio and causal derivative channels</h3>
+        <p>Antagonist log-ratios (AD/LD, BB/TB) are gain-invariant by construction, since a ratio cancels a shared multiplicative session gain. Derivative channels (dEMG/dt) use a causal trailing window before differentiating — a bare sample-to-sample difference at ~148&nbsp;Hz is noise-dominated against the envelope's ~540&nbsp;ms autocorrelation timescale; a 21-sample (~140&nbsp;ms) window beat an unsmoothed difference by roughly 30&nbsp;px in an a1 probe.</p>
+        <p>Neither is a substitute for amplitude on its own: derivative-alone probed at 406–429&nbsp;px vs 371&nbsp;px for amplitude alone, and thresholding on <code>|dEMG/dt|</code> was worse still. Added <em>on top of</em> amplitude the gain was modest and concentrated in rise/fall asymmetry rather than magnitude or timing — both channel types are shipped config-gated and off by default pending a fuller sweep.</p>
+      </div>
+
+      <div class="panel">
+        <h3><span class="tag">Bug</span>Attention logging silently dropped the new channels</h3>
+        <p>The attention-recording code iterated the fixed four-element <code>SENSORS</code> tuple, so once derived antagonist channels were enabled, only the four raw electrodes were logged and the four derived channels vanished from every attention summary without error — visible only as a suspicious mean attention of ~0.125 (exactly 1/8) reported against four channel names instead of eight. Fixed to read the channel count from <code>emg_channel_names(config["data"])</code> instead of a hardcoded constant.</p>
+      </div>
+    </section>
+
+    <section id="hill">
+      <div class="study-head"><span class="study-num">Study 3</span><h2>Hill muscle-driven 2-link physics branch (grid_fusion_physics)</h2><span class="study-status neutral">Fixed, now neutral</span></div>
+      <p class="lede">A differentiable pathway from EMG to touch location that goes through actual biomechanics: EMG → activation dynamics → Hill-model muscle force → joint torque → integrated 2-link arm dynamics → forward kinematics → screen coordinate (following Katibeh et al., <em>Neural Comput &amp; Applic</em> 2025, Eqs. 3–10). Runs alongside the existing <code>grid_fusion</code> coordinate head, auxiliary by construction — a learned blend weight starts at <code>sigmoid(-4) ≈ 0.018</code>, so the model begins as exactly <code>grid_fusion</code> and physics has to earn any influence. This caution was deliberate: a standalone geometric fit only reached 357&nbsp;px against a 393&nbsp;px baseline, and analytic kinematics needs roughly 3° of arm-orientation accuracy to match what the learned head already achieves, against measured IMU orientation error of 12–19°.</p>
+
+      <div class="panel">
+        <h3><span class="tag">Bug, caught before training even started</span>The blend weight had zero gradient</h3>
+        <p><code>grid_point_loss</code> optimises <code>direct_prediction</code>, but evaluation reads <code>prediction</code>. Blending only into <code>prediction</code> meant the blend weight was scored on a quantity it never actually trained against — an easy way to silently ship a physics branch that can never learn to matter. Caught by the model's own gradient-flow check before any real training happened; both keys now reference the same blended tensor.</p>
+      </div>
+
+      <h3 style="margin:26px 0 4px;font-size:17px;">The elbow-pinning investigation</h3>
+      <p class="lede" style="margin-top:2px;">Reported symptom: the elbow angle sat at exactly 0.0 for an entire rollout, on every real trial, no matter what the EMG was doing. Confirmed in complete isolation — synthetic constant-torque input, no training involved — that this had nothing to do with EMG quality. Direct instrumentation of torque, acceleration and velocity at every substep found three independent structural bugs.</p>
+
+      <div class="bug-list">
+        <div class="bug">
+          <div class="bug-title">1. Joint-limit clamp zeroed position but not velocity</div>
+          <p>Once the elbow drifted into its lower bound, the still-nonzero velocity re-drove it into the same limit on every subsequent step, forever — independent of any later change in torque. Fixed by zeroing only the velocity component that caused the clamp, so a torque reversal can lift the joint off the stop on a later step.</p>
+        </div>
+        <div class="bug">
+          <div class="bug-title">2. The integrator was unconditionally unstable at this step size</div>
+          <p>Muscle torque divided by the arm's rotational inertia gives accelerations of order 10² rad/s² (measured mass-matrix diagonal ~0.03–0.5&nbsp;kg·m² against ~15&nbsp;N·m of elbow torque); a single semi-implicit Euler step at the ~27&nbsp;ms decimated interval could swing velocity by 8&nbsp;rad/s in one step. Fixed with 8× sub-stepping inside each recorded interval, leaving the recorded trajectory length unchanged.</p>
+        </div>
+        <div class="bug">
+          <div class="bug-title">3. The mass matrix was chronically near-singular through most of the practical elbow range</div>
+          <p>Measured smaller eigenvalue 0.017–0.036 for θ₂ ∈ [0, 1.0]&nbsp;rad — thin enough that a moderate shoulder torque could dominate elbow acceleration through the shoulder-elbow coupling term, even reversing its sign: +2.85&nbsp;N·m of elbow torque produced −200&nbsp;rad/s² of elbow acceleration at θ₂=0. Fixed by flooring only the smaller eigenvalue before solving — verified to leave any already-well-conditioned configuration completely unchanged, unlike a trace-scaled ridge (tried first) that distorted normal, non-singular dynamics by ~50% and was reverted.</p>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3><span class="tag">Also found</span>A force-scale initialisation bug, and a damping fix that was tried and reverted</h3>
+        <p><code>raw_force_scale</code>'s <code>sigmoid(0)</code> lands at the <em>midpoint</em> of its [0.25, 4.0] range, not its low end — every muscle started at 2.125× nominal peak force instead of 1.0×, compounding the instability above. Fixed to initialise at exactly 1.0×.</p>
+        <p>Widening the damping range was tried as a fourth fix, on the theory that stronger damping would prevent instability — but 10-seed testing showed a case that used to recover from a joint limit under the original damping <em>failed to recover at all</em> under the wider range (over-damped, motion suppressed). Reverted; confirmed the original [0.05, 1.95] range works correctly once the other three bugs are fixed independently.</p>
+      </div>
+
+      <div class="panel">
+        <h3><span class="tag">Bug, portability</span><code>torch.linalg.eigh</code> is unimplemented on MPS</h3>
+        <p>The eigenvalue-floor fix above used <code>torch.linalg.eigh</code>, which crashes with <code>NotImplementedError</code> on Apple's MPS backend — only discovered when a training run was actually launched with <code>--device mps</code>, because none of the "14/14 checks passed" verification for the elbow-pinning fix had ever explicitly moved a tensor onto an MPS device; it had silently run on CPU the whole time. Replaced with a closed-form 2×2 eigendecomposition, hand-verified through three wrong derivations before the correct one matched <code>eigh</code>'s exact sign/ordering convention — confirmed bit-identical to the old <code>eigh</code>-based results on real data.</p>
+      </div>
+
+      <div class="panel">
+        <h3><span class="tag">Bug</span><code>--freeze-base-imu</code> crashed on the wrapped model</h3>
+        <p><code>GridFusionPhysicsRegressor</code> wraps <code>GridFusionRegressor</code> as <code>self.fusion</code>, so its IMU submodule lives at <code>model.fusion.imu_model</code>, not <code>model.imu_model</code>. A per-epoch <code>model.imu_model.eval()</code> call that keeps a frozen IMU backbone out of train mode was missed when checkpoint loading and the freeze loop were routed through the wrapper on an earlier pass — because that earlier fix was verified by calling the loader function directly, not by running the actual failing command. Fixed, and this time verified by running the real end-to-end invocation.</p>
+      </div>
+
+      <table class="mini">
+        <thead><tr><th>Model</th><th class="num">Test mean px error</th><th class="num">Mean normalised error</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td>grid_fusion (baseline, no physics)</td><td class="num">184.02</td><td class="num">0.1608</td><td>—</td></tr>
+          <tr><td>grid_fusion_physics — before the 3-bug fix</td><td class="num">194.85</td><td class="num">0.1702</td><td>+5.9% worse than baseline</td></tr>
+          <tr><td>grid_fusion_physics — after all fixes (CUDA, 15 epochs)</td><td class="num">185.24</td><td class="num">0.1633</td><td>+0.7% vs baseline, within noise</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout good">
+        <span class="callout-label">Inference</span>
+        The branch went from <strong>actively harmful</strong> to <strong>statistically indistinguishable from baseline</strong>. That confirms the bug-fixing work was real and correctly targeted — but it is a fix, not evidence that Hill-model physics adds value. The branch has not yet been shown to help.
+      </div>
+
+      <div class="panel">
+        <h3><span class="tag">Tooling</span>Portable rollout viewer</h3>
+        <p><code>scripts/visualize_arm_rollout.py</code> loads any checkpoint (or a random init, to sanity-check the pipeline before training exists) and writes one self-contained <code>.html</code> file with no CDN or network dependency — opens on any machine independent of Claude, Python, or the training environment. Manual joint-angle sliders for a kinematics-only check, plus real-trial playback with the click target, physics-only prediction, blended prediction, and the trial's <code>physics_blend</code> value all visible at a glance.</p>
+      </div>
+    </section>
+
+    <section id="physics3">
+      <div class="study-head"><span class="study-num">Study 4</span><h2>3-DOF rigid-body arm with a plain-MLP torque head (grid_fusion_physics3)</h2><span class="study-status neutral">Best of the physics variants, still inert</span></div>
+      <p class="lede">Motivated by an external correctness note pointing out a sign bug in a hand-derived elbow screw axis for a proposed 3R model (2 shoulder axes + elbow), and by a sharper framing of what this dataset actually permits: robotics system-ID would regress a learned correction on the residual <code>tau_measured − LHS(q,q̇,q̈)</code>, but this dataset has neither measured torque nor measured joint angle anywhere — only the final touch location. So this branch keeps the Hill branch's actual supervision strategy (predict torque, integrate forward, backprop from the endpoint loss alone) while upgrading two things: a genuinely 3-DOF, anatomically fuller rigid-body model (product-of-exponentials forward kinematics and Jacobians) in place of the old single-plane 2-link one, and a plain MLP torque head reading <code>grid_fusion</code>'s learned context plus per-step EMG and joint state, in place of the Hill muscle chain's physiological parameters that had to be learned from zero supervision.</p>
+
+      <div class="panel">
+        <h3><span class="tag">Verification</span>Checked against a from-scratch sympy re-derivation before it went near training</h3>
+        <ul>
+          <li>Mass matrix, gravity vector and hand position all match the sympy oracle to 1e-7 or tighter, across 30 random postures.</li>
+          <li>Elbow position is exactly invariant to the third joint angle across a full sweep — the sign bug the original note flagged is confirmed fixed.</li>
+          <li>The standard <code>Ṁ − 2C</code> skew-symmetry identity (the thing that catches Christoffel-symbol sign errors) holds to 1e-9 in float64, and to 3.7e-8 on MPS once checked against an exact <code>jvp</code>-based <code>Ṁ</code> — a float32 finite-difference version of the same check briefly looked like a real bug before that was isolated as a precision artifact of the reference, not the implementation.</li>
+        </ul>
+      </div>
+
+      <div class="panel">
+        <h3><span class="tag">Performance</span>The first correct version was 3–5× too slow to train with</h3>
+        <p>Computing <code>C(q,q̇)q̇</code> generically via <code>Ṁ(q,q̇)q̇ − ½∇_q(q̇ᵀM(q)q̇)</code> — one <code>jvp</code> and one <code>autograd.grad</code> per call — is correct, and confirmed to actually run on MPS without hitting an unsupported op (the specific risk this session had already been burned by once, with <code>torch.linalg.eigh</code>). But at ~20&nbsp;ms/call and up to ~1,800 substeps for a long trial, a single forward pass could take over a minute. Replaced with a closed form: a symbolic Christoffel derivation shows the whole thing collapses to just 4 scalars, extracted by evaluating the mass matrix at 4 sample points and solving the resulting linear system rather than hand-transcribing float literals — so the constants stay consistent with <code>mass_matrix()</code> if the anthropometry is ever changed. Produces bit-identical <code>acceleration()</code> output to the slow version. Gravity was likewise moved to a closed form once it turned out to exactly match the old 2-link model's gravity equation (the new model's first shoulder axis is parallel to gravity, so it drops out of the gravity torque entirely). The MPS-safe Jacobi eigensolver's sweep count was also profiled down from a conservative 8 to 4, already machine-precision (~1e-14) against <code>eigh</code>. Net effect: back to ~7&nbsp;s/batch, matching the Hill-model branch, from an estimated tens of seconds beforehand.</p>
+      </div>
+
+      <div class="panel">
+        <h3><span class="tag">Bug, first real CUDA run</span>AMP dtype mismatch</h3>
+        <p>On the first attempt on an actual 4090 (AMP is silently disabled on MPS, so this had never been exercised before), the mass matrix's matmuls autocast to fp16 while the elementwise residual-torque terms stayed fp32, so <code>torch.linalg.solve</code> crashed on mismatched dtypes. Fixed by forcing the whole physics solve to run inside a local <code>autocast(enabled=False)</code> block, cast to match the module's own buffer dtype rather than a hardcoded float32 — matters because the oracle-verification tests above deliberately run in float64 for precision, and a hardcoded cast would have silently broken that tolerance. This is also just the right call independent of the crash: the integration loop is numerically sensitive enough that it already needed 8× sub-stepping, so it shouldn't run under reduced precision regardless of the training loop's AMP setting.</p>
+      </div>
+
+      <table class="mini">
+        <thead><tr><th>Model</th><th class="num">Test mean px error</th><th class="num">Mean normalised error</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td>grid_fusion (baseline)</td><td class="num">184.02</td><td class="num">0.1608</td><td>—</td></tr>
+          <tr><td>grid_fusion_physics (Hill, after fixes)</td><td class="num">185.24</td><td class="num">0.1633</td><td>+0.7% vs baseline</td></tr>
+          <tr><td>grid_fusion_physics3 (3-DOF, CUDA, 15 epochs)</td><td class="num">184.49</td><td class="num">0.1629</td><td>+0.25% vs baseline — best physics variant</td></tr>
+        </tbody>
+      </table>
+
+      <div class="panel">
+        <h3><span class="tag">Diagnosis</span>physics_blend never moved off its ~0.018 init</h3>
+        <p>Scrubbing a real trial in the new interactive matplotlib 3D viewer (<code>scripts/visualize_arm3_matplotlib.py</code>) showed <code>physics_blend = 0.0185</code> — statistically identical to the sigmoid(−4) initialisation — and the physics branch's own screen-space endpoint prediction sitting visibly far from both the click target and the (accurate) fusion prediction.</p>
+      </div>
+
+      <div class="callout warn">
+        <span class="callout-label">Inference</span>
+        The 184.49&nbsp;px result is not evidence that physics is competitive with <code>grid_fusion</code> — it is evidence that the model correctly learned to <strong>almost entirely ignore it</strong>. With blend ≈ 0.0185, the reported prediction is ~98% pure <code>grid_fusion</code>; the score ties baseline because it <em>is</em>, essentially, baseline. The branch hasn't been shown to help or meaningfully hurt, because it never had enough gradient pressure toward its own accuracy to earn a real blend weight — a genuinely different situation from the Hill branch's earlier bugs, which actively worked against it.
+      </div>
+    </section>
+
+    <section id="weight-test">
+      <div class="study-head"><span class="study-num">Study 5</span><h2>Stress-testing physics_weight × 10, and training longer</h2><span class="study-status pending">Launched, result pending</span></div>
+      <p class="lede">Direct response to the Study 4 diagnosis. At <code>physics_weight = 0.1</code>, the physics endpoint's own loss term contributed only ~5–6% of total loss across a full 15-epoch run — not enough pressure to establish whether <code>physics_prediction</code> is even <em>capable</em> of matching <code>grid_fusion</code>'s accuracy, only that it was never incentivized to try. Raised to <code>1.0</code> (10×) in <code>configs/hill_fusion.yaml</code>, making it the dominant loss term instead, and epoch budget raised from 15 to 40 since <code>--freeze-base-imu</code> means only the physics branch, blend weight and fusion head are actually learning in this setup.</p>
+      <div class="panel">
+        <h3><span class="tag">Pre-flight</span>Local smoke test before spending 4090 time on it</h3>
+        <p>6 real optimizer steps on MPS for both <code>grid_fusion_physics</code> and <code>grid_fusion_physics3</code> under the new weight: no NaN, no crash, config loads the intended value, and <code>physics_loss</code> is now clearly the dominant loss term as designed (total loss ~20–25 vs ~13–16 at the old weight, mostly from the physics term).</p>
+      </div>
+      <div class="callout">
+        <span class="callout-label">What would actually answer the question</span>
+        Not just the final score. If <code>physics_loss</code> trends down substantially over the run, the branch is capable of an accurate endpoint. If it stays flat and high regardless of weight, that's the answer already, independent of what <code>physics_blend</code> does. If <code>physics_loss</code> comes down but blend still doesn't move, the blend-weight gradient path itself is worth a second look. And if the final test error comes out clearly worse than the 184&nbsp;px baseline, that's informative too — it would mean forcing physics accuracy traded off against the primary task, a real cost, not a bug.
+      </div>
+    </section>
+
+    <section id="synthesis">
+      <div class="closing">
+        <h2>Where this actually leaves things</h2>
+        <div class="timeline">
+          <div class="tl-item"><div class="tl-commit">Study 1</div><div class="tl-title">Cross-variate attention, forced open</div><p>Fixing the norm bug let EMG genuinely participate — and accuracy got worse. The model was correctly ignoring a weak signal, not broken.</p></div>
+          <div class="tl-item"><div class="tl-commit">Study 3 &amp; 4</div><div class="tl-title">Two independent physics formulations, same outcome</div><p>Hill 2-link and 3-DOF rigid-body physics arrive at the identical shape of result after real bugs are fixed: stops hurting, doesn't help, and the one mechanism that would show real influence — a learned blend weight — stays pinned near its cautious initialisation in both.</p></div>
+          <div class="tl-item"><div class="tl-commit">Study 2</div><div class="tl-title">The one clean win came from data hygiene, not architecture</div><p>Per-session EMG normalisation fixed a case where the raw signal was actively misleading cross-participant generalisation — a preprocessing fix, not a new pathway for EMG to express itself through.</p></div>
+        </div>
+        <p style="color:#e3d9ff;font-size:14.5px;margin:18px 0 0;">Three structurally different attempts to give EMG more room — cross-variate attention, physiologically-structured muscle dynamics, and general rigid-body dynamics with a learned torque head — have each converged on the same conclusion: <strong><code>grid_fusion</code>'s existing IMU+EMG late fusion already captures what is usable in this data</strong>, and none of the more structured pathways tried so far have found leverage beyond it. That is a real, load-bearing finding, not an absence of results — it is exactly the kind of thing this document exists to make visible rather than let a rising KPI chart quietly obscure. Study 5 is the open thread: whether that conclusion survives genuinely forcing the physics branch to compete for gradient share, rather than letting it sit at a cautious default. The per-participant calibration idea raised earlier in this work (learnable arm-length scale, endpoint-affine offset per person) is still unstarted, and per the Study 4 diagnosis may matter more than loss weighting — if the physics branch's own kinematics were more accurate per person, the blend weight would have something worth growing toward.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>Written by hand from git history and real training/evaluation runs — not auto-generated from evaluation CSVs like the companion dashboard.</span>
+    <span>Sources: commits aa32e84 … 61010ae, plus in-session CUDA training runs on grid_fusion / grid_fusion_physics / grid_fusion_physics3 (a1, fold 0)</span>
+  </footer>
+</div>
+</body>
+</html>
