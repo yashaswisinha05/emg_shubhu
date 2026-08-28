@@ -86,6 +86,20 @@ loss:
   physics_residual_weight: 0.01
 
 physics:
+  # Prescribe the two shoulder joints from measured IMU orientation and
+  # integrate only the elbow. All four sensors sit proximal to the elbow, so
+  # the shoulder is observed and the elbow is not; BB/TB EMG is the only
+  # signal that carries elbow flexion. Set false to ablate back to
+  # free-integrating all three joints from a context guess.
+  imu_driven_shoulder: true
+  # Give the rollout the gravity torque it already knows so the learned term
+  # only explains voluntary drive (tau = known + learned).
+  gravity_compensation: true
+  # Bound on the learned elbow torque. Measured against this arm's forearm
+  # inertia and joint damping: 1 N*m sweeps the elbow across essentially its
+  # whole range over a typical trial, while 3 N*m drove it into a joint stop
+  # at every setting tested, leaving no usable gradient.
+  torque_scale: 1.0
   # Integrate every 4th sample (~37 Hz). Arm dynamics are far slower than the
   # 148 Hz sampling rate, and this keeps the differentiable rollout cheap.
   decimation: 4

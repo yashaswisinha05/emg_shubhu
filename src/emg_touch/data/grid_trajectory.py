@@ -214,6 +214,21 @@ def grid_imu_feature_names(data_config: dict[str, Any]) -> tuple[str, ...]:
     return tuple(f"raw_{name}" for name in IMU_COLUMNS) + calibrated
 
 
+def grid_imu_orientation_indices(data_config: dict[str, Any]) -> tuple[int, ...]:
+    """Feature positions of the integrated relative-orientation channels.
+
+    Three axes per sensor. These are the cumulative integral of calibrated
+    gyro, so they measure angular displacement since the trial's calibration
+    window rather than absolute posture - orientation_rel is ~0 at t=0 by
+    construction, which is why the physics branch consumes them as a
+    displacement and infers the absolute starting posture separately.
+    """
+    names = grid_imu_feature_names(data_config)
+    return tuple(
+        position for position, name in enumerate(names) if "orientation_rel" in name
+    )
+
+
 def _masked_channel_median(
     values: np.ndarray, mask: np.ndarray, sample_count: int
 ) -> tuple[np.ndarray, np.ndarray]:

@@ -886,7 +886,21 @@ class GridFusionPhysics3Regressor(nn.Module):
         self.fusion = GridFusionRegressor(config)
         self.physics = PhysicsBranch3(config)
         physics = config.get("physics", {})
+        d_model = int(config["model"]["d_model"])
         self.raw_blend = nn.Parameter(torch.tensor(float(physics.get("blend_init", -4.0))))
+        # A single global blend scalar cannot express that physics may be
+        # worth trusting on some trials and not others: measured across two
+        # loss weights it simply froze at its initialisation, and a direct
+        # gradient read found the per-batch incentive averaging to noise. This
+        # gate lets the weight vary per trial on the same context the rest of
+        # the branch sees. Zero-initialised, so the model starts at exactly
+        # the previous global-scalar behaviour and any per-trial structure has
+        # to be earned.
+        self.blend_gate = nn.Sequential(
+            nn.LayerNorm(d_model), nn.Linear(d_model, 32), nn.GELU(), nn.Linear(32, 1)
+        )
+        nn.init.zeros_(self.blend_gate[-1].weight)
+        nn.init.zeros_(self.blend_gate[-1].bias)
 
     @property
     def blend(self) -> torch.Tensor:
@@ -900,14 +914,18 @@ class GridFusionPhysics3Regressor(nn.Module):
             batch["lengths"],
             outputs["emg_context"],
             batch["subject"],
+            batch["imu"],
+            batch["imu_mask"],
         )
         outputs.update(physics)
         outputs["fusion_prediction"] = outputs["prediction"]
-        blend = self.blend
-        outputs["physics_blend"] = blend.expand(outputs["prediction"].size(0))
+        blend = torch.sigmoid(
+            self.raw_blend + self.blend_gate(outputs["emg_context"]).squeeze(-1)
+        )
+        outputs["physics_blend"] = blend
         blended = (
-            (1.0 - blend) * outputs["prediction"]
-            + blend * physics["physics_prediction"].clamp(0.0, 1.0)
+            (1.0 - blend).unsqueeze(-1) * outputs["prediction"]
+            + blend.unsqueeze(-1) * physics["physics_prediction"].clamp(0.0, 1.0)
         )
         outputs["prediction"] = blended
         if "direct_prediction" in outputs:
