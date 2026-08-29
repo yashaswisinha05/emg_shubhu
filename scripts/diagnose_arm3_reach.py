@@ -203,6 +203,50 @@ def main() -> None:
     closer = (d_phys < d_fuse).mean()
     print(f"  physics closer than fusion on {closer*100:.0f}% of trials")
 
+    # ---- 6. is a folded elbow a real optimum, or just undertrained? --------
+    # If the elbow has settled near one end of its range with almost no
+    # per-trial variation, that alone does not say whether it is a genuine
+    # local optimum (more training would not fix it) or simply undertrained
+    # (more training likely would). Bias the loaded model's own torque head
+    # toward extension/flexion directly and see whether physics gets closer
+    # to target - the actual model, the actual weights, no synthetic stand-in.
+    print("\n[6] Elbow bias sweep on this checkpoint (is folding actually helping?)")
+    torque_head = getattr(model.physics, "torque_head", None)
+    if torque_head is None:
+        print("  skipped: this branch has no torque_head (Hill muscle model)")
+    else:
+        final_layer = torque_head.net[-1]
+        original_bias = final_layer.bias.detach().clone()
+        results = []
+        for delta in (-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0):
+            with torch.no_grad():
+                final_layer.bias.copy_(original_bias)
+                final_layer.bias[2] += delta  # negative = push toward extension
+                out = model(batch)
+            d = np.linalg.norm(
+                out["physics_prediction"].detach().cpu().numpy() - target, axis=-1
+            ).mean()
+            elbow_now = out["physics_angles"][:, 2].mean().item()
+            results.append((delta, elbow_now, d))
+            print(f"  bias delta={delta:+.1f} -> elbow mean={elbow_now:.3f} rad  "
+                  f"physics->target={d:.4f}")
+        with torch.no_grad():
+            final_layer.bias.copy_(original_bias)
+        best = min(results, key=lambda r: r[2])
+        baseline = next(r for r in results if r[0] == 0.0)
+        if best[0] == 0.0:
+            print("  VERDICT: current elbow policy is already the best of those tried "
+                  "- consistent with undertrained rather than a bad optimum.")
+        elif best[2] < baseline[2] * 0.97:
+            direction = "more extension (toward 0)" if best[0] < 0 else "more flexion (toward 2.8)"
+            print(f"  VERDICT: {direction} measurably reduces error ({best[2]:.4f} vs "
+                  f"{baseline[2]:.4f} at the trained bias) - the trained elbow angle is "
+                  "leaving accuracy on the table, not just undertrained on other things.")
+        else:
+            print("  VERDICT: no bias tried beats the trained setting by a meaningful "
+                  "margin - the elbow's current position is close to locally optimal "
+                  "given everything else in the model as it stands.")
+
     # ---- figures -----------------------------------------------------------
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
