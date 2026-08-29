@@ -18,10 +18,23 @@ from torch import nn
 
 GRAVITY = 9.81
 
-# Paper Table 1: upper arm and forearm.
-LINK_LENGTH = (0.298, 0.419)
+# Measured on this rig: shoulder-to-elbow 0.50 m, elbow-to-wrist 0.60 m,
+# screen at 1.10 m from the seated participant - i.e. the screen sits right
+# at the arm's full-extension reach, not comfortably inside it. The paper's
+# own population-average lengths (0.298, 0.419; total reach 0.717 m) fall
+# 35% short of that and were the likely cause of physics_prediction's large
+# standalone error (407.8 px on a real run) - a hand that can never get more
+# than 0.717 m from the shoulder cannot land near a target 1.10 m away no
+# matter how well everything else is trained.
+# CoM offsets are not separately measured, so they keep the paper's
+# fractional position along each segment (0.510 of upper-arm length, 0.432
+# of forearm length - a body-proportion ratio, not an absolute figure)
+# applied to the new lengths, rather than an absolute number that has no
+# measurement behind it. Mass and inertia are still the paper's population
+# values; no measurement exists yet to replace them.
+LINK_LENGTH = (0.50, 0.60)
 LINK_MASS = (2.089, 1.912)
-CENTRE_OF_MASS = (0.152, 0.181)
+CENTRE_OF_MASS = (0.255, 0.259)
 MOMENT_OF_INERTIA = (0.0159, 0.0257)
 
 

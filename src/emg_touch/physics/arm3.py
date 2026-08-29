@@ -30,10 +30,13 @@ from torch import nn
 
 GRAVITY = 9.81
 
-# Same anthropometry as the old planar model (paper Table 1).
-LINK_LENGTH = (0.298, 0.419)
+# Measured on this rig, not the paper's population average - see arm.py's
+# LINK_LENGTH comment for why this changed and what it fixes. CoM offsets
+# keep the paper's fractional position along each segment; mass and inertia
+# are still the paper's population values.
+LINK_LENGTH = (0.50, 0.60)
 LINK_MASS = (2.089, 1.912)
-CENTRE_OF_MASS = (0.152, 0.181)
+CENTRE_OF_MASS = (0.255, 0.259)
 # The old model only ever needed a single (sagittal-plane) bending inertia per
 # link; keep those as Iyy/Izz (the two transverse axes, taken equal under a
 # thin-cylinder symmetry assumption - reasonable for a limb segment, and it is
