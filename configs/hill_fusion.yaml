@@ -84,17 +84,24 @@ loss:
   # Charge for residual torque so the Hill terms explain the motion rather
   # than the residual quietly absorbing all of it.
   physics_residual_weight: 0.01
-  # Bounds the endpoint-to-screen affine's weight magnitude (physics3 only).
-  # A free 3->2 affine has enough freedom to fit the target using only the
-  # well-measured, high-variance shoulder axes, leaving the elbow no
-  # gradient pressure even when its trajectory is wrong - confirmed on a
-  # real checkpoint via scripts/diagnose_arm3_reach.py's bias sweep, where
-  # extending the elbow only looked worse because the affine had co-adapted
-  # to the folded endpoint distribution, not because folding is physically
-  # correct. 0.05 is a starting point to tune, not a measured value - watch
-  # affine_penalty and elbow travel (section [1] of that script) together
-  # after raising it.
-  affine_weight_penalty: 0.05
+  # Charges imbalance between the endpoint-to-screen affine's three input
+  # columns (physics3 only) - coefficient of variation of ||W[:,0]||,
+  # ||W[:,1]||, ||W[:,2]||, not raw magnitude. A free 3->2 affine can fit the
+  # target using only the well-measured, high-variance shoulder axes,
+  # leaving the elbow no gradient pressure even when its trajectory is
+  # wrong - confirmed on a real checkpoint via diagnose_arm3_reach.py's bias
+  # sweep. A first attempt at this penalised raw ||W||^2 at weight 0.05 and
+  # measurably did nothing (elbow travel 0.033 -> 0.040 rad, same
+  # bias-sweep verdict) - a uniform-magnitude penalty doesn't create
+  # pressure to use one column *more* than another, only to shrink all of
+  # them together. This version was measured directly instead of guessed:
+  # the penalty sits around 0.6-1.3 against physics_loss's ~7 at
+  # physics_weight=1.0, and confirmed to push gradient preferentially into
+  # an artificially collapsed column (7.8 vs 6.5 for the others) before
+  # this weight was chosen. 1.0 is still a starting point to tune, not a
+  # final value - watch affine_penalty and elbow travel (section [1] of
+  # diagnose_arm3_reach.py) together after changing it.
+  affine_weight_penalty: 1.0
 
 physics:
   # Prescribe the two shoulder joints from measured IMU orientation and

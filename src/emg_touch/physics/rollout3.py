@@ -311,11 +311,14 @@ class PhysicsBranch3(nn.Module):
             # worse only because the affine was co-calibrated for the folded
             # endpoint distribution the elbow had already settled into, not
             # because folding is physically correct. Exposed here so
-            # grid_point_loss can charge for the weight matrix's magnitude
-            # and bound that freedom, without presupposing which physical
-            # axis maps to which screen axis - an explicit-pose attempt at
-            # that was tried already and converged to a 30cm arm and a 1m
-            # screen (see arm.py).
+            # grid_point_loss can charge for imbalance between the affine's
+            # three input columns (coefficient of variation of their norms,
+            # not raw magnitude - a uniform-magnitude penalty was tried
+            # first and measurably did nothing, since it doesn't create
+            # pressure to use one column more than another), without
+            # presupposing which physical axis maps to which screen axis -
+            # an explicit-pose attempt at that was tried already and
+            # converged to a 30cm arm and a 1m screen (see arm.py).
             "physics_affine_weight": self.to_screen.linear.weight,
         }
         if self.imu_driven_shoulder:

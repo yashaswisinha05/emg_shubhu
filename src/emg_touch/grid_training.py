@@ -378,14 +378,34 @@ def grid_point_loss(
     # directly on a trained checkpoint (biasing the elbow toward extension
     # made physics_prediction worse only because the affine was co-calibrated
     # for the folded endpoint distribution, not because folding is actually
-    # correct). Bounding the weight matrix's magnitude, not steering it
-    # toward a specific structure - an explicit physical target for a 3D->2D
-    # map was tried already for this arm and converged to a 30cm arm and a 1m
-    # screen (arm.py), so this charges only for how much freedom the affine
-    # has, never for which physical axis it decides maps to which screen axis.
+    # correct).
+    #
+    # First version of this penalty charged ||W||^2 (overall magnitude) and
+    # measurably did nothing at weight 0.05: elbow travel barely moved (0.033
+    # -> 0.040 rad) and the bias-sweep verdict didn't change. On reflection
+    # that penalises the wrong quantity - a uniform shrink doesn't create any
+    # pressure to use the elbow's input column *more* than the shoulder's
+    # columns, it just scales all three down together (or does nothing if the
+    # elbow's column is already near zero, since there's little there to
+    # shrink). What actually needs charging is the *imbalance* between
+    # columns, not the overall scale, which the affine legitimately needs to
+    # map metre-scale positions into normalised screen coordinates.
+    #
+    # Charges the coefficient of variation across the three input columns'
+    # norms (std/mean of ||W[:,0]||, ||W[:,1]||, ||W[:,2]||) - scale
+    # invariant, so it doesn't fight the affine's necessary overall gain,
+    # only the gap between its most- and least-used input dimensions. Still
+    # not a structural/identity target - it never says which physical axis
+    # should carry more weight, only that none of the three should be
+    # structurally ignored (an explicit physical target for this exact
+    # 3D->2D map was tried once already and converged to a 30cm arm and a 1m
+    # screen - arm.py).
     affine_penalty = outputs["heatmap_logits"].new_zeros(())
     if "physics_affine_weight" in outputs:
-        affine_penalty = outputs["physics_affine_weight"].square().mean()
+        column_norm = outputs["physics_affine_weight"].norm(dim=0)
+        # 1e-6, not the pixel-space `epsilon` above - this ratio is
+        # dimensionless (a coefficient of variation), unrelated units.
+        affine_penalty = column_norm.std() / (column_norm.mean() + 1e-6)
         total = total + float(loss_config.get("affine_weight_penalty", 0.0)) * affine_penalty
 
     gate_penalty = outputs["heatmap_logits"].new_zeros(())
