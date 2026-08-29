@@ -11,12 +11,17 @@ over SSH on a training box:
     or is it replaying one canned motion regardless of input?
   - is the hand inside the arm's reachable workspace, with link lengths
     preserved (a check on the forward kinematics itself)?
-  - does the endpoint move toward the click target over the trial?
+  - does the endpoint move toward the click target over the trial - not
+    just in normalised screen units, but in real metres against an actual
+    screen plane placed at the measured shoulder-to-screen distance?
 
-Writes one figure per trial (3-D stroboscopic arm, joint angles over time,
-screen-space predictions against the target) plus a summary scatter, and
-prints a numeric verdict. The printed report is the primary output; the
-figures are supporting evidence to scp back.
+Writes one figure per trial - a 3-D view of the arm reaching (or not)
+toward a drawn screen plane at the real measured distance, with the click
+target placed on it as an actual 3-D point and a dashed line showing the
+remaining gap; joint angles over time; and screen-space predictions
+against the target - plus a summary scatter, and prints a numeric verdict.
+The printed report is the primary output; the figures are supporting
+evidence to scp back and look at.
 
 Usage:
   python scripts/diagnose_arm3_reach.py \
@@ -61,6 +66,33 @@ def chain_points(arm, angles: torch.Tensor) -> np.ndarray:
     return torch.stack([shoulder, elbow, hand], dim=1).detach().cpu().numpy()
 
 
+def screen_point_3d(
+    normalised_xy: np.ndarray, distance: float, width: float, height: float
+) -> np.ndarray:
+    """Map a normalised [0,1]x[0,1] screen coordinate (y=0 at top) to a 3-D
+    point on a screen plane placed `distance` metres along the arm's home
+    reach direction (+x), centred in front of the shoulder. Screen width and
+    height are plotting assumptions, not measurements - the geometry that
+    *is* measured (arm reach vs. screen distance) is what this whole
+    visualiser exists to check; exact panel size only affects where on the
+    drawn rectangle the target dot sits, not whether the arm's reach lines
+    up with the rectangle itself.
+    """
+    x = np.full(normalised_xy.shape[:-1], distance)
+    y = (normalised_xy[..., 0] - 0.5) * width
+    z = (0.5 - normalised_xy[..., 1]) * height
+    return np.stack([x, y, z], axis=-1)
+
+
+def draw_screen_plane(ax, distance: float, width: float, height: float) -> None:
+    corners_y = np.array([-1, 1, 1, -1, -1]) * (width / 2)
+    corners_z = np.array([-1, -1, 1, 1, -1]) * (height / 2)
+    ax.plot(np.full(5, distance), corners_y, corners_z, color="#888780", lw=1.2)
+    xx, yy = np.meshgrid([distance, distance], [-width / 2, width / 2])
+    zz = np.array([[-height / 2, -height / 2], [height / 2, height / 2]])
+    ax.plot_surface(xx, yy, zz, color="#B4B2A9", alpha=0.15, shade=False)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/hill_fusion.yaml")
@@ -69,6 +101,18 @@ def main() -> None:
     parser.add_argument("--device")
     parser.add_argument("--trials", type=int, default=6)
     parser.add_argument("--output-dir", default="evaluation/arm3_diagnosis")
+    parser.add_argument(
+        "--screen-distance", type=float, default=1.10,
+        help="Measured distance from shoulder to screen, metres.",
+    )
+    parser.add_argument(
+        "--screen-width", type=float, default=0.34,
+        help="Screen width, metres - not measured, a plotting default (adjust to your rig).",
+    )
+    parser.add_argument(
+        "--screen-height", type=float, default=0.20,
+        help="Screen height, metres - not measured, a plotting default (adjust to your rig).",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -203,6 +247,22 @@ def main() -> None:
     closer = (d_phys < d_fuse).mean()
     print(f"  physics closer than fusion on {closer*100:.0f}% of trials")
 
+    # Same accuracy question, but in real metres against a screen placed at
+    # the measured distance - normalised units above can't say whether the
+    # arm's hand is anywhere near the screen at all, only how the affine's
+    # already-fitted output compares; this measures the hand's own physical
+    # position against where the target actually is in space.
+    final_hand = torch.stack(
+        [trajectory[b, steps_for(b) - 1] for b in range(batch_size)]
+    )
+    final_hand_xyz = arm.endpoint(final_hand).detach().cpu().numpy()
+    target_xyz = screen_point_3d(target, args.screen_distance, args.screen_width, args.screen_height)
+    reach_gap = np.linalg.norm(final_hand_xyz - target_xyz, axis=-1)
+    print(f"  hand -> screen-plane target, in real metres: mean={reach_gap.mean():.3f} "
+          f"min={reach_gap.min():.3f} max={reach_gap.max():.3f} "
+          f"(screen assumed {args.screen_width:.2f}x{args.screen_height:.2f} m "
+          f"at {args.screen_distance:.2f} m)")
+
     # ---- 6. is a folded elbow a real optimum, or just undertrained? --------
     # If the elbow has settled near one end of its range with almost no
     # per-trial variation, that alone does not say whether it is a genuine
@@ -257,17 +317,29 @@ def main() -> None:
         fig = plt.figure(figsize=(15, 4.2))
 
         ax = fig.add_subplot(131, projection="3d")
+        draw_screen_plane(ax, args.screen_distance, args.screen_width, args.screen_height)
         picks = np.linspace(0, k - 1, min(6, k)).astype(int)
         pts_i = chain_points(arm, q[picks])
         for n, p in enumerate(pts_i):
             shade = 0.78 - 0.68 * (n / max(1, len(pts_i) - 1))
             ax.plot(p[:, 0], p[:, 1], p[:, 2], "-o", color=str(shade),
                     lw=3, ms=4, label="start" if n == 0 else ("touch" if n == len(pts_i) - 1 else None))
-        span = float(arm.link_length.sum())
-        ax.set_xlim(-span, span); ax.set_ylim(-span, span); ax.set_zlim(-span, span)
-        ax.view_init(elev=22, azim=48)
-        ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_zlabel("z (gravity)")
-        ax.set_title(f"arm through trial (dark = touch)")
+        hand_final = pts_i[-1, 2]
+        target_3d = screen_point_3d(
+            target[i], args.screen_distance, args.screen_width, args.screen_height
+        )
+        ax.scatter(*target_3d, s=70, c="#D85A30", marker="x", label="click target", zorder=5)
+        ax.plot(
+            [hand_final[0], target_3d[0]], [hand_final[1], target_3d[1]],
+            [hand_final[2], target_3d[2]], "--", color="#D85A30", lw=1, alpha=0.7,
+        )
+        x_lo, x_hi = -0.05, args.screen_distance * 1.12
+        yz_span = max(float(arm.link_length.sum()), args.screen_width / 2, args.screen_height / 2)
+        ax.set_xlim(x_lo, x_hi); ax.set_ylim(-yz_span, yz_span); ax.set_zlim(-yz_span, yz_span)
+        ax.view_init(elev=18, azim=-58)
+        ax.set_xlabel("reach (m)"); ax.set_ylabel("lateral (m)"); ax.set_zlabel("vertical (m)")
+        gap = float(np.linalg.norm(hand_final - target_3d))
+        ax.set_title(f"arm vs. screen (dark=touch, gap to target={gap:.2f} m)")
         ax.legend(fontsize=7, loc="upper left")
 
         ax2 = fig.add_subplot(132)
