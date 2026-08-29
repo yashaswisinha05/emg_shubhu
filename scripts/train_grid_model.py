@@ -155,6 +155,9 @@ def main() -> None:
                 "pixel_loss",
                 "radial_loss",
                 "transport_loss",
+                "physics_loss",
+                "physics_residual_loss",
+                "affine_penalty",
             )
         }
         for batch in tqdm(
@@ -189,12 +192,19 @@ def main() -> None:
         record.update({f"train_{name}": meter.average for name, meter in meters.items()})
         history.append(record)
         pd.DataFrame(history).to_csv(output_dir / "history.csv", index=False)
+        physics_note = ""
+        if meters["physics_loss"].average > 0.0 or meters["affine_penalty"].average > 0.0:
+            physics_note = (
+                f" physics={meters['physics_loss'].average:.4f} "
+                f"affine_penalty={meters['affine_penalty'].average:.4f}"
+            )
         print(
             f"epoch={epoch} train={meters['loss'].average:.6f} "
             f"val={val_scores['total_loss']:.6f} "
             f"val_px={val_scores['mean_pixel_error']:.2f} "
             f"select={selection_metric}:{selection_value:.2f} "
             f"lr={record['learning_rate']:.2e}"
+            f"{physics_note}"
         )
         if selection_value < best:
             best = selection_value

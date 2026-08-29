@@ -84,6 +84,17 @@ loss:
   # Charge for residual torque so the Hill terms explain the motion rather
   # than the residual quietly absorbing all of it.
   physics_residual_weight: 0.01
+  # Bounds the endpoint-to-screen affine's weight magnitude (physics3 only).
+  # A free 3->2 affine has enough freedom to fit the target using only the
+  # well-measured, high-variance shoulder axes, leaving the elbow no
+  # gradient pressure even when its trajectory is wrong - confirmed on a
+  # real checkpoint via scripts/diagnose_arm3_reach.py's bias sweep, where
+  # extending the elbow only looked worse because the affine had co-adapted
+  # to the folded endpoint distribution, not because folding is physically
+  # correct. 0.05 is a starting point to tune, not a measured value - watch
+  # affine_penalty and elbow travel (section [1] of that script) together
+  # after raising it.
+  affine_weight_penalty: 0.05
 
 physics:
   # Prescribe the two shoulder joints from measured IMU orientation and

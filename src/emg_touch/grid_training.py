@@ -371,6 +371,23 @@ def grid_point_loss(
             + float(loss_config.get("physics_residual_weight", 0.01)) * residual_loss
         )
 
+    # A free endpoint-to-screen affine has enough degrees of freedom to fit
+    # the target using only whichever input dimensions already vary a lot
+    # (the well-measured shoulder axes), leaving no pressure on a poorly
+    # varying one (the elbow) even when its trajectory is wrong - confirmed
+    # directly on a trained checkpoint (biasing the elbow toward extension
+    # made physics_prediction worse only because the affine was co-calibrated
+    # for the folded endpoint distribution, not because folding is actually
+    # correct). Bounding the weight matrix's magnitude, not steering it
+    # toward a specific structure - an explicit physical target for a 3D->2D
+    # map was tried already for this arm and converged to a 30cm arm and a 1m
+    # screen (arm.py), so this charges only for how much freedom the affine
+    # has, never for which physical axis it decides maps to which screen axis.
+    affine_penalty = outputs["heatmap_logits"].new_zeros(())
+    if "physics_affine_weight" in outputs:
+        affine_penalty = outputs["physics_affine_weight"].square().mean()
+        total = total + float(loss_config.get("affine_weight_penalty", 0.0)) * affine_penalty
+
     gate_penalty = outputs["heatmap_logits"].new_zeros(())
     gate_weight = float(loss_config.get("imu_gate_weight", 0.0))
     if "imu_gate" in outputs:
@@ -386,6 +403,7 @@ def grid_point_loss(
         "radial_loss": radial_loss,
         "transport_loss": transport_loss,
         "imu_gate_penalty": gate_penalty,
+        "affine_penalty": affine_penalty,
         "physics_loss": physics_loss,
         "physics_residual_loss": residual_loss,
     }
