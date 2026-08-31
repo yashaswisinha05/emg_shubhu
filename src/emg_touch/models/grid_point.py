@@ -302,7 +302,18 @@ class SpatialPointHead(nn.Module):
         if self.direct is not None:
             outputs["direct_logits"] = self.direct(hidden)
         if self.log_sigma is not None:
-            outputs["direct_log_sigma"] = self.log_sigma(hidden)
+            # hidden.detach(): reads off the same encoding mu reads off
+            # (the "keep encoding" reuse), but must not let sigma's
+            # gradient back into `shared` itself - shared's weights feed
+            # mu too, so gradient reaching them from the sigma branch
+            # changes what mu computes on the next step even though
+            # nothing ever touches `direct`'s own weights directly. Found
+            # this the hard way: detaching only the downstream mu *value*
+            # inside the NLL loss (grid_training.py) verified clean on
+            # `direct.weight.grad` in isolation, but a real 35-epoch run
+            # still measurably hurt accuracy (184 -> 204px test) - the
+            # leak was one level further upstream than that check looked.
+            outputs["direct_log_sigma"] = self.log_sigma(hidden.detach())
         return outputs
 
 
