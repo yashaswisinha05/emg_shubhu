@@ -340,6 +340,30 @@ def grid_point_loss(
         + float(loss_config.get("transport_weight", 0.0)) * transport_loss
     )
 
+    # VAE-style uncertainty: mu (direct_prediction) is untouched by this -
+    # it is still trained exactly as before, purely by the losses above.
+    # sigma is trained only by this Gaussian NLL against the same target,
+    # so it has to earn a calibrated spread rather than being handed one -
+    # too small and a real miss costs the (target-mu)^2/sigma^2 term
+    # dearly, too large and the log(sigma) term costs it for needless
+    # doubt. Deliberately not wired into mu's own training at all yet -
+    # first validate sigma calibrates sensibly on its own (roughly 68% of
+    # targets within mu+-sigma, shrinking as more causal EMG/IMU history
+    # arrives) before letting it influence anything else.
+    nll_loss = outputs["heatmap_logits"].new_zeros(())
+    if "direct_sigma" in outputs:
+        sigma = outputs["direct_sigma"]
+        # detach(): without it this term's (target-mu)^2 half would also
+        # backprop into mu, contradicting "mu is trained exactly as before" -
+        # sigma has to explain mu's existing errors, not reshape mu to suit
+        # itself.
+        mu = coordinate_prediction.detach()
+        nll_per_sample = (
+            torch.log(sigma) + 0.5 * ((batch["target"] - mu) / sigma).square()
+        ).sum(dim=-1)
+        nll_loss = weighted_mean(nll_per_sample)
+        total = total + float(loss_config.get("nll_weight", 0.0)) * nll_loss
+
     # An EMG-first model may lean on the IMU residual instead of learning from
     # EMG. Charging for the gate keeps IMU a last resort and makes the mean
     # gate a reportable measure of how much IMU the task requires.
@@ -424,6 +448,7 @@ def grid_point_loss(
         "transport_loss": transport_loss,
         "imu_gate_penalty": gate_penalty,
         "affine_penalty": affine_penalty,
+        "nll_loss": nll_loss,
         "physics_loss": physics_loss,
         "physics_residual_loss": residual_loss,
     }

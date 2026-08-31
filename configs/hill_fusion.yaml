@@ -30,6 +30,15 @@ cross_validation:
 
 model:
   prediction_mode: "direct_aux_grid"
+  # VAE-style: grid_fusion's EMG residual head grows a second output (sigma)
+  # off the same trunk that already produces mu, trained by loss.nll_weight
+  # below. mu/pixel accuracy is completely unaffected - sigma is trained
+  # only by the NLL, never fed back into mu's own training. Test with
+  # --kind grid_fusion first (not a physics variant): the physics wrapper
+  # overwrites direct_prediction with its own blended output, so sigma
+  # would end up describing uncertainty around the blend, not around the
+  # plain fused mu this was designed to calibrate against.
+  predict_uncertainty: true
   grid_size: [8, 5]
   d_model: 128
   num_layers: 3
@@ -102,6 +111,14 @@ loss:
   # final value - watch affine_penalty and elbow travel (section [1] of
   # diagnose_arm3_reach.py) together after changing it.
   affine_weight_penalty: 1.0
+  # Weight on the Gaussian NLL that trains direct_sigma (model.
+  # predict_uncertainty above). 1.0 is a genuine unit-weighted NLL, not a
+  # guess to recalibrate later like the two weights above - the loss is
+  # already in the right units (log-likelihood of the target under
+  # N(mu, sigma^2), same normalised-screen scale mu itself is trained in),
+  # so there's no magnitude mismatch to correct for the way there was with
+  # affine_weight_penalty.
+  nll_weight: 1.0
 
 physics:
   # Prescribe the two shoulder joints from measured IMU orientation and

@@ -158,6 +158,7 @@ def main() -> None:
                 "physics_loss",
                 "physics_residual_loss",
                 "affine_penalty",
+                "nll_loss",
             )
         }
         for batch in tqdm(
@@ -198,6 +199,8 @@ def main() -> None:
                 f" physics={meters['physics_loss'].average:.4f} "
                 f"affine_penalty={meters['affine_penalty'].average:.4f}"
             )
+        if meters["nll_loss"].average != 0.0:
+            physics_note += f" nll={meters['nll_loss'].average:.4f}"
         print(
             f"epoch={epoch} train={meters['loss'].average:.6f} "
             f"val={val_scores['total_loss']:.6f} "

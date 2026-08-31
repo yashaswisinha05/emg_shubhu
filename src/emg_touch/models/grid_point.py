@@ -247,6 +247,7 @@ class SpatialPointHead(nn.Module):
         dropout: float,
         direct_prediction: bool = False,
         zero_initialize: bool = False,
+        predict_uncertainty: bool = False,
     ) -> None:
         super().__init__()
         self.grid_width = grid_width
@@ -261,6 +262,18 @@ class SpatialPointHead(nn.Module):
         self.heatmap = nn.Linear(d_model, cells)
         self.offsets = nn.Linear(d_model, cells * 2)
         self.direct = nn.Linear(d_model, 2) if direct_prediction else None
+        # VAE-style: the same trunk that already encodes context for the mean
+        # (mu = direct) also encodes a spread (sigma) - the "keep encoding"
+        # extra head the touch-location distillation idea needs, reusing the
+        # trunk rather than adding a second one. Deliberately not wired into
+        # mu at all yet (mu stays exactly the existing deterministic point,
+        # unaffected): the first thing worth validating is whether sigma
+        # calibrates sensibly at all (does it shrink as more causal EMG/IMU
+        # history arrives, does ~68% of targets land within mu+-sigma) before
+        # letting it influence training itself.
+        self.log_sigma = (
+            nn.Linear(d_model, 2) if (direct_prediction and predict_uncertainty) else None
+        )
         if zero_initialize:
             nn.init.zeros_(self.heatmap.weight)
             nn.init.zeros_(self.heatmap.bias)
@@ -269,6 +282,15 @@ class SpatialPointHead(nn.Module):
             if self.direct is not None:
                 nn.init.zeros_(self.direct.weight)
                 nn.init.zeros_(self.direct.bias)
+        if self.log_sigma is not None:
+            # Zero weight regardless of zero_initialize - a freshly added
+            # capability should start inert, same convention as every other
+            # new head this project has added. Bias set so sigma starts at
+            # ~0.12 normalised units (roughly this model's typical pixel
+            # error scale), not an arbitrary default - the model still has
+            # to earn any deviation from that through the NLL loss.
+            nn.init.zeros_(self.log_sigma.weight)
+            nn.init.constant_(self.log_sigma.bias, -2.12)  # log(0.12)
 
     def forward(self, context: torch.Tensor) -> dict[str, torch.Tensor]:
         hidden = self.shared(context)
@@ -279,6 +301,8 @@ class SpatialPointHead(nn.Module):
         }
         if self.direct is not None:
             outputs["direct_logits"] = self.direct(hidden)
+        if self.log_sigma is not None:
+            outputs["direct_log_sigma"] = self.log_sigma(hidden)
         return outputs
 
 
@@ -326,6 +350,12 @@ def finalize_point_prediction(outputs: dict[str, torch.Tensor]) -> None:
     outputs["grid_prediction"] = outputs["prediction"]
     outputs["direct_prediction"] = torch.sigmoid(outputs["direct_logits"])
     outputs["prediction"] = outputs["direct_prediction"]
+    if "direct_log_sigma" in outputs:
+        # Clamped in log-space before exp, not after: bounds sigma to
+        # roughly [0.0025, 7.4] normalised units - wide enough to never bind
+        # during normal training, narrow enough that a bad batch can't send
+        # sigma to 0 or inf and break the NLL loss that trains it.
+        outputs["direct_sigma"] = torch.exp(outputs["direct_log_sigma"].clamp(-6.0, 2.0))
 
 
 class IMUGridBackbone(nn.Module):
@@ -609,6 +639,7 @@ class GridFusionRegressor(nn.Module):
             if bool(config.get("continual", {}).get("enabled", False))
             else None
         )
+        self.predict_uncertainty = bool(model.get("predict_uncertainty", False))
         self.emg_residual_head = SpatialPointHead(
             int(model["d_model"]),
             grid_width,
@@ -616,6 +647,7 @@ class GridFusionRegressor(nn.Module):
             float(model["dropout"]),
             direct_prediction=self.direct_prediction,
             zero_initialize=True,
+            predict_uncertainty=self.predict_uncertainty,
         )
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -656,6 +688,13 @@ class GridFusionRegressor(nn.Module):
             outputs["direct_logits"] = base["direct_logits"] + reliability * residual[
                 "direct_logits"
             ]
+        if "direct_log_sigma" in residual:
+            # Uncertainty is scoped to the EMG residual head only, not
+            # combined with a (nonexistent, since the IMU base head isn't
+            # opted into this) base-model sigma - this is deliberately the
+            # smallest testable version: does sigma calibrate sensibly at
+            # all, before deciding how it should combine with anything else.
+            outputs["direct_log_sigma"] = residual["direct_log_sigma"]
         outputs.update(
             decode_grid_outputs(
                 heatmap_logits,
