@@ -593,6 +593,9 @@ def evaluate_grid_model(
         if participant_scale is not None:
             participant_scale = participant_scale.detach().cpu()
             participant_offset = participant_offset.detach().cpu()
+        direct_sigma = outputs.get("direct_sigma")
+        if direct_sigma is not None:
+            direct_sigma = direct_sigma.detach().cpu()
         imu_gate = outputs.get("imu_gate")
         if imu_gate is not None:
             imu_gate = imu_gate.detach().cpu().reshape(-1)
@@ -644,6 +647,9 @@ def evaluate_grid_model(
                 record["emg_reliability"] = float(reliability[index])
             if imu_gate is not None:
                 record["imu_gate"] = float(imu_gate[index])
+            if direct_sigma is not None:
+                record["direct_sigma_x"] = float(direct_sigma[index, 0])
+                record["direct_sigma_y"] = float(direct_sigma[index, 1])
             if physics_prediction is not None:
                 record["physics_prediction_x"] = float(physics_prediction[index, 0])
                 record["physics_prediction_y"] = float(physics_prediction[index, 1])
