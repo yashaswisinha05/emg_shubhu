@@ -214,6 +214,21 @@ def grid_imu_feature_names(data_config: dict[str, Any]) -> tuple[str, ...]:
     return tuple(f"raw_{name}" for name in IMU_COLUMNS) + calibrated
 
 
+def grid_imu_acceleration_indices(data_config: dict[str, Any]) -> tuple[int, ...]:
+    """Feature positions of the gravity-calibrated acceleration channels.
+
+    Three axes per sensor. Unlike orientation_rel these are a direct
+    measurement rather than an integral, which is what makes them usable as
+    the observable in an attractor model: acceleration is the quantity the
+    virtual-leader dynamics predicts from the destination, so it links the
+    latent to the data in one algebraic step instead of an integration chain.
+    """
+    names = grid_imu_feature_names(data_config)
+    return tuple(
+        position for position, name in enumerate(names) if "acc_cal" in name
+    )
+
+
 def grid_imu_orientation_indices(data_config: dict[str, Any]) -> tuple[int, ...]:
     """Feature positions of the integrated relative-orientation channels.
 

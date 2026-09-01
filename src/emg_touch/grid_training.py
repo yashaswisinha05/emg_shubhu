@@ -350,6 +350,30 @@ def grid_point_loss(
     # first validate sigma calibrates sensibly on its own (roughly 68% of
     # targets within mu+-sigma, shrinking as more causal EMG/IMU history
     # arrives) before letting it influence anything else.
+    # Virtual leader: supervise *every* decimated step's destination estimate
+    # against the same click, not just the pooled one. This is the reason the
+    # branch exists - it converts one supervision signal per trial into one
+    # per timestep on exactly the predicted quantity, which is the thinness
+    # every earlier temporal branch in this project ran into.
+    #
+    # Weighted by the branch's own per-step confidence so it is not forced to
+    # claim the destination is already obvious in the first few samples of a
+    # reach, when it genuinely is not - but the weights are normalised inside
+    # the branch, so this cannot be minimised by simply declaring everything
+    # unreliable.
+    vl_loss = outputs["heatmap_logits"].new_zeros(())
+    if "vl_destinations" in outputs:
+        destinations = outputs["vl_destinations"]
+        step_delta = (
+            destinations - batch["target"].unsqueeze(1)
+        ) * batch["canvas_size"].unsqueeze(1) / pixel_unit
+        step_distance = torch.sqrt(
+            step_delta.square().sum(dim=-1) + epsilon * epsilon
+        )
+        vl_per_sample = (outputs["vl_weights"] * step_distance).sum(dim=1)
+        vl_loss = weighted_mean(vl_per_sample)
+        total = total + float(loss_config.get("vl_weight", 0.0)) * vl_loss
+
     # VAE: KL(q(z|x) || N(0, I)), the price the model pays for every bit it
     # routes through the latent. Reported separately because its magnitude is
     # the diagnostic that matters - driven to ~0 the latent has collapsed to
@@ -469,6 +493,7 @@ def grid_point_loss(
         "affine_penalty": affine_penalty,
         "nll_loss": nll_loss,
         "kl_loss": kl_loss,
+        "vl_loss": vl_loss,
         "physics_loss": physics_loss,
         "physics_residual_loss": residual_loss,
     }
@@ -616,6 +641,9 @@ def evaluate_grid_model(
         direct_sigma = outputs.get("direct_sigma")
         if direct_sigma is not None:
             direct_sigma = direct_sigma.detach().cpu()
+        vl_sigma = outputs.get("vl_sigma")
+        if vl_sigma is not None:
+            vl_sigma = vl_sigma.detach().cpu()
         latent_mu = outputs.get("latent_mu")
         latent_sigma = outputs.get("latent_sigma")
         if latent_mu is not None:
@@ -675,6 +703,9 @@ def evaluate_grid_model(
             if direct_sigma is not None:
                 record["direct_sigma_x"] = float(direct_sigma[index, 0])
                 record["direct_sigma_y"] = float(direct_sigma[index, 1])
+            if vl_sigma is not None:
+                record["vl_sigma_x"] = float(vl_sigma[index, 0])
+                record["vl_sigma_y"] = float(vl_sigma[index, 1])
             if latent_mu is not None:
                 # Per-dimension so phase 2 can check whether these track
                 # anything pose-like before the kinematic decoder is wired in.

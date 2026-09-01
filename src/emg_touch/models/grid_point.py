@@ -14,6 +14,7 @@ from ..data.grid_trajectory import (
 from ..physics.rollout import PhysicsBranch
 from ..physics.rollout3 import PhysicsBranch3
 from .cross_variate import CrossVariateBackbone
+from .virtual_leader import VirtualLeaderBranch
 from .layers import PatchTransformerEncoder
 
 
@@ -26,6 +27,7 @@ GRID_MODEL_KINDS = (
     "grid_fusion_physics",
     "grid_fusion_physics3",
     "grid_fusion_vae",
+    "grid_fusion_vl",
 )
 
 
@@ -1099,6 +1101,46 @@ class GridFusionVAERegressor(nn.Module):
         return outputs
 
 
+class GridFusionVirtualLeaderRegressor(nn.Module):
+    """grid_fusion whose coordinate comes from a virtual-leader destination.
+
+    The fusion model is kept intact and still drives the grid path, so the
+    shared encoder keeps its existing supervision. The reported coordinate is
+    replaced by the confidence-weighted destination the virtual-leader branch
+    reads off per-timestep kinematics - see models/virtual_leader.py for the
+    attractor equation and why per-timestep destination estimates are the
+    point.
+
+    A blend against the fusion head is deliberately *not* used here. Every
+    blended variant this project has tried froze its weight near the
+    initialisation, so the branch is either the prediction or it is not; this
+    makes the comparison against grid_fusion unambiguous rather than
+    reporting a number that is 98% the baseline.
+    """
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        self.fusion = GridFusionRegressor(config)
+        self.virtual_leader = VirtualLeaderBranch(config)
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        outputs = self.fusion(batch)
+        branch = self.virtual_leader(
+            batch["emg"],
+            batch["emg_mask"],
+            batch["imu"],
+            batch["imu_mask"],
+            batch["lengths"],
+        )
+        outputs["fusion_prediction"] = outputs["prediction"]
+        outputs.update(branch)
+        # Both keys, for the same reason as every other branch here: the loss
+        # optimises direct_prediction and evaluation reads prediction.
+        outputs["direct_prediction"] = branch["vl_prediction"]
+        outputs["prediction"] = branch["vl_prediction"]
+        return outputs
+
+
 def build_grid_model(kind: str, config: dict[str, Any]) -> nn.Module:
     if kind == "grid_imu":
         return GridIMURegressor(config)
@@ -1116,4 +1158,6 @@ def build_grid_model(kind: str, config: dict[str, Any]) -> nn.Module:
         return GridFusionPhysics3Regressor(config)
     if kind == "grid_fusion_vae":
         return GridFusionVAERegressor(config)
+    if kind == "grid_fusion_vl":
+        return GridFusionVirtualLeaderRegressor(config)
     raise ValueError(f"Unknown grid model kind: {kind}")

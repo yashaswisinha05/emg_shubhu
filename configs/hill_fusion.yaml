@@ -128,6 +128,12 @@ loss:
   # the prior and carries nothing, and accuracy should then be no better
   # than predicting a constant.
   kl_weight: 0.01
+  # Weight on the per-timestep virtual-leader destination loss
+  # (grid_fusion_vl). Set to 1.0 so it sits at the same scale as the
+  # endpoint pixel losses it complements rather than competes with - both
+  # are charbonnier distances in the same pixel_normalizer_px units, so
+  # there is no magnitude mismatch to correct for here.
+  vl_weight: 1.0
 
 physics:
   # Prescribe the two shoulder joints from measured IMU orientation and

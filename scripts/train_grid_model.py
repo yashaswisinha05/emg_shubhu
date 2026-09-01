@@ -75,10 +75,12 @@ def main() -> None:
         "grid_fusion_physics",
         "grid_fusion_physics3",
         "grid_fusion_vae",
+        "grid_fusion_vl",
     ):
         raise ValueError(
             "Pretrained/frozen base IMU options require --kind grid_fusion, "
-            "grid_fusion_physics, grid_fusion_physics3, or grid_fusion_vae"
+            "grid_fusion_physics, grid_fusion_physics3, grid_fusion_vae, "
+            "or grid_fusion_vl"
         )
     if args.freeze_base_imu and not args.pretrained_imu:
         raise ValueError("--freeze-base-imu requires --pretrained-imu")
@@ -161,6 +163,7 @@ def main() -> None:
                 "affine_penalty",
                 "nll_loss",
                 "kl_loss",
+                "vl_loss",
             )
         }
         for batch in tqdm(
@@ -205,6 +208,8 @@ def main() -> None:
             physics_note += f" nll={meters['nll_loss'].average:.4f}"
         if meters["kl_loss"].average != 0.0:
             physics_note += f" kl={meters['kl_loss'].average:.4f}"
+        if meters["vl_loss"].average != 0.0:
+            physics_note += f" vl={meters['vl_loss'].average:.4f}"
         print(
             f"epoch={epoch} train={meters['loss'].average:.6f} "
             f"val={val_scores['total_loss']:.6f} "
