@@ -1,9 +1,7 @@
 """Destination-as-latent-state branch, after the virtual-leader formulation.
 
-Follows Liang, Ahmad & Godsill, "Joint Object Tracking and Intent
-Recognition" (IEEE T-AES 2026), which models a target's hidden goal as a
-virtual leader with its own dynamics that pulls the kinematic state toward
-it:
+Models a target's hidden goal as a virtual leader with its own dynamics
+that pulls the kinematic state toward it:
 
     d(xdot_t) = eta (r_t - x_t) dt - rho xdot_t dt + sigma_x dB_t
     d(r_t)    = sigma_r dB_t

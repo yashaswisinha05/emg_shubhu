@@ -7,9 +7,9 @@ generative decoder. Sample a destination z from the posterior, integrate
     xddot = eta (z - x) - rho xdot
 
 forward from the measured current state, and the result is a predicted future
-path. That is the paper's stochastic differential equation used the way it was
-written, rather than the algebraically-inverted form the untracked dataset
-required.
+path. That is the attractor's stochastic differential equation used the way
+it was written, rather than the algebraically-inverted form the untracked
+dataset required.
 
 The pieces:
 

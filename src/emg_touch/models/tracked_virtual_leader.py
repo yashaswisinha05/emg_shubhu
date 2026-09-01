@@ -9,10 +9,10 @@ follow from causal differences. The attractor readout
     r = x + (xddot + rho xdot) / eta
 
 then computes a destination estimate from measurements at every timestep,
-rather than from a latent state the network had to invent. That is the
-setting Liang, Ahmad & Godsill actually work in (measured kinematics from
-radar, intent inferred), so this is the faithful version of their model
-rather than the approximation the untracked dataset forced.
+rather than from a latent state the network had to invent. Measured
+kinematics with intent inferred from them is the setting the attractor
+model is actually meant for, so this is the faithful version rather than
+the approximation the untracked dataset forced.
 
 What EMG contributes once kinematics are measured is a sharper question than
 before, and this module is arranged so it can be answered rather than

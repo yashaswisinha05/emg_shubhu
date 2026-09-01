@@ -387,7 +387,7 @@ def grid_point_loss(
         if "prior_mu" in outputs:
             # KL between two diagonal Gaussians: the posterior against a
             # data-derived prior (the virtual-leader attractor readout)
-            # rather than N(0, I). This is where the paper's model actually
+            # rather than N(0, I). This is where the attractor model actually
             # enters the objective - the belief about the destination is
             # pulled toward what the observed acceleration implies, weighted
             # automatically by how much the per-timestep estimates agree.
