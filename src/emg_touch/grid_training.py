@@ -384,12 +384,42 @@ def grid_point_loss(
     if "latent_mu" in outputs:
         latent_mu = outputs["latent_mu"]
         latent_log_variance = outputs["latent_log_variance"]
-        kl_per_sample = 0.5 * (
-            latent_mu.square()
-            + latent_log_variance.exp()
-            - 1.0
-            - latent_log_variance
-        ).sum(dim=-1)
+        if "prior_mu" in outputs:
+            # KL between two diagonal Gaussians: the posterior against a
+            # data-derived prior (the virtual-leader attractor readout)
+            # rather than N(0, I). This is where the paper's model actually
+            # enters the objective - the belief about the destination is
+            # pulled toward what the observed acceleration implies, weighted
+            # automatically by how much the per-timestep estimates agree.
+            # Floor on the prior's width, not just a numerical guard. The
+            # attractor's per-step estimates grow more consistent as
+            # loss.vl_weight trains them (measured: prior sigma 0.075 ->
+            # 0.031 within 12 steps), and KL scales as 1/sigma_prior^2, so an
+            # increasingly confident prior pulls the posterior arbitrarily
+            # hard toward a branch that is standalone *worse* than fusion
+            # (~250 px against 184 px). The floor caps how much precision the
+            # prior may claim.
+            prior_floor = float(loss_config.get("vl_prior_sigma_floor", 0.05))
+            prior_log_variance = 2.0 * torch.log(
+                outputs["prior_sigma"].clamp_min(prior_floor)
+            )
+            kl_per_sample = 0.5 * (
+                prior_log_variance
+                - latent_log_variance
+                + (
+                    latent_log_variance.exp()
+                    + (latent_mu - outputs["prior_mu"]).square()
+                )
+                / prior_log_variance.exp()
+                - 1.0
+            ).sum(dim=-1)
+        else:
+            kl_per_sample = 0.5 * (
+                latent_mu.square()
+                + latent_log_variance.exp()
+                - 1.0
+                - latent_log_variance
+            ).sum(dim=-1)
         kl_loss = weighted_mean(kl_per_sample)
         total = total + float(loss_config.get("kl_weight", 0.0)) * kl_loss
 
@@ -644,9 +674,14 @@ def evaluate_grid_model(
         vl_sigma = outputs.get("vl_sigma")
         vl_gate = outputs.get("vl_gate")
         vl_prediction = outputs.get("vl_prediction")
+        # Guarded independently: the intent-VAE has a virtual-leader prior
+        # (so vl_sigma/vl_prediction) but no gate, since the branch enters
+        # through the KL rather than a blend.
         if vl_sigma is not None:
             vl_sigma = vl_sigma.detach().cpu()
+        if vl_gate is not None:
             vl_gate = vl_gate.detach().cpu()
+        if vl_prediction is not None:
             vl_prediction = vl_prediction.detach().cpu()
         latent_mu = outputs.get("latent_mu")
         latent_sigma = outputs.get("latent_sigma")
@@ -710,7 +745,9 @@ def evaluate_grid_model(
             if vl_sigma is not None:
                 record["vl_sigma_x"] = float(vl_sigma[index, 0])
                 record["vl_sigma_y"] = float(vl_sigma[index, 1])
+            if vl_gate is not None:
                 record["vl_gate"] = float(vl_gate[index])
+            if vl_prediction is not None:
                 record["vl_prediction_x"] = float(vl_prediction[index, 0])
                 record["vl_prediction_y"] = float(vl_prediction[index, 1])
             if latent_mu is not None:

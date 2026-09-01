@@ -134,6 +134,10 @@ loss:
   # are charbonnier distances in the same pixel_normalizer_px units, so
   # there is no magnitude mismatch to correct for here.
   vl_weight: 1.0
+  # Smallest sigma the virtual-leader prior may claim in the intent-VAE's KL
+  # term. Bounds how hard a confident-but-weaker prior can pull the
+  # posterior off the fusion prediction - see grid_training.py.
+  vl_prior_sigma_floor: 0.05
 
 physics:
   # Prescribe the two shoulder joints from measured IMU orientation and

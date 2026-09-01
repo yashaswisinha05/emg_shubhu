@@ -76,6 +76,7 @@ def main() -> None:
         "grid_fusion_physics3",
         "grid_fusion_vae",
         "grid_fusion_vl",
+        "grid_fusion_intent_vae",
     ):
         raise ValueError(
             "Pretrained/frozen base IMU options require --kind grid_fusion, "
