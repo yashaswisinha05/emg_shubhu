@@ -47,6 +47,28 @@ TRACKER_FIELD_PATTERN = re.compile(
 )
 IMU_PATTERN = re.compile(r"^(acc|gyro|mag)\b", re.IGNORECASE)
 
+# Trial metadata and task target columns. Recognised as their own category
+# rather than left "unclassified": these carry the label (where the person
+# actually touched) and the geometry needed to interpret it, so silently
+# lumping them in with unknown columns hides the fact that the dataset is
+# self-labelling.
+TASK_PATTERN = re.compile(
+    r"^(click_|button_|canvas_|screen_|target_|trial_number$"
+    r"|measured_reaction_time|pre_buffer|sample_rate)",
+    re.IGNORECASE,
+)
+
+# The 16 fields the loader knows how to read. A tracker column outside this
+# set is reported separately - it is either a field worth wiring up or a
+# naming drift, and both are worth seeing rather than silently accepting.
+KNOWN_TRACKER_FIELDS = (
+    "pos_x_m", "pos_y_m", "pos_z_m",
+    "quat_w", "quat_x", "quat_y", "quat_z",
+    "vel_x_mps", "vel_y_mps", "vel_z_mps",
+    "angvel_x_radps", "angvel_y_radps", "angvel_z_radps",
+    "tracking_age_us", "vive_timestamp_us", "sync_error_ms",
+)
+
 
 def configuration_of(path: Path) -> str:
     """Configuration label from any folder name on the path (a1, mix7, ...)."""
@@ -59,18 +81,24 @@ def configuration_of(path: Path) -> str:
 
 def classify_columns(columns: list[str]) -> dict[str, list[str]]:
     groups: dict[str, list[str]] = {
-        "timing": [], "emg": [], "imu": [], "tracker": [], "unclassified": []
+        "timing": [], "emg": [], "imu": [], "tracker": [],
+        "tracker_extra": [], "task": [], "unclassified": [],
     }
     for column in columns:
         lowered = column.lower()
         # Tracker first: a Vive angular-velocity column contains neither
         # "emg" nor an IMU prefix, but a poorly-named one could collide.
         if "vive" in lowered or TRACKER_FIELD_PATTERN.search(lowered):
-            groups["tracker"].append(column)
+            if any(lowered.endswith(field) for field in KNOWN_TRACKER_FIELDS):
+                groups["tracker"].append(column)
+            else:
+                groups["tracker_extra"].append(column)
         elif "emg" in lowered:
             groups["emg"].append(column)
         elif IMU_PATTERN.match(lowered):
             groups["imu"].append(column)
+        elif TASK_PATTERN.match(lowered):
+            groups["task"].append(column)
         elif lowered.startswith("time") or "timestamp" in lowered:
             groups["timing"].append(column)
         else:
@@ -154,6 +182,15 @@ def inspect_session(session: Path, sample_rows: int) -> dict | None:
             if len(intervals):
                 record["sample_rate_hz"] = float(1.0 / np.median(intervals))
                 record["sampled_rows"] = int(len(sample))
+        for column, key in (
+            ("sample_rate_hz", "recorded_sample_rate"),
+            ("sample_rate_hz_declared", "declared_sample_rate"),
+        ):
+            if column in sample.columns:
+                values = pd.to_numeric(sample[column], errors="coerce").to_numpy()
+                values = values[np.isfinite(values)]
+                if len(values):
+                    record[key] = float(np.median(values))
     except Exception:  # noqa: BLE001
         pass
     return record
@@ -165,7 +202,7 @@ def signature(record: dict) -> tuple:
     return (
         tuple(sorted(groups["emg"])),
         tuple(sorted(groups["imu"])),
-        tuple(sorted(groups["tracker"])),
+        tuple(sorted(groups["tracker"] + groups["tracker_extra"])),
         tuple(sorted(groups["timing"])),
     )
 
@@ -242,9 +279,14 @@ def main() -> None:
             limit = 10_000 if args.full_columns else 4
             for key, label in (
                 ("timing", "timing"), ("emg", "EMG"), ("imu", "IMU"),
-                ("tracker", "tracker"), ("unclassified", "UNCLASSIFIED"),
+                ("tracker", "tracker"), ("tracker_extra", "tracker EXTRA"),
+                ("task", "task/target"), ("unclassified", "UNCLASSIFIED"),
             ):
                 print(f"    {summarise(label, groups[key], limit)}")
+            if record.get("recorded_sample_rate"):
+                declared = record.get("declared_sample_rate")
+                extra = f", declared {declared:.2f}" if declared else ""
+                print(f"    sample_rate_hz col : {record['recorded_sample_rate']:.2f}{extra}")
             if record["sensors"]:
                 print(f"    inferred sensors  : {record['sensors']}")
             if record["tracker_prefixes"]:
@@ -276,6 +318,32 @@ def main() -> None:
                   f"-> {len(members)} session(s)")
             print(f"      e.g. {members[0]}" + (f" (+{len(members)-1} more)" if len(members) > 1 else ""))
         print("  these need either separate configs or a reconciled export")
+
+    tracker_extra = sorted({
+        column
+        for record in records
+        if "error" not in record
+        for column in record["groups"]["tracker_extra"]
+    })
+    if tracker_extra:
+        print()
+        print(f"=== {len(tracker_extra)} tracker column(s) outside the known 16 fields ===")
+        print("  the loader does not read these - wire them up or confirm they are unused:")
+        for column in tracker_extra:
+            print(f"    {column}")
+
+    task = sorted({
+        column
+        for record in records
+        if "error" not in record
+        for column in record["groups"]["task"]
+    })
+    if task:
+        print()
+        print(f"=== {len(task)} task/target column(s) ===")
+        print("  the label and its geometry travel in the CSV - the dataset is self-labelling:")
+        for column in task:
+            print(f"    {column}")
 
     unclassified = sorted({
         column
