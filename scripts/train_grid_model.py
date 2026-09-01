@@ -57,6 +57,13 @@ def main() -> None:
     parser.add_argument("--device")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--patience", type=int)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        help="Override config seed. Without this every run is identical - "
+        "the seed comes from the config file, so varying only --output-dir "
+        "reproduces the same run byte for byte.",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -86,6 +93,8 @@ def main() -> None:
     if args.freeze_base_imu and not args.pretrained_imu:
         raise ValueError("--freeze-base-imu requires --pretrained-imu")
 
+    if args.seed is not None:
+        config["seed"] = int(args.seed)
     seed_everything(int(config["seed"]))
     device = choose_device(args.device)
     train_loader, val_loader, test_loader = build_grid_trajectory_loaders(
@@ -121,6 +130,7 @@ def main() -> None:
     fold = int(split["fold"]) if "fold" in split else None
     configuration = str(split.get("configuration", "unknown"))
     print(
+        f"seed={config['seed']} "
         f"configuration={configuration} fold={fold} kind={args.kind} device={device} "
         f"train={len(train_loader.dataset)} val={len(val_loader.dataset)} "
         f"test={len(test_loader.dataset)}"
