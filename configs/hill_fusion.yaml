@@ -119,6 +119,15 @@ loss:
   # so there's no magnitude mismatch to correct for the way there was with
   # affine_weight_penalty.
   nll_weight: 1.0
+  # KL(q(z|x) || N(0,I)) weight for grid_fusion_vae - the strength of the
+  # information bottleneck, since every bit the latent carries is paid for
+  # here. Small to start deliberately: the prior question is whether a
+  # 3-dimensional latent can carry the prediction at all, and a large weight
+  # would confound "bottleneck too tight" with "penalty too strong". Watch
+  # the kl= value printed each epoch - near 0 means the latent collapsed to
+  # the prior and carries nothing, and accuracy should then be no better
+  # than predicting a constant.
+  kl_weight: 0.01
 
 physics:
   # Prescribe the two shoulder joints from measured IMU orientation and

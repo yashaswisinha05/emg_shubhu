@@ -25,6 +25,7 @@ GRID_MODEL_KINDS = (
     "grid_crossvar",
     "grid_fusion_physics",
     "grid_fusion_physics3",
+    "grid_fusion_vae",
 )
 
 
@@ -689,6 +690,10 @@ class GridFusionRegressor(nn.Module):
             "emg_lookback_weights": lookback_weights,
             "emg_quality": quality,
             "emg_context": emg_context,
+            # Exposed so a wrapper can encode from both modalities rather
+            # than re-running the IMU backbone: the VAE variant needs the
+            # joint representation, not just the EMG half.
+            "imu_context": base["context"],
         }
         for key in ("imu_sensor_attention", "imu_channel_attention"):
             if key in base:
@@ -983,6 +988,117 @@ class GridFusionPhysics3Regressor(nn.Module):
         return outputs
 
 
+class LatentPointVAE(nn.Module):
+    """Encoder -> q(z|x) = N(mu, sigma^2) -> sampled z -> screen point.
+
+    A real variational bottleneck, not a second output head: z is sampled
+    through the reparameterisation trick during training (mu alone at
+    evaluation, the usual deterministic readout), and the KL term in
+    grid_point_loss regularises q(z|x) toward N(0, I). Because the decoder
+    has no path to the target except through z, every bit the prediction
+    needs has to be carried by the latent and paid for in KL - that is the
+    information bottleneck this is here to impose.
+
+    latent_dim defaults to 3 deliberately. In the planned second stage this
+    decoder is replaced by the 3R arm's forward kinematics and z becomes the
+    three joint angles, so testing the bottleneck at its eventual width now
+    means the accuracy cost of that width is already known before the
+    kinematics are swapped in.
+    """
+
+    def __init__(
+        self, context_dim: int, latent_dim: int, hidden: int, dropout: float
+    ) -> None:
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.LayerNorm(context_dim),
+            nn.Linear(context_dim, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.to_mu = nn.Linear(hidden, latent_dim)
+        self.to_log_variance = nn.Linear(hidden, latent_dim)
+        nn.init.normal_(self.to_mu.weight, std=0.01)
+        nn.init.zeros_(self.to_mu.bias)
+        nn.init.zeros_(self.to_log_variance.weight)
+        # Bias -4 => sigma ~0.135 at initialisation, NOT sigma ~1 (bias 0).
+        # Measured why: with sigma ~1 the encoder's mu spread across a batch
+        # was ~0.034 after real steps, so the sampled z was ~30x more
+        # injected noise than signal and the decoder had nothing usable to
+        # read - the standard road into posterior collapse. Starting the
+        # posterior tighter than the prior lets mu's signal dominate from the
+        # first step; the KL term (which pays -log sigma^2 for being tight)
+        # still pushes back toward the prior, so this sets where the search
+        # starts, not where it is allowed to end up.
+        nn.init.constant_(self.to_log_variance.bias, -4.0)
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 2),
+        )
+
+    def forward(
+        self, context: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        hidden = self.encoder(context)
+        mu = self.to_mu(hidden)
+        # Clamped before exp: bounds sigma to roughly [0.018, 7.4], wide
+        # enough never to bind in normal training but enough to stop a bad
+        # batch sending the KL or the sample to inf.
+        log_variance = self.to_log_variance(hidden).clamp(-8.0, 4.0)
+        if self.training:
+            standard_deviation = torch.exp(0.5 * log_variance)
+            latent = mu + standard_deviation * torch.randn_like(standard_deviation)
+        else:
+            latent = mu
+        return self.decoder(latent), mu, log_variance
+
+
+class GridFusionVAERegressor(nn.Module):
+    """grid_fusion with its coordinate prediction routed through a VAE latent.
+
+    The fusion model is kept intact and still drives the grid path
+    (heatmap/offset losses), so the shared encoder keeps receiving the same
+    supervision it always did. What changes is where the reported coordinate
+    comes from: instead of fusion's own direct head, it is decoded from a
+    sampled latent encoded from both modalities' contexts. fusion's direct
+    head therefore stops contributing to the prediction and goes untrained -
+    harmless, and left in place so this wrapper stays a pure addition rather
+    than a modification of a model every other experiment depends on.
+    """
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        model = config["model"]
+        self.fusion = GridFusionRegressor(config)
+        d_model = int(model["d_model"])
+        self.vae = LatentPointVAE(
+            context_dim=2 * d_model,
+            latent_dim=int(model.get("latent_dim", 3)),
+            hidden=int(model.get("latent_hidden", 64)),
+            dropout=float(model["dropout"]),
+        )
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        outputs = self.fusion(batch)
+        context = torch.cat(
+            [outputs["imu_context"], outputs["emg_context"]], dim=-1
+        )
+        logits, mu, log_variance = self.vae(context)
+        outputs["fusion_prediction"] = outputs["prediction"]
+        outputs["latent_mu"] = mu
+        outputs["latent_log_variance"] = log_variance
+        outputs["latent_sigma"] = torch.exp(0.5 * log_variance)
+        outputs["direct_logits"] = logits
+        # grid_point_loss optimises direct_prediction and evaluation reads
+        # prediction; both must be the VAE's output or the model would be
+        # scored on a coordinate it never trained (the same wiring mistake
+        # the physics branch hit earlier).
+        outputs["direct_prediction"] = torch.sigmoid(logits)
+        outputs["prediction"] = outputs["direct_prediction"]
+        return outputs
+
+
 def build_grid_model(kind: str, config: dict[str, Any]) -> nn.Module:
     if kind == "grid_imu":
         return GridIMURegressor(config)
@@ -998,4 +1114,6 @@ def build_grid_model(kind: str, config: dict[str, Any]) -> nn.Module:
         return GridFusionPhysicsRegressor(config)
     if kind == "grid_fusion_physics3":
         return GridFusionPhysics3Regressor(config)
+    if kind == "grid_fusion_vae":
+        return GridFusionVAERegressor(config)
     raise ValueError(f"Unknown grid model kind: {kind}")
