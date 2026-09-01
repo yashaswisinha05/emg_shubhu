@@ -2,9 +2,12 @@
 
 The branch in virtual_leader.py infers (position, velocity, acceleration) with
 a GRU because this project's original dataset has no hand trajectory - only
-the final touch location. With an end-effector tracker (Vive or similar) that
-inference disappears: position is measured, and velocity and acceleration
-follow from causal differences. The attractor readout
+the final touch location. With an end-effector tracker that inference
+disappears: position AND velocity are measured directly (a real Vive export
+reports vel_x/y/z_mps alongside position, already computed by the tracking
+pipeline), so only acceleration needs differencing - one pass instead of two,
+which matters because each differencing pass amplifies sensor noise. The
+attractor readout
 
     r = x + (xddot + rho xdot) / eta
 
@@ -108,15 +111,31 @@ class TrackedVirtualLeaderBranch(nn.Module):
         position_mask: torch.Tensor,
         lengths: torch.Tensor,
         context: torch.Tensor,
+        velocity: torch.Tensor | None = None,
+        velocity_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """position: (B, T, position_dim) measured end-effector track."""
+        """position: (B, T, position_dim) measured end-effector track.
+
+        velocity, if given, is used directly (this rig's tracker measures it)
+        and only acceleration is differenced. Without it, both are derived
+        from position by two differencing passes, as before - kept as a
+        fallback for a tracker that reports position only.
+        """
         steps = emg.size(1)
         device = emg.device
         valid_time = position_mask.all(dim=-1).to(position.dtype)
         dt = 1.0 / self.sample_rate_hz
 
-        velocity = causal_difference(position, dt, valid_time)
-        acceleration = causal_difference(velocity, dt, valid_time)
+        if velocity is None:
+            velocity = causal_difference(position, dt, valid_time)
+            velocity_valid = valid_time
+        else:
+            velocity_valid = (
+                velocity_mask.all(dim=-1).to(position.dtype)
+                if velocity_mask is not None
+                else valid_time
+            )
+        acceleration = causal_difference(velocity, dt, velocity_valid)
 
         indices = torch.arange(0, steps, self.decimation, device=device, dtype=torch.long)
         amplitude = emg * emg_mask.to(emg.dtype)

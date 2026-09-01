@@ -1,27 +1,38 @@
 #!/usr/bin/env python3
 """Check a tracked-trial CSV against the contract before it reaches training.
 
-Give this to whoever exports the EMG + tracker recordings. It checks the file
+Give this to whoever exports the EMG + Vive recordings. It checks the file
 in isolation - no model, no other project code needs to run - and reports
 exactly what is wrong, not just whether something is.
 
     python scripts/validate_tracked_recording.py trial_0001.csv
     python scripts/validate_tracked_recording.py recordings/*.csv --sensors S0 S1 S2 S3
 
+If the tracker uses a different column prefix or a second tracker (e.g. a
+forearm mount alongside the hand), pass --tracker-prefix / --tracker-id -
+column names are {prefix}_{tracker}_{field}, e.g. VIVE_T0_pos_x_m by default.
+
 What it checks:
-  - required timing and tracker columns are present
-  - EMG/IMU columns for the configured sensor names are present
+  - required timing, EMG/IMU, and all 16 tracker columns are present
+    (pos/quat/vel/angvel, tracking_age_us, vive_timestamp_us, sync_error_ms)
   - time_perf_counter is finite and has no duplicate timestamps after
     resolution (matches how the loader deduplicates)
   - sample rate is stable, and reports gaps bigger than 3x the modal
     interval - a real dropout, not just measurement jitter
-  - tracker position is finite where marked valid, in plausible units
-    (metres, not centimetres or millimetres - flags a track that never
-    moves more than a few units as a likely wrong unit or a static mount)
+  - tracker position is finite where valid, in plausible units (metres -
+    flags a track that never moves more than 1 cm on any axis as a likely
+    wrong unit or a static mount)
   - tracker validity coverage - what fraction of the trial has a usable
     position sample
-  - EMG amplitude coverage per sensor
-  - if a quaternion is present, that it is close to unit norm
+  - EMG/IMU/velocity/angular-velocity amplitude coverage per channel
+  - quaternion is close to unit norm, if present
+  - sync_error_ms and tracking_age_us are REPORTED (mean/median/p95/max),
+    not pass/failed against a threshold. There is no principled cutoff to
+    hardcode without having seen this rig's real jitter - the same reason
+    every other threshold in this project comes from a measurement, not a
+    guess. Once real recordings show what "good" looks like, set
+    data.tracker_max_sync_error_ms / data.tracker_max_tracking_age_us in
+    the training config and tracked_trajectory.py will filter by it.
 
 This intentionally does not check EMG-tracker clock alignment beyond what
 sharing time_perf_counter already guarantees - see the docstring in
@@ -40,34 +51,63 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from emg_touch.data.schema import emg_columns, imu_columns  # noqa: E402
 from emg_touch.data.tracked_trajectory import (  # noqa: E402
-    POSITION_COLUMNS,
-    QUATERNION_COLUMNS,
     REQUIRED_TIMING_COLUMNS,
+    angular_velocity_columns,
+    position_columns,
+    quaternion_columns,
+    sync_error_column,
+    tracking_age_column,
+    velocity_columns,
+    vive_timestamp_column,
 )
 
 
-def check(path: Path, sensors: list[str] | None) -> list[str]:
+def _numeric_block(frame: pd.DataFrame, columns: tuple[str, ...]) -> np.ndarray:
+    return frame[list(columns)].apply(pd.to_numeric, errors="coerce").to_numpy()
+
+
+def check(path: Path, sensors: list[str] | None, tracker_config: dict) -> list[str]:
     problems: list[str] = []
     warnings: list[str] = []
+    info: list[str] = []
 
     try:
         frame = pd.read_csv(path)
     except Exception as error:  # noqa: BLE001
         return [f"could not read as CSV: {error}"]
 
-    data_config = {"sensors": sensors} if sensors else {}
+    data_config = dict(tracker_config)
+    if sensors:
+        data_config["sensors"] = sensors
     required_emg = emg_columns(data_config)
     required_imu = imu_columns(data_config)
+    position_names = position_columns(data_config)
+    quaternion_names = quaternion_columns(data_config)
+    velocity_names = velocity_columns(data_config)
+    angular_velocity_names = angular_velocity_columns(data_config)
+    age_column = tracking_age_column(data_config)
+    timestamp_column = vive_timestamp_column(data_config)
+    sync_column = sync_error_column(data_config)
 
     for group, columns in (
         ("timing", REQUIRED_TIMING_COLUMNS),
-        ("tracker position", POSITION_COLUMNS),
+        ("tracker position", position_names),
+        ("tracker orientation", quaternion_names),
+        ("tracker velocity", velocity_names),
+        ("tracker angular velocity", angular_velocity_names),
         ("EMG", required_emg),
         ("IMU", required_imu),
     ):
         missing = [c for c in columns if c not in frame.columns]
         if missing:
             problems.append(f"missing {group} column(s): {missing}")
+    for label, column in (
+        ("tracking age", age_column),
+        ("Vive timestamp", timestamp_column),
+        ("sync error", sync_column),
+    ):
+        if column not in frame.columns:
+            problems.append(f"missing {label} column: {column}")
     if problems:
         return problems
 
@@ -99,76 +139,118 @@ def check(path: Path, sensors: list[str] | None) -> list[str]:
             "likely dropped samples, not just jitter"
         )
 
-    position = frame[list(POSITION_COLUMNS)].apply(pd.to_numeric, errors="coerce").to_numpy()
+    position = _numeric_block(frame, position_names)
     valid = np.isfinite(position).all(axis=1)
-    if "pos_valid" in frame.columns:
-        explicit = pd.to_numeric(frame["pos_valid"], errors="coerce").fillna(0).to_numpy() != 0
-        valid = valid & explicit
     coverage = float(valid.mean()) if len(valid) else 0.0
     if coverage < 0.5:
-        problems.append(f"tracker position valid for only {coverage:.0%} of samples")
+        problems.append(f"tracker position finite for only {coverage:.0%} of samples")
     elif coverage < 0.95:
-        warnings.append(f"tracker position valid for {coverage:.0%} of samples")
+        warnings.append(f"tracker position finite for {coverage:.0%} of samples")
 
     if valid.any():
         span = position[valid].max(axis=0) - position[valid].min(axis=0)
         if np.all(span < 0.01):
             warnings.append(
-                f"tracker position range is under 1 cm on every axis (span={span}) - "
-                "check units are metres, not millimetres or centimetres, and that the "
-                "tracker was actually moving during this trial"
+                f"tracker position range is under 1 cm on every axis (span={span} m) - "
+                "check units are metres, and that the tracker was actually moving"
             )
         if np.any(span > 50.0):
             warnings.append(
-                f"tracker position range exceeds 50 m on an axis (span={span}) - "
+                f"tracker position range exceeds 50 m on an axis (span={span} m) - "
                 "check units, or for a corrupted sample"
             )
 
-    for label, columns in (("EMG", required_emg), ("IMU", required_imu)):
-        block = frame[list(columns)].apply(pd.to_numeric, errors="coerce").to_numpy()
+    for label, columns in (
+        ("EMG", required_emg),
+        ("IMU", required_imu),
+        ("tracker velocity", velocity_names),
+        ("tracker angular velocity", angular_velocity_names),
+    ):
+        block = _numeric_block(frame, columns)
         finite = np.isfinite(block)
         per_channel = finite.mean(axis=0)
-        low = [(columns[i], per_channel[i]) for i in range(len(columns)) if per_channel[i] < 0.5]
+        low = [(columns[i], round(float(per_channel[i]), 3)) for i in range(len(columns)) if per_channel[i] < 0.5]
         if low:
             problems.append(f"{label} channels with <50% valid samples: {low}")
 
-    if all(c in frame.columns for c in QUATERNION_COLUMNS):
-        quaternion = (
-            frame[list(QUATERNION_COLUMNS)].apply(pd.to_numeric, errors="coerce").to_numpy()
+    quaternion = _numeric_block(frame, quaternion_names)
+    finite_rows = np.isfinite(quaternion).all(axis=1)
+    if finite_rows.any():
+        norm = np.linalg.norm(quaternion[finite_rows], axis=1)
+        off_unit = np.abs(norm - 1.0) > 0.05
+        if off_unit.any():
+            warnings.append(
+                f"{int(off_unit.sum())} quaternion sample(s) more than 5% off unit norm"
+            )
+
+    # Reported, not pass/failed - see module docstring on why no threshold is
+    # hardcoded here.
+    sync_error = pd.to_numeric(frame[sync_column], errors="coerce").to_numpy()
+    finite_sync = sync_error[np.isfinite(sync_error)]
+    if len(finite_sync):
+        info.append(
+            f"sync_error_ms: mean={finite_sync.mean():.2f} median={np.median(finite_sync):.2f} "
+            f"p95={np.percentile(finite_sync, 95):.2f} max={finite_sync.max():.2f}"
         )
-        finite_rows = np.isfinite(quaternion).all(axis=1)
-        if finite_rows.any():
-            norm = np.linalg.norm(quaternion[finite_rows], axis=1)
-            off_unit = np.abs(norm - 1.0) > 0.05
-            if off_unit.any():
-                warnings.append(
-                    f"{int(off_unit.sum())} quaternion sample(s) more than 5% off unit norm"
-                )
+    else:
+        warnings.append("sync_error_ms is present but entirely non-finite")
+    missing_sync_fraction = 1.0 - len(finite_sync) / max(len(sync_error), 1)
+    if missing_sync_fraction > 0.05:
+        warnings.append(f"sync_error_ms missing for {missing_sync_fraction:.0%} of samples")
+
+    tracking_age = pd.to_numeric(frame[age_column], errors="coerce").to_numpy()
+    finite_age = tracking_age[np.isfinite(tracking_age)]
+    if len(finite_age):
+        info.append(
+            f"tracking_age_us: mean={finite_age.mean():.1f} median={np.median(finite_age):.1f} "
+            f"p95={np.percentile(finite_age, 95):.1f} max={finite_age.max():.1f}"
+        )
+    else:
+        warnings.append("tracking_age_us is present but entirely non-finite")
 
     duration = float(perf[-1] - perf[0])
     print(f"  duration ~{duration:.2f} s, {len(frame)} samples, ~{sample_rate:.1f} Hz")
+    for line in info:
+        print(f"  {line}")
     for warning in warnings:
         print(f"  WARNING: {warning}")
     return problems
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("csv", nargs="+", help="One or more trial CSV files")
     parser.add_argument(
         "--sensors",
         nargs="+",
         default=None,
-        help="Sensor names, in order (e.g. S0 S1 S2 S3). "
+        help="EMG/IMU sensor names, in order (e.g. S0 S1 S2 S3). "
         "Defaults to this rig's four (S0 S4 S8 S12) if omitted.",
     )
+    parser.add_argument(
+        "--tracker-prefix",
+        default="VIVE",
+        help="Tracker column prefix (default VIVE).",
+    )
+    parser.add_argument(
+        "--tracker-id",
+        default="T0",
+        help="Tracker id, for a rig with more than one tracker (default T0).",
+    )
     args = parser.parse_args()
+
+    tracker_config = {
+        "tracker_column_prefix": args.tracker_prefix,
+        "tracker_id": args.tracker_id,
+    }
 
     failures = 0
     for raw_path in args.csv:
         path = Path(raw_path)
         print(f"{path}")
-        problems = check(path, args.sensors)
+        problems = check(path, args.sensors, tracker_config)
         if problems:
             failures += 1
             for problem in problems:
