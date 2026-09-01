@@ -1111,33 +1111,63 @@ class GridFusionVirtualLeaderRegressor(nn.Module):
     attractor equation and why per-timestep destination estimates are the
     point.
 
-    A blend against the fusion head is deliberately *not* used here. Every
-    blended variant this project has tried froze its weight near the
-    initialisation, so the branch is either the prediction or it is not; this
-    makes the comparison against grid_fusion unambiguous rather than
-    reporting a number that is 98% the baseline.
+    The branch enters as a zero-initialised per-trial gate toward its own
+    destination estimate, so the model starts as exactly grid_fusion and the
+    virtual leader has to earn any influence. A first version instead
+    *replaced* the fusion coordinate outright, on the reasoning that every
+    blended variant here had frozen near its initialisation and an
+    all-or-nothing branch would at least be unambiguous. That was a mistake:
+    it discarded a pretrained IMU backbone, transformer and grid heads, and
+    asked a small GRU to relearn the task from 719 trials - 253 px against
+    fusion's 184 px, still descending at the epoch limit. The gate is also
+    not the same construct that froze before: this is the additive
+    zero-initialised residual pattern grid_fusion already uses successfully
+    for its own EMG head, not a convex blend between two finished
+    predictions.
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__()
         self.fusion = GridFusionRegressor(config)
         self.virtual_leader = VirtualLeaderBranch(config)
+        d_model = int(config["model"]["d_model"])
+        self.gate = nn.Sequential(
+            nn.LayerNorm(2 * d_model), nn.Linear(2 * d_model, 32), nn.GELU(),
+            nn.Linear(32, 1),
+        )
+        nn.init.zeros_(self.gate[-1].weight)
+        # Bias -6 => sigmoid ~0.0025, i.e. the model really does start as
+        # grid_fusion. A zero bias would NOT: sigmoid(0) is 0.5, so the usual
+        # zero-init convention would open at a 50/50 blend with an untrained
+        # branch (measured |blended - fusion| = 0.083 at init before this).
+        # Same sigmoid-midpoint trap as the muscle force-scale init earlier
+        # in this project, and it is worth the explicit note both times.
+        nn.init.constant_(self.gate[-1].bias, -6.0)
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         outputs = self.fusion(batch)
+        context = torch.cat(
+            [outputs["imu_context"], outputs["emg_context"]], dim=-1
+        )
         branch = self.virtual_leader(
             batch["emg"],
             batch["emg_mask"],
             batch["imu"],
             batch["imu_mask"],
             batch["lengths"],
+            context,
         )
         outputs["fusion_prediction"] = outputs["prediction"]
         outputs.update(branch)
+        gate = torch.sigmoid(self.gate(context))
+        outputs["vl_gate"] = gate.squeeze(-1)
+        blended = outputs["fusion_prediction"] + gate * (
+            branch["vl_prediction"] - outputs["fusion_prediction"]
+        )
         # Both keys, for the same reason as every other branch here: the loss
         # optimises direct_prediction and evaluation reads prediction.
-        outputs["direct_prediction"] = branch["vl_prediction"]
-        outputs["prediction"] = branch["vl_prediction"]
+        outputs["direct_prediction"] = blended
+        outputs["prediction"] = blended
         return outputs
 
 

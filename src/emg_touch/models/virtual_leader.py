@@ -76,7 +76,20 @@ class VirtualLeaderBranch(nn.Module):
             torch.tensor(acceleration, dtype=torch.long),
             persistent=False,
         )
-        input_dim = 4 + len(acceleration)  # EMG amplitude + measured acceleration
+        # Conditioned on the fusion encoder's pooled representation, not just
+        # the raw channels. Measured the hard way: a first version read only
+        # EMG + accelerometers through this GRU and *replaced* the fusion
+        # coordinate, which discarded a pretrained IMU backbone and
+        # transformer and asked a 96-unit GRU to relearn the task from 719
+        # trials - it reached 253 px against fusion's 184 px and was still
+        # descending at the epoch limit. The attractor readout was working
+        # (its per-step loss fell steadily); the branch was simply starved of
+        # everything the rest of the model already knows.
+        context_dim = 2 * int(model["d_model"])
+        self.context_project = nn.Sequential(
+            nn.LayerNorm(context_dim), nn.Linear(context_dim, 32), nn.GELU()
+        )
+        input_dim = 4 + len(acceleration) + 32
         self.encoder = nn.GRU(
             input_size=input_dim,
             hidden_size=hidden,
@@ -127,6 +140,7 @@ class VirtualLeaderBranch(nn.Module):
         imu: torch.Tensor,
         imu_mask: torch.Tensor,
         lengths: torch.Tensor,
+        context: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         steps = emg.size(1)
         indices = torch.arange(
@@ -139,6 +153,11 @@ class VirtualLeaderBranch(nn.Module):
         ).to(imu.dtype)
         features = torch.cat([amplitude, acceleration], dim=-1)
         features = features.index_select(1, indices)
+        conditioning = self.context_project(context)
+        features = torch.cat(
+            [features, conditioning.unsqueeze(1).expand(-1, features.size(1), -1)],
+            dim=-1,
+        )
 
         encoded, _ = self.encoder(features)
         encoded = self.normalise(encoded)

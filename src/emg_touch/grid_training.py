@@ -642,8 +642,12 @@ def evaluate_grid_model(
         if direct_sigma is not None:
             direct_sigma = direct_sigma.detach().cpu()
         vl_sigma = outputs.get("vl_sigma")
+        vl_gate = outputs.get("vl_gate")
+        vl_prediction = outputs.get("vl_prediction")
         if vl_sigma is not None:
             vl_sigma = vl_sigma.detach().cpu()
+            vl_gate = vl_gate.detach().cpu()
+            vl_prediction = vl_prediction.detach().cpu()
         latent_mu = outputs.get("latent_mu")
         latent_sigma = outputs.get("latent_sigma")
         if latent_mu is not None:
@@ -706,6 +710,9 @@ def evaluate_grid_model(
             if vl_sigma is not None:
                 record["vl_sigma_x"] = float(vl_sigma[index, 0])
                 record["vl_sigma_y"] = float(vl_sigma[index, 1])
+                record["vl_gate"] = float(vl_gate[index])
+                record["vl_prediction_x"] = float(vl_prediction[index, 0])
+                record["vl_prediction_y"] = float(vl_prediction[index, 1])
             if latent_mu is not None:
                 # Per-dimension so phase 2 can check whether these track
                 # anything pose-like before the kinematic decoder is wired in.
