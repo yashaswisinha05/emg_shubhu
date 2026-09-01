@@ -287,6 +287,18 @@ def main() -> None:
                 declared = record.get("declared_sample_rate")
                 extra = f", declared {declared:.2f}" if declared else ""
                 print(f"    sample_rate_hz col : {record['recorded_sample_rate']:.2f}{extra}")
+                # dt drives velocity, acceleration and the attractor, so a
+                # rate the file claims but the timestamps do not deliver is
+                # worth seeing here rather than discovering as bad dynamics.
+                measured = record.get("sample_rate_hz")
+                recorded = record["recorded_sample_rate"]
+                if measured and recorded > 0:
+                    relative = abs(measured - recorded) / recorded
+                    if relative > 0.05:
+                        print(
+                            f"    WARNING: timestamps imply {measured:.1f} Hz, "
+                            f"{relative:.0%} off the recorded {recorded:.1f} Hz"
+                        )
             if record["sensors"]:
                 print(f"    inferred sensors  : {record['sensors']}")
             if record["tracker_prefixes"]:

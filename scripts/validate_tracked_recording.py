@@ -208,6 +208,29 @@ def check(path: Path, sensors: list[str] | None, tracker_config: dict) -> list[s
     else:
         warnings.append("tracking_age_us is present but entirely non-finite")
 
+    # The recorded rate against the one the timestamps actually imply. dt
+    # feeds the attractor dynamics directly, so a rate that is declared but
+    # not delivered corrupts velocity and acceleration silently rather than
+    # failing loudly.
+    if "sample_rate_hz" in frame.columns:
+        declared = pd.to_numeric(frame["sample_rate_hz"], errors="coerce").to_numpy()
+        declared = declared[np.isfinite(declared)]
+        if len(declared):
+            declared_rate = float(np.median(declared))
+            info.append(
+                f"sample rate: declared {declared_rate:.2f} Hz, "
+                f"timestamps imply {sample_rate:.2f} Hz"
+            )
+            if declared_rate > 0:
+                relative = abs(sample_rate - declared_rate) / declared_rate
+                if relative > 0.05:
+                    warnings.append(
+                        f"declared sample rate {declared_rate:.2f} Hz differs from the "
+                        f"timestamp-derived {sample_rate:.2f} Hz by {relative:.0%} - "
+                        "dt feeds velocity/acceleration and the attractor dynamics, so "
+                        "decide which is authoritative before training on it"
+                    )
+
     duration = float(perf[-1] - perf[0])
     print(f"  duration ~{duration:.2f} s, {len(frame)} samples, ~{sample_rate:.1f} Hz")
     for line in info:
@@ -239,11 +262,31 @@ def main() -> None:
         default="T0",
         help="Tracker id, for a rig with more than one tracker (default T0).",
     )
+    parser.add_argument(
+        "--emg-template",
+        default="EMG RMS 1_{sensor}",
+        help="EMG column pattern. The original rig records an RMS envelope "
+        '("EMG RMS 1_{sensor}", the default); a raw-EMG export uses '
+        '"EMG 1_{sensor}". Run inspect_tracked_dataset.py to read it off the data.',
+    )
+    parser.add_argument(
+        "--acc-template",
+        default="ACC {axis}_{sensor}",
+        help="Accelerometer column pattern.",
+    )
+    parser.add_argument(
+        "--gyro-template",
+        default="GYRO {axis}_{sensor}",
+        help="Gyroscope column pattern.",
+    )
     args = parser.parse_args()
 
     tracker_config = {
         "tracker_column_prefix": args.tracker_prefix,
         "tracker_id": args.tracker_id,
+        "emg_column_template": args.emg_template,
+        "acc_column_template": args.acc_template,
+        "gyro_column_template": args.gyro_template,
     }
 
     failures = 0
