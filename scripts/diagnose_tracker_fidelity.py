@@ -113,13 +113,41 @@ def analyse(path: Path, data_config: dict) -> dict | None:
         threshold = 0.01 * np.percentile(magnitude, 99)
         flat = magnitude <= threshold
         result["flat_second_difference_fraction"] = float(flat.mean())
+
+        # How the flat samples are arranged is what separates the two
+        # explanations, and a bare flat fraction cannot tell them apart.
+        # Linear interpolation by a factor k leaves short flat runs of
+        # exactly k-1 between single knots. A hand that is simply not moving
+        # yet - these trials open with a stationary pre-buffer - leaves one
+        # very long flat run and then continuous curvature through the
+        # reach. Same flat fraction, opposite meaning.
+        padded = np.concatenate([[False], flat, [False]])
+        edges = np.diff(padded.astype(np.int8))
+        starts = np.flatnonzero(edges == 1)
+        ends = np.flatnonzero(edges == -1)
+        runs = ends - starts
+        if len(runs):
+            result["flat_run_median"] = float(np.median(runs))
+            result["flat_run_max"] = float(runs.max())
+            result["flat_run_count"] = int(len(runs))
         knots = np.flatnonzero(~flat)
         if len(knots) > 5:
             spacing = np.diff(knots)
             result["knot_spacing_median"] = float(np.median(spacing))
-            result["knot_spacing_mode"] = float(
-                np.bincount(spacing[spacing < 64]).argmax()
-            ) if (spacing < 64).any() else np.nan
+
+        # Direct physical cross-check: if the flat samples are flat because
+        # the hand is still, the reported speed there is near zero. If they
+        # are flat because of interpolation, speed is unremarkable.
+        if all(c in frame.columns for c in velocity_names):
+            speed_source = (
+                frame[list(velocity_names)]
+                .apply(pd.to_numeric, errors="coerce")
+                .to_numpy()[usable][order]
+            )
+            speed = np.linalg.norm(speed_source, axis=1)[1:-1]
+            if len(speed) == len(flat) and flat.any() and (~flat).any():
+                result["speed_flat"] = float(np.median(speed[flat]))
+                result["speed_curved"] = float(np.median(speed[~flat]))
 
     # 3. sync-error tail
     sync = sync_error_column(data_config)
@@ -206,20 +234,46 @@ def main() -> None:
     else:
         print(f"  second difference is ~flat on {flat.mean() * 100:.1f}% of samples")
         spacing = series("knot_spacing_median")
+        run_median = series("flat_run_median")
+        run_max = series("flat_run_max")
         if len(spacing):
-            print(f"  median spacing between curvature knots: {spacing.mean():.2f} samples")
-        if flat.mean() > 0.5:
+            print(f"  median gap between curvature knots : {spacing.mean():.2f} samples")
+        if len(run_median):
+            print(f"  median flat run length             : {run_median.mean():.1f} samples")
+            print(f"  longest flat run                   : {run_max.mean():.0f} samples")
+        speed_flat = series("speed_flat")
+        speed_curved = series("speed_curved")
+        if len(speed_flat) and len(speed_curved):
+            print(f"  speed where flat   : {speed_flat.mean():.4f} m/s")
+            print(f"  speed where curved : {speed_curved.mean():.4f} m/s")
+
+        # The flat fraction alone cannot distinguish interpolation from a
+        # stationary hand - both produce one. The arrangement of the flat
+        # samples can: interpolation gives many short, regular runs, while
+        # stillness gives few long ones, with near-zero speed inside them.
+        stationary = False
+        if len(speed_flat) and len(speed_curved) and speed_curved.mean() > 0:
+            stationary = speed_flat.mean() < 0.2 * speed_curved.mean()
+        long_runs = bool(len(run_median)) and run_median.mean() > 20.0
+
+        if flat.mean() <= 0.5 and not long_runs:
+            print("  => position is NOT piecewise-linear: curvature is present")
+            print("     throughout, consistent with a genuine per-sample pose stream.")
+        elif stationary or long_runs:
+            print("  => NOT interpolation. The flat samples sit in a few long runs with")
+            print("     near-zero speed, which is the stationary pre-buffer before the")
+            print("     reach begins, not an upsampling artifact. Acceleration during")
+            print("     the moving part of the trial is real.")
+            print("     Worth excluding the stationary prefix when fitting the attractor:")
+            print("     a still hand has no destination-directed acceleration to read.")
+        else:
             rate = series("rate_hz").mean()
-            factor = 1.0 / max(1.0 - flat.mean(), 1e-6)
-            print(f"  => position is largely piecewise-linear. It is being interpolated")
-            print(f"     onto the EMG clock from roughly {rate / factor:.0f} Hz.")
+            factor = run_median.mean() + 1.0 if len(run_median) else 1.0
+            print("  => position IS piecewise-linear: many short regular flat runs.")
+            print(f"     Interpolated onto the EMG clock from roughly {rate / factor:.0f} Hz.")
             print("     Acceleration at the row rate is then an artifact - near zero")
             print("     inside segments and spiking at the knots - so the attractor")
             print("     readout must run at the true tracker rate, not the row rate.")
-        else:
-            print("  => position is NOT piecewise-linear: curvature is present")
-            print("     throughout, consistent with a genuine per-sample pose stream")
-            print("     (SteamVR pose prediction, or IMU-fused extrapolation).")
 
     print()
     print("=== 3. sync-error tail ===")
