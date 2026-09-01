@@ -17,11 +17,25 @@ from .splits import subset_from_trial_ids
 from ..utils import load_json
 
 
+# Defaults for this rig. A different placement means a different sensor
+# count, so the dimension helpers below take the data config and derive it
+# from data.sensors rather than reading the module constant. The constants
+# stay as the default so every existing config, checkpoint and experiment in
+# this repository is unaffected.
 SENSOR_COUNT = 4
 RAW_CHANNELS_PER_SENSOR = 6
 RAW_IMU_DIM = SENSOR_COUNT * RAW_CHANNELS_PER_SENSOR
 CALIBRATED_FEATURES_PER_SENSOR = 16
 CALIBRATED_IMU_DIM = SENSOR_COUNT * CALIBRATED_FEATURES_PER_SENSOR
+
+
+def sensor_count(data_config: dict[str, Any] | None = None) -> int:
+    """Number of EMG/IMU units in a dataset."""
+    from .schema import sensor_names
+
+    return len(sensor_names(data_config))
+
+
 CALIBRATED_FEATURE_NAMES_PER_SENSOR = (
     "acc_cal_x",
     "acc_cal_y",
@@ -61,10 +75,23 @@ def emg_channel_count(data_config: dict[str, Any]) -> int:
 
 def emg_channel_names(data_config: dict[str, Any]) -> tuple[str, ...]:
     """Channel order must match raw_emg_features: amplitude, derivative, derived."""
-    names = tuple(SENSORS)
+    from .schema import sensor_names
+
+    sensors = sensor_names(data_config)
+    names = tuple(sensors)
     if bool(data_config.get("emg_derivative_channels", False)):
-        names = names + tuple(f"d_{sensor}" for sensor in SENSORS)
+        names = names + tuple(f"d_{sensor}" for sensor in sensors)
     if bool(data_config.get("emg_derived_channels", False)):
+        # EMG_ANTAGONIST_PAIRS indexes electrodes by position and is specific
+        # to this rig's AD/LD/BB/TB placement. A different placement needs its
+        # own pairing before these channels mean anything.
+        if len(sensors) != len(SENSORS):
+            raise ValueError(
+                "emg_derived_channels assumes this rig's 4-electrode "
+                f"agonist/antagonist layout; got {len(sensors)} sensors. Set "
+                "data.emg_derived_channels false, or define pairings for the "
+                "new placement."
+            )
         names = names + EMG_DERIVED_NAMES
     return names
 
@@ -182,36 +209,47 @@ def raw_emg_features(
 
 
 def grid_imu_feature_dim(data_config: dict[str, Any]) -> int:
-    return CALIBRATED_IMU_DIM + (
-        RAW_IMU_DIM if bool(data_config.get("include_raw_imu", False)) else 0
+    count = sensor_count(data_config)
+    return count * CALIBRATED_FEATURES_PER_SENSOR + (
+        count * RAW_CHANNELS_PER_SENSOR
+        if bool(data_config.get("include_raw_imu", False))
+        else 0
     )
 
 
 def grid_imu_sensor_indices(data_config: dict[str, Any]) -> tuple[int, ...]:
     calibrated = tuple(
         sensor
-        for sensor in range(SENSOR_COUNT)
+        for sensor in range(sensor_count(data_config))
         for _ in range(CALIBRATED_FEATURES_PER_SENSOR)
     )
     if not bool(data_config.get("include_raw_imu", False)):
         return calibrated
     raw = tuple(
         sensor
-        for sensor in range(SENSOR_COUNT)
+        for sensor in range(sensor_count(data_config))
         for _ in range(RAW_CHANNELS_PER_SENSOR)
     )
     return raw + calibrated
 
 
 def grid_imu_feature_names(data_config: dict[str, Any]) -> tuple[str, ...]:
+    # Config-derived, not the module constants: the acceleration and
+    # orientation index helpers below are built by filtering these names, and
+    # those indices are what the virtual-leader branch reads. Leaving this
+    # hardcoded meant an 8-sensor rig silently got 12 acceleration channels
+    # instead of 24 - the wrong slice of the feature vector, with no error.
+    from .schema import imu_columns, sensor_names
+
     calibrated = tuple(
         f"{sensor}_{feature}"
-        for sensor in SENSORS
+        for sensor in sensor_names(data_config)
         for feature in CALIBRATED_FEATURE_NAMES_PER_SENSOR
     )
     if not bool(data_config.get("include_raw_imu", False)):
         return calibrated
-    return tuple(f"raw_{name}" for name in IMU_COLUMNS) + calibrated
+    raw = tuple(f"raw_{name}" for name in imu_columns(data_config))
+    return raw + calibrated
 
 
 def grid_imu_acceleration_indices(data_config: dict[str, Any]) -> tuple[int, ...]:
@@ -283,20 +321,26 @@ def calibrate_imu_features(
     angular-acceleration magnitude (1).
     """
 
-    if imu.ndim != 2 or imu.shape[1] != SENSOR_COUNT * RAW_CHANNELS_PER_SENSOR:
-        raise ValueError(f"Expected IMU shape [time, 24], received {imu.shape}")
+    if imu.ndim != 2 or imu.shape[1] % RAW_CHANNELS_PER_SENSOR:
+        raise ValueError(
+            f"Expected IMU shape [time, sensors x {RAW_CHANNELS_PER_SENSOR}], "
+            f"received {imu.shape}"
+        )
     if imu_mask.shape != imu.shape:
         raise ValueError("IMU mask shape does not match values")
+    # Derived from the array rather than a module constant, so a rig with a
+    # different number of units works without editing this file.
+    count = imu.shape[1] // RAW_CHANNELS_PER_SENSOR
     calibration_samples = max(
         1, min(len(imu), int(round(calibration_window_s * sample_rate_hz)))
     )
-    values = imu.reshape(len(imu), SENSOR_COUNT, RAW_CHANNELS_PER_SENSOR)
-    masks = imu_mask.reshape(len(imu), SENSOR_COUNT, RAW_CHANNELS_PER_SENSOR)
+    values = imu.reshape(len(imu), count, RAW_CHANNELS_PER_SENSOR)
+    masks = imu_mask.reshape(len(imu), count, RAW_CHANNELS_PER_SENSOR)
     sensor_features = []
     sensor_masks = []
     dt = 1.0 / float(sample_rate_hz)
 
-    for sensor in range(SENSOR_COUNT):
+    for sensor in range(count):
         sensor_values = values[:, sensor]
         sensor_valid = masks[:, sensor]
         baseline, baseline_valid = _masked_channel_median(
