@@ -65,6 +65,9 @@ from .tracked_trajectory import (
 )
 
 TASK_TARGET_COLUMNS = ("click_x_norm", "click_y_norm")
+# Needed to report screen error in pixels, so a wearable-only result is
+# directly comparable with this project's earlier screen-coordinate work.
+CANVAS_COLUMNS = ("canvas_width_px", "canvas_height_px")
 
 
 def causal_envelope(values: np.ndarray, window: int) -> np.ndarray:
@@ -242,6 +245,15 @@ def preprocess_tracked_trial(
         finite = target[np.isfinite(target).all(axis=1)]
         if len(finite):
             result["screen_target"] = finite[-1]
+    if all(name in frame.columns for name in CANVAS_COLUMNS):
+        canvas = (
+            frame[list(CANVAS_COLUMNS)]
+            .apply(pd.to_numeric, errors="coerce")
+            .to_numpy(dtype=np.float32)
+        )
+        usable_canvas = canvas[np.isfinite(canvas).all(axis=1)]
+        if len(usable_canvas):
+            result["canvas"] = usable_canvas[-1]
     return result
 
 
@@ -426,6 +438,8 @@ def collate_tracked(batch: list[dict[str, Any]]) -> dict[str, Any] | None:
     out["onset"] = torch.tensor([i["onset"] for i in usable], dtype=torch.long)
     if "screen_target" in usable[0]:
         out["screen_target"] = torch.stack([i["screen_target"] for i in usable])
+    if "canvas" in usable[0]:
+        out["canvas"] = torch.stack([i["canvas"] for i in usable])
     out["session"] = torch.tensor([i.get("session", 0) for i in usable], dtype=torch.long)
     out["paths"] = [i["path"] for i in usable]
     return out
