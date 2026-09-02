@@ -7,6 +7,12 @@ data:
   # every session, which is the most likely reason EMG measured as harmful
   # under held-out-session evaluation.
   emg_session_normalise: true
+  # Same treatment for the IMU, and it matters more: the sweep isolated the
+  # IMU as the harmful input (0.46 cm with EMG present, 0.48 cm without,
+  # against 0.09 cm of seed noise) while EMG's own cost sat inside the noise.
+  # Limb-mounted units carry a gravity offset set by how they sat on the arm
+  # that day, so centring as well as scaling is required.
+  imu_session_normalise: true
   # Read off the real export by scripts/inspect_tracked_dataset.py, not
   # assumed - the tracked rig records RAW EMG ("EMG 1_S0"), not the RMS
   # envelope ("EMG RMS 1_S0") the original project used.

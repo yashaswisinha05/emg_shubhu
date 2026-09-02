@@ -230,6 +230,46 @@ def session_emg_scale(
     return np.maximum(scale, 1e-8)
 
 
+def session_imu_statistics(
+    trials: list[Path], data_config: dict[str, Any], sample: int = 12
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Per-session IMU centre and scale.
+
+    The sweep found the IMU, not EMG, doing the damage: removing it improved
+    the model by 0.46 cm with EMG present and 0.48 cm with EMG absent, against
+    a seed spread of 0.09 - the same effect measured twice, while EMG's own
+    cost (0.03 and 0.05 cm) sat inside the noise.
+
+    The mechanism is the same one that motivated normalising EMG, and the IMU
+    is arguably worse for it. These are limb-mounted sensors, so each channel
+    carries a gravity component fixed by how the unit happened to sit on the
+    arm that day. Re-applying the sensors rotates that offset, and a
+    held-out-session split then presents the encoder with 24 channels whose
+    baseline has moved for reasons that have nothing to do with the reach.
+    Worse, the tracker already measures the same arm motion in a properly
+    calibrated frame, so the IMU contributes little the model needs while
+    supplying ample session-specific detail to overfit.
+
+    Centring as well as scaling, unlike EMG: an EMG envelope is non-negative
+    with a meaningful zero, while an accelerometer's zero is wherever gravity
+    happens to project. Removing the per-session median removes that
+    orientation offset; the 95th percentile of the absolute deviation then
+    puts the remaining motion on a common scale.
+    """
+    stride = max(1, len(trials) // sample)
+    collected = []
+    for path in trials[::stride][:sample]:
+        data = preprocess_tracked_trial(path, data_config)
+        if data is not None and "imu" in data:
+            collected.append(data["imu"])
+    if not collected:
+        return None
+    stacked = np.concatenate(collected, axis=0)
+    centre = np.median(stacked, axis=0).astype(np.float32)
+    scale = np.percentile(np.abs(stacked - centre), 95, axis=0).astype(np.float32)
+    return centre, np.maximum(scale, 1e-6)
+
+
 class TrackedTrajectoryDataset(Dataset):
     """Preprocessed trials, cached to .npz so epochs do not re-parse CSVs."""
 
@@ -250,6 +290,7 @@ class TrackedTrajectoryDataset(Dataset):
         # session is normalised by its own amplitude, which is what makes the
         # channels comparable across participants.
         self.emg_scales: dict[str, np.ndarray] = {}
+        self.imu_statistics: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self.cache_dir = Path(cache_dir) if cache_dir else None
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -300,6 +341,10 @@ class TrackedTrajectoryDataset(Dataset):
         scale = self.emg_scales.get(path.parent.name)
         if scale is not None and "emg" in result:
             result["emg"] = result["emg"] / torch.from_numpy(scale)
+        statistics = self.imu_statistics.get(path.parent.name)
+        if statistics is not None and "imu" in result:
+            centre, spread = statistics
+            result["imu"] = (result["imu"] - torch.from_numpy(centre)) / torch.from_numpy(spread)
         result["length"] = int(result["position"].shape[0])
         result["path"] = str(path)
         result["session"] = int(self.session_index.get(path.parent.name, 0))
@@ -379,8 +424,9 @@ def split_sessions(
     )
 
 
-def _with_scales(dataset, scales):
+def _with_scales(dataset, scales, imu_statistics=None):
     dataset.emg_scales = scales
+    dataset.imu_statistics = imu_statistics or {}
     return dataset
 
 
@@ -402,6 +448,12 @@ def build_tracked_loaders(
             scale = session_emg_scale(trials, config["data"])
             if scale is not None:
                 scales[name] = scale
+    imu_statistics: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    if bool(config["data"].get("imu_session_normalise", True)):
+        for name, trials in sessions.items():
+            found = session_imu_statistics(trials, config["data"])
+            if found is not None:
+                imu_statistics[name] = found
     config.setdefault("virtual_leader", {})["session_count"] = len(session_index)
     data_config = config["data"]
     batch_size = int(config["training"].get("batch_size", 16))
@@ -412,6 +464,7 @@ def build_tracked_loaders(
             _with_scales(
                 TrackedTrajectoryDataset(trials, data_config, cache_dir, session_index),
                 scales,
+                imu_statistics,
             ),
             batch_size=batch_size,
             shuffle=shuffle,

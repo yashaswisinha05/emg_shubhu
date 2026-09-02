@@ -166,21 +166,75 @@ def main() -> None:
         print(f"{model:13} {ablation:17} {summarise(means):>13} "
               f"{summarise(finals):>13} {improvement:>12}")
 
-    # EMG's contribution, read two independent ways. They should agree; if
-    # they do not, the disentangled split is mismeasuring rather than
-    # revealing something.
+    # Errors split by how early the cutoff sat. Electromechanical delay puts
+    # any EMG contribution in the first samples after onset, so an effect can
+    # be real there and invisible in a mean over uniformly sampled cutoffs.
+    buckets = ("early", "mid", "late")
+    if any(f"model_{b}_m" in any_scores for b in buckets):
+        print("\n" + "=" * 78)
+        print("by how early the cutoff sat (samples past movement onset)")
+        print(f"{'model':13} {'inputs':17}" + "".join(f"{b:>12}" for b in buckets))
+        print("-" * 78)
+        for (model, ablation), runs in sorted(collected.items()):
+            cells = []
+            for bucket in buckets:
+                values = [r.get(f"model_{bucket}_m") for r in runs]
+                values = [v for v in values if v is not None]
+                cells.append(f"{statistics.mean(values) * 100:9.2f} cm" if values else "         -")
+            print(f"{model:13} {ablation:17}" + "".join(f"{c:>12}" for c in cells))
+
+    # Separating the two modalities. Ablating EMG and IMU together cannot say
+    # which one is responsible - a 2x2 can, and measuring each main effect
+    # twice (once with the other modality present, once without) shows whether
+    # it is consistent or an artifact of one particular combination.
     print("\n" + "=" * 78)
-    print("what EMG contributes, measured two ways")
+    print("separating EMG from IMU (each effect measured twice)")
+
+    def mean_of(model: str, ablation: str) -> float | None:
+        runs = collected.get((model, ablation))
+        if not runs:
+            return None
+        values = [r.get("model_mean_m") for r in runs]
+        values = [v for v in values if v is not None]
+        return statistics.mean(values) if values else None
+
+    def spread_of(model: str, ablation: str) -> float:
+        runs = collected.get((model, ablation)) or []
+        values = [r.get("model_mean_m") for r in runs]
+        values = [v for v in values if v is not None]
+        return statistics.stdev(values) if len(values) > 1 else 0.0
+
     for model in args.models:
-        full = collected.get((model, "all-inputs"))
-        kinematic = collected.get((model, "kinematics-only"))
-        if full and kinematic:
-            a = statistics.mean([r["model_mean_m"] for r in full])
-            b = statistics.mean([r["model_mean_m"] for r in kinematic])
-            verdict = "HELPS" if b > a else "HURTS"
-            print(f"  [{model}] ablation: all-inputs {a * 100:.2f} cm vs "
-                  f"kinematics-only {b * 100:.2f} cm -> EMG+IMU {verdict} by "
-                  f"{abs(a - b) * 100:.2f} cm")
+        both = mean_of(model, "all-inputs")
+        without_imu = mean_of(model, "no-imu")
+        without_emg = mean_of(model, "no-emg")
+        neither = mean_of(model, "kinematics-only")
+        noise = max(
+            spread_of(model, a)
+            for a in ("all-inputs", "no-emg", "no-imu", "kinematics-only")
+        )
+        if None in (both, without_imu, without_emg, neither):
+            continue
+        # Cost of keeping a modality: positive means the model is better off
+        # without it.
+        emg_with_imu = both - without_emg
+        emg_without_imu = without_imu - neither
+        imu_with_emg = both - without_imu
+        imu_without_emg = without_emg - neither
+        print(f"\n  [{model}]  seed noise ~{noise * 100:.2f} cm")
+        for label, a, b in (
+            ("EMG", emg_with_imu, emg_without_imu),
+            ("IMU", imu_with_emg, imu_without_emg),
+        ):
+            average = (a + b) / 2
+            sigma = abs(average) / noise if noise > 0 else float("inf")
+            if sigma < 2.0:
+                verdict = "within seed noise - no effect"
+            elif average > 0:
+                verdict = f"HURTS by {average * 100:.2f} cm ({sigma:.1f} sd)"
+            else:
+                verdict = f"HELPS by {-average * 100:.2f} cm ({sigma:.1f} sd)"
+            print(f"    {label}: {a * 100:+.2f} / {b * 100:+.2f} cm  -> {verdict}")
     antic = collected.get(("anticipatory", "all-inputs"))
     if antic and antic[0].get("kinematic_only_latent_mean_m"):
         full = statistics.mean([r["model_mean_m"] for r in antic])
