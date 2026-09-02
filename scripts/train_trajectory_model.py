@@ -491,9 +491,17 @@ def main() -> None:
             # exactly that, so no reduction over a coordinate axis here.
             losses = trajectory_loss(outputs, future, future_mask, config)
             if args.model == "anticipatory":
+                # The TRUE velocity, not the encoder's copy. In wearable
+                # mode the encoder's velocity is zeroed, so passing it here
+                # trained z_kin to reconstruct zero - the split collapsed and
+                # the anticipatory gain read 0.02 cm because the partition was
+                # measuring nothing, not because EMG carried nothing. Using
+                # the tracker value as a supervision TARGET is legitimate: it
+                # is ground truth, exactly like the trajectory, and never
+                # reaches the model as an input.
                 extra = anticipatory_losses(
                     outputs,
-                    window["velocity"][:, -1],
+                    window["_true_velocity"][:, -1],
                     window["acceleration"],
                     config,
                     session=batch.get("session"),

@@ -55,6 +55,7 @@ def run_one(
     seed: int,
     epochs: int,
     device: str,
+    task: str = "forecast",
 ) -> dict | None:
     results = output / "results.json"
     if results.exists():
@@ -66,6 +67,7 @@ def run_one(
         "--root", root, "--config", config, "--cache-dir", cache_dir,
         "--output-dir", str(output), "--device", device,
         "--epochs", str(epochs), "--model", model, "--seed", str(seed),
+        "--task", task,
     ]
     if ablate:
         command += ["--ablate", ablate]
@@ -98,6 +100,13 @@ def main() -> None:
     parser.add_argument("--output-dir", default="runs/sweep")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument(
+        "--task", choices=("forecast", "wearable"), default="forecast",
+        help="wearable: tracker is label-only, EMG+IMU are the whole input. "
+        "This is where the EMG-vs-IMU decomposition actually answers the "
+        "project's question, since in forecast mode the tracker dominates "
+        "both modalities.",
+    )
     parser.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])
     parser.add_argument(
         "--models", nargs="+", default=["trajectory", "anticipatory"],
@@ -113,6 +122,9 @@ def main() -> None:
     root_out = Path(args.output_dir)
     root_out.mkdir(parents=True, exist_ok=True)
 
+    if args.task == "wearable":
+        print("wearable: the tracker is already excluded, so the ablations "
+              "compare EMG against IMU rather than against the tracker\n")
     combinations = list(itertools.product(args.models, args.ablations, args.seeds))
     print(f"{len(combinations)} run(s): {len(args.models)} model(s) x "
           f"{len(args.ablations)} ablation(s) x {len(args.seeds)} seed(s)\n")
@@ -122,7 +134,7 @@ def main() -> None:
         output = root_out / f"{model}__{ablation}__seed{seed}"
         scores = run_one(
             script, args.root, args.config, args.cache_dir, output,
-            model, ABLATIONS[ablation], seed, args.epochs, args.device,
+            model, ABLATIONS[ablation], seed, args.epochs, args.device, args.task,
         )
         if scores:
             collected.setdefault((model, ablation), []).append(scores)
@@ -140,17 +152,31 @@ def main() -> None:
           f"{any_scores.get('hold_final_m', 0) * 100:6.2f} cm final")
     print(f"  linear {any_scores.get('linear_mean_m', 0) * 100:6.2f} cm mean | "
           f"{any_scores.get('linear_final_m', 0) * 100:6.2f} cm final")
-    linear_mean = any_scores.get("linear_mean_m")
+    if "mean_reach_mean_m" in any_scores:
+        print(f"  mean   {any_scores['mean_reach_mean_m'] * 100:6.2f} cm mean | "
+              f"{any_scores.get('mean_reach_final_m', 0) * 100:6.2f} cm final"
+              "   <- the bar in wearable mode")
+    # In wearable mode `linear` needs the tracker, so it cannot be the
+    # reference; the average reach profile is what a model must beat to have
+    # inferred anything about THIS trial.
+    linear_mean = any_scores.get("mean_reach_mean_m") or any_scores.get("linear_mean_m")
 
     print("\n" + "=" * 78)
+    reference_name = (
+        "mean reach" if "mean_reach_mean_m" in any_scores else "linear"
+    )
     header = (
         f"{'model':13} {'inputs':17} {'mean cm':>13} {'final cm':>13} "
         f"{'better than':>12}"
     )
     print(header)
-    print(f"{'':13} {'':17} {'':>13} {'':>13} {'linear':>12}")
+    print(f"{'':13} {'':17} {'':>13} {'':>13} {reference_name:>12}")
     print("-" * len(header))
-    print("  (positive = beats constant-velocity extrapolation; negative = worse)")
+    if reference_name == "mean reach":
+        print("  (positive = infers something about THIS trial rather than "
+              "replaying the average reach)")
+    else:
+        print("  (positive = beats constant-velocity extrapolation; negative = worse)")
     rows = []
     for (model, ablation), runs in sorted(collected.items()):
         means = [r.get("model_mean_m") for r in runs]
