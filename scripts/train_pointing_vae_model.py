@@ -115,8 +115,18 @@ def make_pointing_window(
     batch: dict, minimum_prefix: int, patch_length: int, generator,
     ablate: tuple[str, ...] = (), cutoffs_per_trial: int = 1,
     fallback_canvas: torch.Tensor | None = None,
+    context_samples: int | None = None,
+    cutoff_offsets: tuple[int, ...] = (),
 ) -> dict | None:
-    """Cut after onset. The tracker never appears here at all any more -
+    """Build fixed-history windows at random or onset-relative cutoffs.
+
+    History duration and cutoff timing are independent. Earlier code used
+    `minimum_prefix` for both and capped every prefix at 64 samples (~0.51 s),
+    preventing a fair test of the 2.16 s context used by the pretrained
+    emg2pose result. Missing pre-buffer history is left-zero-padded and marked
+    false in `time_mask`; no future sample is fabricated.
+
+    The tracker never appears here as a model input -
     the predecessor's label-only velocity/acceleration existed solely to
     supervise the kinematic subspace, which this model does not have.
     """
@@ -125,34 +135,56 @@ def make_pointing_window(
     for row in range(len(lengths)):
         length = int(lengths[row])
         touch = length - 1
-        start = max(int(onsets[row]) + minimum_prefix, minimum_prefix)
+        onset = int(onsets[row])
+        start = max(onset + minimum_prefix, minimum_prefix)
         latest = touch - minimum_prefix
-        if latest <= start:
+        if cutoff_offsets:
+            if latest <= 0:
+                continue
+        elif latest <= start:
             continue
         for _ in range(cutoffs_per_trial):
-            cut = int(generator.integers(start, latest))
-            progress = (cut - start) / max(latest - start, 1)
-            chosen.append((row, cut, progress))
+            if cutoff_offsets:
+                offset = int(generator.choice(cutoff_offsets))
+                cut = onset + offset
+                if cut <= 0 or cut > latest:
+                    continue
+            else:
+                cut = int(generator.integers(start, latest))
+                offset = cut - onset
+            progress = float(np.clip(
+                (cut - onset) / max(touch - onset, 1), 0.0, 1.0
+            ))
+            chosen.append((row, cut, progress, offset))
     if not chosen:
         return None
 
-    prefix_length = max(
-        patch_length, min(minimum_prefix * 4, min(cut for _, cut, _ in chosen))
-    )
-    device = batch["position"].device
+    prefix_length = max(patch_length, int(context_samples or minimum_prefix * 4))
+    device = batch["emg"].device
     window: dict[str, torch.Tensor] = {}
+    time_masks = []
     for key in ("emg", "imu"):
-        window[key] = torch.stack(
-            [batch[key][row, cut - prefix_length : cut] for row, cut, _ in chosen]
-        )
+        slices = []
+        for row, cut, _, _ in chosen:
+            start_index = max(0, cut - prefix_length)
+            available = batch[key][row, start_index:cut]
+            padded = torch.zeros(
+                prefix_length, batch[key].size(-1),
+                dtype=batch[key].dtype, device=batch[key].device,
+            )
+            padded[-available.size(0):] = available
+            slices.append(padded)
+            if key == "emg":
+                mask = torch.zeros(prefix_length, dtype=torch.bool, device=device)
+                mask[-available.size(0):] = True
+                time_masks.append(mask)
+        window[key] = torch.stack(slices)
     for name in ablate:
         if name in window:
             window[name] = torch.zeros_like(window[name])
-    window["time_mask"] = torch.ones(
-        len(chosen), prefix_length, dtype=torch.bool, device=device
-    )
+    window["time_mask"] = torch.stack(time_masks)
 
-    rows = torch.tensor([row for row, _, _ in chosen], dtype=torch.long, device=device)
+    rows = torch.tensor([row for row, _, _, _ in chosen], dtype=torch.long, device=device)
     window["target"] = batch["screen_target"].index_select(0, rows)
     if "canvas" in batch:
         window["canvas_size"] = batch["canvas"].index_select(0, rows)
@@ -160,15 +192,21 @@ def make_pointing_window(
         window["canvas_size"] = fallback_canvas.to(device).unsqueeze(0).expand(len(rows), -1)
 
     minimum_weight = 0.5
-    progress = torch.tensor([p for _, _, p in chosen], dtype=torch.float32, device=device)
+    progress = torch.tensor(
+        [p for _, _, p, _ in chosen], dtype=torch.float32, device=device
+    )
     window["loss_weight"] = minimum_weight + (1.0 - minimum_weight) * progress
+    window["samples_past_onset"] = torch.tensor(
+        [offset for _, _, _, offset in chosen], dtype=torch.long, device=device
+    )
     return window
 
 
 @torch.no_grad()
 def evaluate(
     model, loader, config, device, minimum_prefix, patch_length, ablate,
-    canvas_tensor, mean_target,
+    canvas_tensor, mean_target, context_samples,
+    cutoff_offsets: tuple[int, ...] = (),
 ) -> dict:
     model.eval()
     totals: dict[str, list[float]] = {}
@@ -177,28 +215,60 @@ def evaluate(
         if batch is None:
             continue
         batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
-        window = make_pointing_window(
-            batch, minimum_prefix, patch_length, generator, ablate,
-            cutoffs_per_trial=1, fallback_canvas=canvas_tensor,
-        )
-        if window is None:
-            continue
-        outputs = model(window["emg"], window["imu"], window["time_mask"])
-        target = window["target"]
-        canvas = window.get("canvas_size")
+        # Every eligible trial is evaluated at every requested offset. One
+        # random cutoff per trial made validation noisy and confounded timing
+        # with trial identity.
+        selected_offsets = tuple((offset,) for offset in cutoff_offsets) or ((),)
+        for selected in selected_offsets:
+            window = make_pointing_window(
+                batch, minimum_prefix, patch_length, generator, ablate,
+                cutoffs_per_trial=1, fallback_canvas=canvas_tensor,
+                context_samples=context_samples, cutoff_offsets=selected,
+            )
+            if window is None:
+                continue
+            outputs = model(window["emg"], window["imu"], window["time_mask"])
+            target = window["target"]
+            canvas = window.get("canvas_size")
 
-        candidates = {
-            "direct": outputs["prediction"],
-            "grid": outputs.get("grid_prediction", outputs["prediction"]),
-            "mean": mean_target.to(device).unsqueeze(0).expand_as(target),
-            "centre": torch.full_like(target, 0.5),
-        }
-        for name, prediction in candidates.items():
-            delta = prediction - target
-            totals.setdefault(f"{name}_norm", []).append(float(delta.norm(dim=-1).mean()))
-            if canvas is not None:
-                pixels = (delta * canvas).norm(dim=-1)
-                totals.setdefault(f"{name}_px", []).append(float(pixels.mean()))
+            candidates = {
+                "direct": outputs["prediction"],
+                "grid": outputs.get("grid_prediction", outputs["prediction"]),
+                "mean": mean_target.to(device).unsqueeze(0).expand_as(target),
+                "centre": torch.full_like(target, 0.5),
+            }
+            if bool(config.get("evaluation", {}).get("paired_interventions", False)):
+                zero_emg = torch.zeros_like(window["emg"])
+                candidates["without_emg"] = model(
+                    zero_emg, window["imu"], window["time_mask"]
+                )["prediction"]
+                if window["emg"].size(0) > 1:
+                    candidates["shuffled_emg"] = model(
+                        torch.roll(window["emg"], 1, 0),
+                        window["imu"], window["time_mask"],
+                    )["prediction"]
+                if getattr(model, "use_imu", False):
+                    candidates["without_imu"] = model(
+                        window["emg"], torch.zeros_like(window["imu"]),
+                        window["time_mask"],
+                    )["prediction"]
+
+            offset = int(window["samples_past_onset"][0]) if selected else None
+            for name, prediction in candidates.items():
+                delta = prediction - target
+                norms = delta.norm(dim=-1).detach().cpu().tolist()
+                totals.setdefault(f"{name}_norm", []).extend(norms)
+                if offset is not None:
+                    totals.setdefault(
+                        f"{name}_offset_{offset:+d}_norm", []
+                    ).extend(norms)
+                if canvas is not None:
+                    pixels = (delta * canvas).norm(dim=-1).detach().cpu().tolist()
+                    totals.setdefault(f"{name}_px", []).extend(pixels)
+                    if offset is not None:
+                        totals.setdefault(
+                            f"{name}_offset_{offset:+d}_px", []
+                        ).extend(pixels)
     return {key: float(np.mean(values)) for key, values in totals.items()}
 
 
@@ -206,7 +276,7 @@ def training_mean_target(loader) -> torch.Tensor:
     collected = []
     for batch in loader:
         if batch is not None and "screen_target" in batch:
-            collected.append(batch["screen_target"].mean(0))
+            collected.extend(batch["screen_target"].unbind(0))
     if not collected:
         return torch.tensor([0.5, 0.5])
     return torch.stack(collected).mean(0).cpu()
@@ -222,6 +292,24 @@ def main() -> None:
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--cutoffs-per-trial", type=int, default=3)
+    parser.add_argument(
+        "--context-ms", type=float,
+        help="Fixed causal history duration. Missing history is left-padded "
+        "and masked. Defaults to model.context_ms.",
+    )
+    parser.add_argument(
+        "--cutoff-offset-ms", type=float, nargs="+",
+        help="Cutoffs relative to tracker-defined movement onset. Training "
+        "samples them and evaluation visits every offset for every trial.",
+    )
+    parser.add_argument(
+        "--screen-only", action="store_true",
+        help="Optimize direct pixel/radial error without grid auxiliaries.",
+    )
+    parser.add_argument(
+        "--paired-interventions", action="store_true",
+        help="Evaluate the same checkpoint with EMG removed/shuffled and IMU removed.",
+    )
     parser.add_argument("--holdout-config")
     parser.add_argument(
         "--inputs", choices=("emg", "emg+imu"), default="emg+imu",
@@ -236,6 +324,16 @@ def main() -> None:
         config.setdefault("data", {})["holdout_config"] = args.holdout_config
     if args.epochs:
         config["training"]["epochs"] = args.epochs
+    if args.screen_only:
+        config["loss"].update({
+            "heatmap_weight": 0.0,
+            "offset_weight": 0.0,
+            "transport_weight": 0.0,
+            "pixel_weight": 1.0,
+            "radial_weight": 1.0,
+        })
+    if args.paired_interventions:
+        config.setdefault("evaluation", {})["paired_interventions"] = True
     seed_everything(int(args.seed if args.seed is not None else config.get("seed", 42)))
     device = torch.device(
         args.device if torch.cuda.is_available() or args.device != "cuda" else "cpu"
@@ -259,6 +357,36 @@ def main() -> None:
             f"virtual_leader.minimum_prefix ({minimum_prefix}) must be >= "
             f"model.patch_length ({patch_length})"
         )
+    model_rate = float(config["data"]["sample_rate_hz"]) / max(
+        1, int(config["data"].get("decimation", 10))
+    )
+    context_ms = float(
+        args.context_ms
+        if args.context_ms is not None
+        else config["model"].get(
+            "context_ms", minimum_prefix * 4 / model_rate * 1000.0
+        )
+    )
+    context_samples = max(
+        patch_length, int(round(context_ms * model_rate / 1000.0))
+    )
+    requested_offsets_ms = (
+        args.cutoff_offset_ms
+        if args.cutoff_offset_ms is not None
+        else config.get("evaluation", {}).get("cutoff_offsets_ms", [])
+    )
+    cutoff_offsets = tuple(dict.fromkeys(
+        int(round(float(value) * model_rate / 1000.0))
+        for value in requested_offsets_ms
+    ))
+    print(
+        f"context: {context_samples} samples "
+        f"({context_samples / model_rate:.2f} s)"
+    )
+    if cutoff_offsets:
+        print("cutoffs from movement onset: " + ", ".join(
+            f"{offset / model_rate * 1000:+.0f} ms" for offset in cutoff_offsets
+        ))
 
     emg_channels = emg_feature_count(config["data"])
     imu_channels = 6 * len(config["data"].get("sensors", ["S0", "S4", "S8", "S12"]))
@@ -276,7 +404,8 @@ def main() -> None:
         k: (v.to(device) if torch.is_tensor(v) else v) for k, v in probe_batch.items()
     }
     probe_window = make_pointing_window(
-        probe_batch, minimum_prefix, patch_length, np.random.default_rng(0), ablate
+        probe_batch, minimum_prefix, patch_length, np.random.default_rng(0), ablate,
+        context_samples=context_samples, cutoff_offsets=cutoff_offsets,
     )
     assert not ({"position", "velocity"} & set(probe_window)), (
         "position/velocity present in the window dict under their own names"
@@ -284,8 +413,9 @@ def main() -> None:
     print(
         "tracker-blindness check: model.forward's signature has no position/"
         "velocity/acceleration parameter, and the window built for it "
-        "carries no such keys at all - the tracker is not used anywhere in "
-        "this script, not even as a label"
+        "carries no such keys at all. Tracker-derived onset is used only to "
+        "choose the evaluation time and the target only as supervision; "
+        "neither can enter the prediction encoder."
     )
 
     fallback_canvas = canvas_from_disk(args.root)
@@ -329,7 +459,8 @@ def main() -> None:
             }
             window = make_pointing_window(
                 batch, minimum_prefix, patch_length, generator, ablate,
-                args.cutoffs_per_trial, canvas_tensor,
+                args.cutoffs_per_trial, canvas_tensor, context_samples,
+                cutoff_offsets,
             )
             if window is None:
                 continue
@@ -347,7 +478,7 @@ def main() -> None:
 
         scores = evaluate(
             model, validation_loader, config, device, minimum_prefix, patch_length,
-            ablate, canvas_tensor, mean_target,
+            ablate, canvas_tensor, mean_target, context_samples, cutoff_offsets,
         )
         selection = scores.get("direct_px", scores.get("direct_norm", 1e9))
         scheduler.step(selection)
@@ -368,17 +499,36 @@ def main() -> None:
         print(f"loaded best checkpoint (val {best:.1f} px) for test")
     test = evaluate(
         model, test_loader, config, device, minimum_prefix, patch_length,
-        ablate, canvas_tensor, mean_target,
+        ablate, canvas_tensor, mean_target, context_samples, cutoff_offsets,
     )
 
     print("\n=== test ===")
     print(f"  inputs: {args.inputs}, tracker excluded from the encoder\n")
     print(f"  {'':10}{'norm':>10}{'pixels':>12}")
-    for name in ("direct", "grid", "mean", "centre"):
+    for name in (
+        "direct", "grid", "without_emg", "shuffled_emg", "without_imu",
+        "mean", "centre",
+    ):
         if f"{name}_norm" not in test:
             continue
         px = f"{test[f'{name}_px']:.1f}" if f"{name}_px" in test else "n/a"
         print(f"  {name:10}{test[f'{name}_norm']:>10.4f}{px:>12}")
+
+    if cutoff_offsets:
+        print("\n  direct error by cutoff from movement onset")
+        for offset in cutoff_offsets:
+            key = f"direct_offset_{offset:+d}_px"
+            if key in test:
+                print(f"    {offset / model_rate * 1000:+6.0f} ms: {test[key]:7.1f} px")
+
+    if "without_emg_px" in test:
+        full = test["direct_px"]
+        print("\n  paired same-checkpoint effects (positive = modality helps)")
+        print(f"    remove EMG: {test['without_emg_px'] - full:+.1f} px")
+        if "shuffled_emg_px" in test:
+            print(f"    shuffle EMG: {test['shuffled_emg_px'] - full:+.1f} px")
+        if "without_imu_px" in test:
+            print(f"    remove IMU: {test['without_imu_px'] - full:+.1f} px")
 
     if "direct_px" in test and "mean_px" in test:
         gain = (test["mean_px"] - test["direct_px"]) / test["mean_px"] * 100

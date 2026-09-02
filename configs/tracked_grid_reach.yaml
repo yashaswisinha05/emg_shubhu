@@ -36,6 +36,9 @@ model:
   patch_length: 16
   patch_stride: 8
   tcn_kernel_sizes: [3, 7, 15]
+  # Long masked context, matching the useful temporal coverage of the
+  # pretrained emg2pose experiment without its non-causal Fourier resampling.
+  context_ms: 2000.0
 
 virtual_leader:
   # Required recorded history, independent of cutoff relative to onset.
@@ -56,6 +59,13 @@ loss:
   pixel_huber_beta: 0.25
   pixel_normalizer_px: 80.0
   charbonnier_epsilon_px: 1.0
+
+evaluation:
+  # Training samples these onset-relative offsets. Validation and test visit
+  # every eligible trial at every offset rather than one random cutoff. The
+  # negative offsets are essential for testing anticipatory EMG before motion.
+  cutoff_offsets_ms: [-300.0, -200.0, -100.0, 0.0, 100.0, 200.0, 300.0, 500.0]
+  paired_interventions: true
 
 training:
   batch_size: 16
