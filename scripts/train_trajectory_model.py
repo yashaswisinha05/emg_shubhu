@@ -108,7 +108,7 @@ class TrajectoryModel(torch.nn.Module):
 
 def make_window(
     batch: dict[str, torch.Tensor], horizon: int, minimum_prefix: int, generator,
-    dt: float = 1.0,
+    dt: float = 1.0, ablate: tuple[str, ...] = (),
 ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor] | None:
     """Cut each trial at a random point after movement onset.
 
@@ -158,6 +158,17 @@ def make_window(
     # acceleration term vanish next to the drag term - the prior silently
     # stops being an attractor readout at all and becomes a velocity
     # extrapolation, which is exactly the baseline it is supposed to beat.
+    # Ablation: zero an input group everywhere it enters the encoder. The
+    # model beating the linear baseline is only evidence about EMG if EMG is
+    # what carries it - the encoder also sees the whole kinematic prefix
+    # while the baseline sees only the last sample, so trajectory shape alone
+    # could produce the same margin. Zeroing rather than removing keeps the
+    # architecture and parameter count identical, so the comparison isolates
+    # the information and not the model size.
+    for name in ablate:
+        if name in window:
+            window[name] = torch.zeros_like(window[name])
+
     velocity = window["velocity"]
     window["acceleration"] = (
         (velocity[:, -1] - velocity[:, -2]) / dt
@@ -192,7 +203,8 @@ def displacement_error(predicted: torch.Tensor, target: torch.Tensor,
     return float(mean), float(final)
 
 
-def evaluate(model, loader, config, device, horizon, minimum_prefix, dt) -> dict:
+def evaluate(model, loader, config, device, horizon, minimum_prefix, dt,
+             ablate: tuple[str, ...] = ()) -> dict:
     model.eval()
     totals: dict[str, list[float]] = {}
     generator = np.random.default_rng(0)  # fixed cutoffs, so runs compare
@@ -203,7 +215,7 @@ def evaluate(model, loader, config, device, horizon, minimum_prefix, dt) -> dict
             batch = {
                 k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()
             }
-            made = make_window(batch, horizon, minimum_prefix, generator, dt)
+            made = make_window(batch, horizon, minimum_prefix, generator, dt, ablate)
             if made is None:
                 continue
             window, future, future_mask = made
@@ -227,6 +239,14 @@ def main() -> None:
     parser.add_argument("--device")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--seed", type=int)
+    parser.add_argument(
+        "--ablate",
+        default="",
+        help="Comma-separated input groups to zero out: emg, imu, position, "
+        "velocity. Use --ablate emg,imu to leave only the tracked kinematics, "
+        "which tests whether the margin over the linear baseline comes from "
+        "the muscle signal or merely from seeing the trajectory's history.",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -252,6 +272,9 @@ def main() -> None:
         lr=float(config["training"]["learning_rate"]),
         weight_decay=float(config["training"]["weight_decay"]),
     )
+    ablate = tuple(x.strip() for x in args.ablate.split(",") if x.strip())
+    if ablate:
+        print(f"ABLATION: zeroing {list(ablate)}")
     horizon = int(config["virtual_leader"]["horizon"])
     minimum_prefix = int(config["virtual_leader"].get("minimum_prefix", 16))
     rate = float(config["data"]["sample_rate_hz"]) / int(config["data"]["decimation"])
@@ -273,7 +296,7 @@ def main() -> None:
             batch = {
                 k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()
             }
-            made = make_window(batch, horizon, minimum_prefix, generator, dt)
+            made = make_window(batch, horizon, minimum_prefix, generator, dt, ablate)
             if made is None:
                 continue
             window, future, future_mask = made
@@ -289,7 +312,8 @@ def main() -> None:
                 meter.update(float(losses[name].detach()), int(future.size(0)))
 
         scores = evaluate(
-            model, validation_loader, config, device, horizon, minimum_prefix, dt
+            model, validation_loader, config, device, horizon, minimum_prefix, dt,
+            ablate,
         )
         record = {"epoch": epoch, **{k: m.average for k, m in meters.items()}, **scores}
         history.append(record)
@@ -314,7 +338,7 @@ def main() -> None:
         model.load_state_dict(torch.load(best_path, map_location=device)["model_state"])
         print(f"loaded best checkpoint (val {best:.4f} m) for test evaluation")
     test_scores = evaluate(
-        model, test_loader, config, device, horizon, minimum_prefix, dt
+        model, test_loader, config, device, horizon, minimum_prefix, dt, ablate
     )
     print()
     print("=== test ===")
