@@ -107,7 +107,8 @@ class TrajectoryModel(torch.nn.Module):
 
 
 def make_window(
-    batch: dict[str, torch.Tensor], horizon: int, minimum_prefix: int, generator
+    batch: dict[str, torch.Tensor], horizon: int, minimum_prefix: int, generator,
+    dt: float = 1.0,
 ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor] | None:
     """Cut each trial at a random point after movement onset.
 
@@ -151,9 +152,18 @@ def make_window(
     # Backward difference of the measured velocity: velocity is an
     # independent tracker estimate (verified, ~3e-01 relative to the
     # derivative of position), so only one differencing pass is needed.
+    # Divided by dt: a bare velocity difference is delta-v per SAMPLE, not
+    # per second, which at ~126 Hz is 126x too small. The attractor prior is
+    # r = x + (xddot + rho xdot)/eta, so an acceleration that small makes the
+    # acceleration term vanish next to the drag term - the prior silently
+    # stops being an attractor readout at all and becomes a velocity
+    # extrapolation, which is exactly the baseline it is supposed to beat.
     velocity = window["velocity"]
-    window["acceleration"] = (velocity[:, -1] - velocity[:, -2]) if velocity.size(1) > 1 \
+    window["acceleration"] = (
+        (velocity[:, -1] - velocity[:, -2]) / dt
+        if velocity.size(1) > 1
         else torch.zeros_like(velocity[:, -1])
+    )
     return window, future, future_mask
 
 
@@ -193,7 +203,7 @@ def evaluate(model, loader, config, device, horizon, minimum_prefix, dt) -> dict
             batch = {
                 k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()
             }
-            made = make_window(batch, horizon, minimum_prefix, generator)
+            made = make_window(batch, horizon, minimum_prefix, generator, dt)
             if made is None:
                 continue
             window, future, future_mask = made
@@ -263,7 +273,7 @@ def main() -> None:
             batch = {
                 k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()
             }
-            made = make_window(batch, horizon, minimum_prefix, generator)
+            made = make_window(batch, horizon, minimum_prefix, generator, dt)
             if made is None:
                 continue
             window, future, future_mask = made
@@ -295,6 +305,14 @@ def main() -> None:
             torch.save({"model_state": model.state_dict(), "config": config},
                        output / "best.pt")
 
+    # Evaluate the BEST checkpoint, not whatever the last epoch left behind.
+    # On the first real run the best validation score was epoch 1 and the
+    # model degraded afterwards, so testing the final weights reported a
+    # model that had already been damaged by the KL runaway.
+    best_path = output / "best.pt"
+    if best_path.exists():
+        model.load_state_dict(torch.load(best_path, map_location=device)["model_state"])
+        print(f"loaded best checkpoint (val {best:.4f} m) for test evaluation")
     test_scores = evaluate(
         model, test_loader, config, device, horizon, minimum_prefix, dt
     )

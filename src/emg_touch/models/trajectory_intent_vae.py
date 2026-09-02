@@ -67,6 +67,9 @@ class VirtualLeaderTrajectoryVAE(nn.Module):
         self.substeps = int(settings.get("substeps", 4))
         self.horizon = int(settings.get("horizon", 32))
         self.position_dim = int(settings.get("position_dim", 3))
+        self.prior_displacement_limit = float(
+            settings.get("prior_displacement_limit_m", 0.8)
+        )
         context_dim = int(settings.get("context_dim", 2 * int(config["model"]["d_model"])))
 
         self.posterior_mean = nn.Sequential(
@@ -166,9 +169,25 @@ class VirtualLeaderTrajectoryVAE(nn.Module):
         # a prior from the instantaneous measured kinematics. Detached so the
         # KL can only move the posterior toward the dynamics, never widen the
         # prior to escape its own penalty.
-        prior_mean = position + (
+        #
+        # The displacement is bounded, and that bound is load-bearing rather
+        # than defensive. eta is learned and shared with the rollout, so
+        # reconstruction is free to shrink it; dividing by a shrinking eta
+        # sends the prior mean off to infinity, and since the KL penalises
+        # (mu - prior_mu)^2 / sigma_prior^2 the loss follows it. Measured on
+        # the real dataset without this: KL ran 25 -> 316 -> 752 -> ~1260 and
+        # saturated, at which point it was 99.7% of the objective and
+        # validation error had gone from beating the linear baseline at epoch
+        # one to losing to it for the rest of the run. The limit is a human
+        # arm's reach - a destination further away than that is not a
+        # hypothesis worth representing.
+        displacement = (
             acceleration + drag.unsqueeze(-1) * velocity
         ) / eta.unsqueeze(-1)
+        limit = float(self.prior_displacement_limit)
+        magnitude = displacement.norm(dim=-1, keepdim=True)
+        displacement = displacement * (limit / magnitude.clamp_min(limit))
+        prior_mean = position + displacement
         return {
             "trajectory": predicted,
             "destination_mu": mean,
