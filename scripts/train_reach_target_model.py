@@ -50,7 +50,10 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from emg_touch.config import load_config  # noqa: E402
-from emg_touch.data.tracked_dataset import build_tracked_loaders  # noqa: E402
+from emg_touch.data.tracked_dataset import (  # noqa: E402
+    CANVAS_COLUMNS,
+    build_tracked_loaders,
+)
 from emg_touch.utils import save_json, seed_everything  # noqa: E402
 
 # Reuse the encoder the trajectory work already tuned, rather than a second
@@ -190,7 +193,8 @@ def reach_loss(outputs: dict, targets: dict, config: dict) -> dict:
 
 @torch.no_grad()
 def evaluate(model, loader, config, device, minimum_prefix, phases, rate,
-             ablate, reference: dict | None) -> dict:
+             ablate, reference: dict | None,
+             fallback_canvas: tuple[float, float] | None = None) -> dict:
     model.eval()
     totals: dict[str, list[float]] = {}
     generator = np.random.default_rng(0)  # fixed cutoffs, so runs compare
@@ -239,8 +243,13 @@ def evaluate(model, loader, config, device, minimum_prefix, phases, rate,
                 totals.setdefault(f"{name}_screen_norm", []).append(
                     float(delta.norm(dim=-1).mean())
                 )
-                if "canvas" in targets:
-                    pixels = (delta * targets["canvas"]).norm(dim=-1)
+                canvas = targets.get("canvas")
+                if canvas is None and fallback_canvas is not None:
+                    canvas = torch.tensor(
+                        fallback_canvas, dtype=delta.dtype, device=delta.device
+                    )
+                if canvas is not None:
+                    pixels = (delta * canvas).norm(dim=-1)
                     totals.setdefault(f"{name}_screen_px", []).append(
                         float(pixels.mean())
                     )
@@ -274,6 +283,37 @@ def training_reference(loader, minimum_prefix, phases, rate, batches=40) -> dict
                    else torch.tensor([0.5, 0.5])),
         "log_duration": float(torch.log(torch.stack(durations).mean().clamp_min(1e-3))),
     }
+
+
+def canvas_from_disk(root: str) -> tuple[float, float] | None:
+    """Read the canvas size straight from a trial CSV.
+
+    The dataset caches preprocessed trials to .npz keyed on the preprocessing
+    options, and the canvas columns were added without changing that key - so
+    caches built earlier are reused and simply lack the field, which surfaces
+    as a NaN pixel column rather than an error. Reading one CSV here sidesteps
+    the stale cache entirely and costs a single file read, which is cheaper
+    than invalidating 3000 cached trials to recover two numbers that are
+    constant across the session.
+    """
+    import pandas as pd
+
+    for path in sorted(Path(root).rglob("trial_*.csv"))[:1]:
+        try:
+            frame = pd.read_csv(path, nrows=64)
+        except Exception:  # noqa: BLE001
+            return None
+        if not all(name in frame.columns for name in CANVAS_COLUMNS):
+            return None
+        values = (
+            frame[list(CANVAS_COLUMNS)]
+            .apply(pd.to_numeric, errors="coerce")
+            .dropna()
+            .to_numpy()
+        )
+        if len(values):
+            return float(values[-1][0]), float(values[-1][1])
+    return None
 
 
 def main() -> None:
@@ -319,6 +359,13 @@ def main() -> None:
     )
     minimum_prefix = int(config["virtual_leader"].get("minimum_prefix", 16))
     reference = training_reference(train_loader, minimum_prefix, args.phases, rate)
+    fallback_canvas = canvas_from_disk(args.root)
+    if fallback_canvas:
+        print(f"canvas {fallback_canvas[0]:.0f} x {fallback_canvas[1]:.0f} px "
+              "(read from a trial CSV, bypassing the cache)")
+    else:
+        print("canvas size unavailable - screen error will be reported in "
+              "normalised units only")
 
     model = ReachTargetModel(config, args.phases).to(device)
     optimizer = torch.optim.AdamW(
@@ -357,7 +404,7 @@ def main() -> None:
 
         scores = evaluate(
             model, validation_loader, config, device, minimum_prefix,
-            args.phases, rate, ablate, reference,
+            args.phases, rate, ablate, reference, fallback_canvas,
         )
         selection = scores.get("model_screen_norm", scores.get("model_path_m", 1e9))
         history.append({"epoch": epoch, "train": float(np.mean(running or [0])), **scores})
@@ -377,7 +424,7 @@ def main() -> None:
         print(f"loaded best checkpoint (val screen {best:.4f}) for test")
     test = evaluate(
         model, test_loader, config, device, minimum_prefix, args.phases, rate,
-        ablate, reference,
+        ablate, reference, fallback_canvas,
     )
 
     print("\n=== test ===")
