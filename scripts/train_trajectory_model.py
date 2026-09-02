@@ -91,9 +91,20 @@ class TrajectoryEncoder(torch.nn.Module):
 
 
 class TrajectoryModel(torch.nn.Module):
-    def __init__(self, config: dict, kind: str = "trajectory") -> None:
+    def __init__(self, config: dict, kind: str = "trajectory",
+                 task: str = "forecast") -> None:
         super().__init__()
         self.kind = kind
+        # forecast: the tracker's own history is an input, and the model
+        #   extrapolates it. Legitimate for latency compensation in a system
+        #   that already has a tracker, but it presupposes the very sensor an
+        #   EMG interface exists to remove.
+        # wearable: EMG and IMU only. The tracker is the label and never
+        #   reaches the encoder. This is the setting the project is actually
+        #   about, and it is strictly harder - with no measured velocity the
+        #   initial motion state has to be inferred from the muscle signal
+        #   rather than read off.
+        self.task = task
         self.encoder = TrajectoryEncoder(config)
         settings = dict(config.get("virtual_leader", {}))
         settings["context_dim"] = self.encoder.context_dim
@@ -103,6 +114,18 @@ class TrajectoryModel(torch.nn.Module):
             if kind == "anticipatory"
             else VirtualLeaderTrajectoryVAE(merged)
         )
+        # Without a tracker there is no measured velocity to start the
+        # attractor rollout from, so it is predicted from the wearables. Small
+        # random init rather than zero: a zero final weight would make the
+        # head's gradient with respect to the context exactly zero and sever
+        # it silently, which has already happened twice in this project.
+        self.initial_velocity = torch.nn.Sequential(
+            torch.nn.LayerNorm(self.encoder.context_dim),
+            torch.nn.Linear(self.encoder.context_dim, 64), torch.nn.GELU(),
+            torch.nn.Linear(64, 3),
+        )
+        torch.nn.init.normal_(self.initial_velocity[-1].weight, std=0.01)
+        torch.nn.init.zeros_(self.initial_velocity[-1].bias)
 
     def forward(
         self,
@@ -114,12 +137,21 @@ class TrajectoryModel(torch.nn.Module):
         context = self.encoder(
             window["emg"], window["imu"], window["position"], window["velocity"]
         )
-        arguments = (
-            context,
-            window["position"][:, -1],
-            window["velocity"][:, -1],
-            window["acceleration"],
-        )
+        if self.task == "wearable":
+            # Origin, not the tracked position: the model predicts
+            # displacement, so its own frame starts at zero. Velocity and
+            # acceleration come from the encoder rather than the tracker.
+            start = torch.zeros_like(window["position"][:, -1])
+            velocity = self.initial_velocity(context)
+            acceleration = torch.zeros_like(velocity)
+            arguments = (context, start, velocity, acceleration)
+        else:
+            arguments = (
+                context,
+                window["position"][:, -1],
+                window["velocity"][:, -1],
+                window["acceleration"],
+            )
         if self.kind == "anticipatory":
             return self.vae(
                 *arguments,
@@ -132,7 +164,7 @@ class TrajectoryModel(torch.nn.Module):
 
 def make_window(
     batch: dict[str, torch.Tensor], horizon: int, minimum_prefix: int, generator,
-    dt: float = 1.0, ablate: tuple[str, ...] = (),
+    dt: float = 1.0, ablate: tuple[str, ...] = (), relative: bool = False,
 ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor] | None:
     """Cut each trial at a random point after movement onset.
 
@@ -189,6 +221,18 @@ def make_window(
     # could produce the same margin. Zeroing rather than removing keeps the
     # architecture and parameter count identical, so the comparison isolates
     # the information and not the model size.
+    # The tracker is the LABEL. In wearable mode it must not reach the
+    # encoder at all, but the baselines still need it to be meaningful, so
+    # the unablated copy is kept separately and never shown to the model.
+    window["_true_position"] = window["position"].clone()
+    window["_true_velocity"] = window["velocity"].clone()
+    if relative:
+        # Predict displacement from the cutoff, not absolute world position.
+        # Without a tracker the hand's absolute location is simply unknown,
+        # so asking for it is ill-posed; where it is going NEXT is not.
+        origin = window["_true_position"][:, -1:].clone()
+        future = future - origin
+
     for name in ablate:
         if name in window:
             window[name] = torch.zeros_like(window[name])
@@ -204,7 +248,7 @@ def make_window(
                                          device=batch["position"].device)).float()
     )
 
-    velocity = window["velocity"]
+    velocity = window["_true_velocity"] if relative else window["velocity"]
     window["acceleration"] = (
         (velocity[:, -1] - velocity[:, -2]) / dt
         if velocity.size(1) > 1
@@ -213,14 +257,57 @@ def make_window(
     return window, future, future_mask
 
 
-def baselines(window: dict, future: torch.Tensor, dt: float) -> dict[str, torch.Tensor]:
+def baselines(
+    window: dict, future: torch.Tensor, dt: float, relative: bool = False,
+    mean_profile: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor]:
+    """Reference predictions.
+
+    In wearable mode the baselines are computed from the tracker copy the
+    model never sees, and they mean something different. `linear` needs a
+    measured velocity, which a wearable-only system does not have - it is
+    reported as an upper reference showing what a tracker would buy, NOT as
+    a baseline the model is expected to beat.
+
+    `mean_profile` is the baseline that matters there instead: the average
+    displacement over the training set. Reaching is stereotyped, so a model
+    can score well by reproducing the population's average reach with no
+    per-trial inference at all. Beating the mean profile is what separates
+    "inferred where THIS hand is going" from "reaches look alike".
+    """
     horizon = future.size(1)
-    position = window["position"][:, -1]
-    velocity = window["velocity"][:, -1]
+    position = window["_true_position"][:, -1]
+    velocity = window["_true_velocity"][:, -1]
     steps = torch.arange(1, horizon + 1, device=future.device, dtype=future.dtype)
-    hold = position.unsqueeze(1).expand(-1, horizon, -1)
-    linear = position.unsqueeze(1) + velocity.unsqueeze(1) * steps.view(1, -1, 1) * dt
-    return {"hold": hold, "linear": linear}
+    origin = torch.zeros_like(position) if relative else position
+    hold = origin.unsqueeze(1).expand(-1, horizon, -1)
+    linear = origin.unsqueeze(1) + velocity.unsqueeze(1) * steps.view(1, -1, 1) * dt
+    result = {"hold": hold, "linear": linear}
+    if mean_profile is not None:
+        result["mean_reach"] = mean_profile.unsqueeze(0).expand(
+            future.size(0), -1, -1
+        ).to(future.device)
+    return result
+
+
+def training_mean_profile(
+    loader, horizon: int, minimum_prefix: int, dt: float, batches: int = 40
+) -> torch.Tensor:
+    """Average displacement trajectory over the training set."""
+    generator = np.random.default_rng(0)
+    collected = []
+    for index, batch in enumerate(loader):
+        if index >= batches:
+            break
+        made = make_window(batch, horizon, minimum_prefix, generator, dt, relative=True)
+        if made is None:
+            continue
+        _, future, mask = made
+        weights = mask.to(future.dtype).unsqueeze(-1)
+        collected.append((future * weights).sum(0) / weights.sum(0).clamp_min(1.0))
+    if not collected:
+        return torch.zeros(horizon, 3)
+    return torch.stack(collected).mean(0)
 
 
 def displacement_error(predicted: torch.Tensor, target: torch.Tensor,
@@ -239,7 +326,8 @@ def displacement_error(predicted: torch.Tensor, target: torch.Tensor,
 
 
 def evaluate(model, loader, config, device, horizon, minimum_prefix, dt,
-             ablate: tuple[str, ...] = ()) -> dict:
+             ablate: tuple[str, ...] = (), relative: bool = False,
+             mean_profile: torch.Tensor | None = None) -> dict:
     model.eval()
     totals: dict[str, list[float]] = {}
     generator = np.random.default_rng(0)  # fixed cutoffs, so runs compare
@@ -250,7 +338,9 @@ def evaluate(model, loader, config, device, horizon, minimum_prefix, dt,
             batch = {
                 k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()
             }
-            made = make_window(batch, horizon, minimum_prefix, generator, dt, ablate)
+            made = make_window(
+                batch, horizon, minimum_prefix, generator, dt, ablate, relative
+            )
             if made is None:
                 continue
             window, future, future_mask = made
@@ -259,7 +349,7 @@ def evaluate(model, loader, config, device, horizon, minimum_prefix, dt,
                 if anticipatory else model(window, horizon)
             predictions = {
                 "model": outputs["trajectory"],
-                **baselines(window, future, dt),
+                **baselines(window, future, dt, relative, mean_profile),
             }
             if "trajectory_without_anticipatory" in outputs:
                 predictions["kinematic_only_latent"] = outputs[
@@ -297,6 +387,15 @@ def main() -> None:
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--seed", type=int)
     parser.add_argument(
+        "--task",
+        choices=("forecast", "wearable"),
+        default="forecast",
+        help="wearable: EMG+IMU only, tracker is the label and never an "
+        "input, and the target is displacement from the cutoff. This is the "
+        "setting an EMG interface actually operates in. forecast: the "
+        "tracker's own history is an input and the model extrapolates it.",
+    )
+    parser.add_argument(
         "--model",
         choices=("trajectory", "anticipatory"),
         default="trajectory",
@@ -331,7 +430,9 @@ def main() -> None:
         f"{config['data'].get('split_by', 'session')})"
     )
 
-    model = TrajectoryModel(config, args.model).to(device)
+    model = TrajectoryModel(config, args.model, args.task).to(device)
+    ablate = tuple(x.strip() for x in args.ablate.split(",") if x.strip())
+    relative = args.task == "wearable"
     global_step = 0
     ramp_steps = max(1, len(train_loader) * int(config["training"]["epochs"]) // 3)
     optimizer = torch.optim.AdamW(
@@ -339,13 +440,24 @@ def main() -> None:
         lr=float(config["training"]["learning_rate"]),
         weight_decay=float(config["training"]["weight_decay"]),
     )
-    ablate = tuple(x.strip() for x in args.ablate.split(",") if x.strip())
+    if relative:
+        # Enforced rather than trusted to the caller: the whole point of this
+        # mode is that the tracker cannot reach the encoder.
+        ablate = tuple(sorted(set(ablate) | {"position", "velocity"}))
+        print("TASK: wearable - EMG+IMU only, tracker is label-only, "
+              "target is displacement from the cutoff")
     if ablate:
         print(f"ABLATION: zeroing {list(ablate)}")
     horizon = int(config["virtual_leader"]["horizon"])
     minimum_prefix = int(config["virtual_leader"].get("minimum_prefix", 16))
     rate = float(config["data"]["sample_rate_hz"]) / int(config["data"]["decimation"])
     dt = 1.0 / rate
+    # Needs horizon and dt, so computed once both exist. Only meaningful in
+    # wearable mode, where beating the average reach is the real test.
+    mean_profile = (
+        training_mean_profile(train_loader, horizon, minimum_prefix, dt)
+        if relative else None
+    )
     clip = float(config["training"].get("gradient_clip_norm", 1.0))
 
     output = Path(args.output_dir)
@@ -366,7 +478,9 @@ def main() -> None:
             batch = {
                 k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()
             }
-            made = make_window(batch, horizon, minimum_prefix, generator, dt, ablate)
+            made = make_window(
+                batch, horizon, minimum_prefix, generator, dt, ablate, relative
+            )
             if made is None:
                 continue
             window, future, future_mask = made
@@ -397,7 +511,7 @@ def main() -> None:
 
         scores = evaluate(
             model, validation_loader, config, device, horizon, minimum_prefix, dt,
-            ablate,
+            ablate, relative, mean_profile,
         )
         record = {"epoch": epoch, **{k: m.average for k, m in meters.items()}, **scores}
         history.append(record)
@@ -422,13 +536,14 @@ def main() -> None:
         model.load_state_dict(torch.load(best_path, map_location=device)["model_state"])
         print(f"loaded best checkpoint (val {best:.4f} m) for test evaluation")
     test_scores = evaluate(
-        model, test_loader, config, device, horizon, minimum_prefix, dt, ablate
+        model, test_loader, config, device, horizon, minimum_prefix, dt, ablate,
+        relative, mean_profile,
     )
     print()
     print("=== test ===")
     print("\n  by how early the cutoff was (samples past movement onset):")
     print(f"    {'':22}{'early <30':>12}{'mid 30-90':>12}{'late >90':>12}")
-    for name in ("model", "kinematic_only_latent", "hold", "linear"):
+    for name in ("model", "kinematic_only_latent", "hold", "linear", "mean_reach"):
         cells = []
         for label in ("early", "mid", "late"):
             value = test_scores.get(f"{name}_{label}_m")
@@ -436,7 +551,7 @@ def main() -> None:
         if any(c.strip() != "-" for c in cells):
             print(f"    {name:22}" + "".join(f"{c:>12}" for c in cells))
     print()
-    for name in ("model", "kinematic_only_latent", "hold", "linear"):
+    for name in ("model", "kinematic_only_latent", "hold", "linear", "mean_reach"):
         mean = test_scores.get(f"{name}_mean_m")
         final = test_scores.get(f"{name}_final_m")
         if mean is not None:
@@ -449,6 +564,29 @@ def main() -> None:
         print("  that is the part of the prediction the current kinematics could")
         print("  not have produced - EMG's unique contribution, measured directly")
         print("  rather than inferred from a separate ablation run")
+    if relative:
+        # In wearable mode `linear` needs a measured velocity the system does
+        # not have, so it is a reference for what a tracker would buy, not a
+        # bar to clear. The honest bar is the average reach: beating it is
+        # what distinguishes inferring where THIS hand is going from
+        # reproducing the fact that reaches look alike.
+        model_mean = test_scores.get("model_mean_m")
+        reference = test_scores.get("mean_reach_mean_m")
+        print("\n  wearable mode: the tracker is the label, so `linear` is not a")
+        print("  baseline the model can be asked to beat - it uses the very sensor")
+        print("  being replaced. The comparison that matters is the average reach.")
+        if model_mean and reference:
+            gain = (reference - model_mean) / reference * 100
+            if gain > 0:
+                print(f"\n  model is {gain:.1f}% BETTER than the average reach profile")
+                print("  -> EMG+IMU carry per-trial information about where this")
+                print("     particular reach is going")
+            else:
+                print(f"\n  model is {-gain:.1f}% WORSE than the average reach profile")
+                print("  -> no per-trial information recovered from EMG+IMU; the")
+                print("     model has learned the population's average reach")
+        save_json({"history": history, "test": test_scores}, output / "results.json")
+        return
     model_mean = test_scores.get("model_mean_m")
     linear_mean = test_scores.get("linear_mean_m")
     if model_mean and linear_mean:
