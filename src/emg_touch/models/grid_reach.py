@@ -46,7 +46,6 @@ from typing import Any
 import torch
 from torch import nn
 
-from .disentangle import gradient_reversal
 from .grid_point import SpatialPointHead, decode_grid_outputs, finalize_point_prediction
 from .layers import PatchTransformerEncoder
 
@@ -144,53 +143,66 @@ class GridReachModel(nn.Module):
         return outputs
 
 
-class PointingIntentVAE(nn.Module):
-    """VAE + kinematic/anticipatory disentanglement, decoding to the pointing task.
+class PointingBottleneckModel(nn.Module):
+    """One objective, no sampling, no adversarial split - a deliberate retreat.
 
-    Combines two lines of work that had been developed separately in this
-    project: the VAE + kinematic/anticipatory latent split (anticipatory_vae.py,
-    built for the displacement-forecast task) and the transformer + grid+offset
-    architecture (GridReachModel above, built for the screen-touch task). They
-    had never been joined - the grid model has no latent, the VAE model has no
-    grid head - so the anticipatory split's "EMG's unique contribution"
-    measurement could only ever run on displacement, never on the actual
-    target this project cares about.
+    Formerly PointingIntentVAE: VAE sampling (mu/log_variance -> reparameterised
+    z) plus a kinematic/anticipatory/residual latent split trained by a GRL
+    adversarial pair, on top of grid_point_loss. On the real dataset that
+    model reached 426 px, worse than the plain deterministic GridReachModel's
+    406 px, which was itself worse than a smaller GRU's 392.7 px - three
+    architectures, ranked exactly inversely with how much machinery each one
+    stacked onto the same encoder.
 
-    The join is mostly substitution, reusing what already exists rather than
-    rederiving it:
+    Two mechanisms measurably explain the degradation, not speculation:
 
-      encoder       ModalityEncoder x{1,2} (from GridReachModel) - same
-                    architecture that produced the 406 px result
-      latent        to_mean/to_log_variance -> kinematic/anticipatory/residual
-                    split (same shapes and same reasoning as
-                    anticipatory_vae.py: the split targets the delay between
-                    EMG and the motion it drives, not EMG vs acceleration as
-                    two factors to separate)
-      disentangle   anticipatory_losses(), kinematic_state() - imported
-                    unmodified from anticipatory_vae.py; they only read
-                    outputs["kinematic_prediction"/"kinematic_adversarial"/
-                    "session_adversarial"], nothing rollout-specific
-      decoder       SpatialPointHead + decode_grid_outputs (from
-                    GridReachModel) reading the sampled latent, instead of
-                    an attractor rollout - the pointing task has no physical
-                    trajectory to integrate toward, only a point to localise
-      reconstruction grid_point_loss(), unmodified, same as GridReachModel
+      sigma drifted toward the N(0,I) prior instead of staying informative
+      (0.135 at init -> 0.5-0.9 by epoch 1, and it never came back down).
+      For KL = 0.5(mu^2 + sigma^2 - 1 - log sigma^2), d(KL)/d(log sigma^2) =
+      0.5(sigma^2 - 1), which is NEGATIVE whenever sigma < 1 - the gradient
+      always pushes sigma back toward 1 unless the reconstruction loss wants
+      a precise, informative z badly enough to overpower it. Here it did
+      not, so every training step injected z = mu + sigma*eps with sigma
+      approaching 1 into the point head - close to pure noise relative to
+      mu's own spread (mu_std sat at 0.4-0.6 the whole run).
 
-    One deliberate departure from anticipatory_vae.py: the KL prior is
-    N(0, I), not the virtual-leader attractor. That prior was built from
-    measured tracker kinematics, and the tracker is excluded from every
-    wearable-mode model in this project on principle - it is the label, not
-    an input, and building a prior FROM it would be a narrow leak of the
-    same information the model is supposed to predict. N(0, I) is also this
-    project's own precedent: the original grid_fusion_vae, before the
-    attractor prior existed, used exactly this.
+      the GRL adversarial pair and the 10%-of-steps anticipatory dropout
+      are two more sources of training-time noise/competition for gradient,
+      stacked on top of the sampling noise above.
 
-    The measurement this buys, directly on the screen target for the first
-    time: silence z_anticipatory (measure_anticipatory=True), re-decode
-    through the same head, and compare pixel error. The gap is EMG's unique
-    contribution to WHICH TARGET, not to how the hand is moving - the
-    question this project has been trying to answer since being asked to
-    run it on the pointing task rather than displacement.
+    None of this was wrong to try - it is exactly the mechanism that helped
+    on the displacement task, where the encoder demonstrably had structured
+    signal to organise. On the pointing task, three independent
+    measurements (the ablation sweep, the plain architecture swap, and the
+    anticipatory-gain measurement itself reading -4.4 px) now agree that
+    EMG's marginal information here is at or below noise. Stacking
+    regularisation machinery onto a signal that thin does not reveal more
+    of it; it adds noise the optimiser has to fight through instead.
+
+    What remains: the encoder (unchanged - still the architecture that
+    reached 406 px on its own) feeding the grid+offset head DIRECTLY,
+    trained by grid_point_loss alone - functionally GridReachModel, plus
+    the ReduceLROnPlateau schedule described in the training script.
+
+    A compressed bottleneck (context_dim -> a narrower latent before the
+    head) was tried first as a capacity-regularisation lever and measured,
+    not assumed: an 8-example overfit test that GridReachModel's identical
+    check collapses to 24 px in 300 steps plateaued around 250 px through a
+    256->40 bottleneck and did not go lower. Compressing by more than 6x
+    right before a head that has to emit 40 heatmap logits plus 80 offset
+    values was too aggressive - it constrained even trivial memorisation,
+    which is a bad sign for fitting real signal. Removed rather than kept
+    on the strength of the idea alone once the numbers said otherwise.
+
+    The EMG-unique-contribution measurement this model's predecessor
+    produced (silencing z_anticipatory) is gone, honestly rather than kept
+    as a decoration: nothing trains the bottleneck to place EMG's surplus
+    in a nameable subspace anymore, so zeroing part of it would measure the
+    cost of destroying an arbitrary compressed feature, not EMG's
+    contribution to anything. Getting that measurement back requires the
+    auxiliary losses this class deliberately removes - a real trade this
+    project can revisit if EMG turns out to matter once IMU is disentangled
+    at the mechanism level, but not before.
     """
 
     def __init__(
@@ -199,7 +211,6 @@ class PointingIntentVAE(nn.Module):
     ) -> None:
         super().__init__()
         model_config = config["model"]
-        settings = config.get("virtual_leader", {})
         width = int(model_config["d_model"])
         self.use_imu = use_imu
         common = dict(
@@ -217,73 +228,16 @@ class PointingIntentVAE(nn.Module):
             self.imu_encoder = ModalityEncoder(imu_channels, **common)
         context_dim = width * 2 if use_imu else width
 
-        self.kinematic_dim = int(settings.get("kinematic_dim", 16))
-        self.anticipatory_dim = int(settings.get("anticipatory_dim", 16))
-        self.residual_dim = int(settings.get("residual_dim", 8))
-        self.anticipatory_dropout = float(settings.get("anticipatory_dropout", 0.1))
-        latent_dim = self.kinematic_dim + self.anticipatory_dim + self.residual_dim
-        self.latent_dim = latent_dim
-
-        def head(outputs: int, bias: float = 0.0) -> nn.Sequential:
-            layers = nn.Sequential(
-                nn.LayerNorm(context_dim), nn.Linear(context_dim, 128),
-                nn.GELU(), nn.Linear(128, outputs),
-            )
-            nn.init.normal_(layers[-1].weight, std=0.01)
-            nn.init.constant_(layers[-1].bias, bias)
-            return layers
-
-        self.to_mean = head(latent_dim)
-        # sigma ~ exp(0.5*-4) ~= 0.135 at init. Zero-bias (sigma ~ 1) was
-        # measured to collapse the posterior in this project's first VAE
-        # (latent SNR ~0.03, mu_std flat across training) - this bias is
-        # that fix, applied here from the start rather than found again.
-        self.to_log_variance = head(latent_dim, bias=-4.0)
-
         grid_width, grid_height = map(int, model_config.get("grid_size", [8, 5]))
         self.grid_width = grid_width
         self.grid_height = grid_height
         self.point_head = SpatialPointHead(
-            latent_dim, grid_width, grid_height, float(model_config["dropout"]),
+            context_dim, grid_width, grid_height, float(model_config["dropout"]),
             direct_prediction=True, zero_initialize=False,
         )
 
-        state_dim = 6  # velocity (3) + scaled acceleration (3)
-        self.kinematic_predictor = nn.Sequential(
-            nn.LayerNorm(self.kinematic_dim), nn.Linear(self.kinematic_dim, 64),
-            nn.GELU(), nn.Linear(64, state_dim),
-        )
-        self.kinematic_discriminator = nn.Sequential(
-            nn.LayerNorm(self.anticipatory_dim + self.residual_dim),
-            nn.Linear(self.anticipatory_dim + self.residual_dim, 64),
-            nn.GELU(), nn.Linear(64, state_dim),
-        )
-        sessions = int(settings.get("session_count", 0))
-        self.session_discriminator = (
-            nn.Sequential(
-                nn.LayerNorm(latent_dim), nn.Linear(latent_dim, 64), nn.GELU(),
-                nn.Linear(64, sessions),
-            )
-            if sessions > 0 else None
-        )
-
-    def split(self, latent: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        a = self.kinematic_dim
-        b = a + self.anticipatory_dim
-        return latent[..., :a], latent[..., a:b], latent[..., b:]
-
-    def _decode(self, latent: torch.Tensor) -> dict[str, torch.Tensor]:
-        raw = self.point_head(latent)
-        decoded = decode_grid_outputs(
-            raw["heatmap_logits"], raw["offset_logits"], self.grid_width, self.grid_height
-        )
-        outputs = {**raw, **decoded}
-        finalize_point_prediction(outputs)
-        return outputs
-
     def forward(
-        self, emg: torch.Tensor, imu: torch.Tensor, time_mask: torch.Tensor,
-        strength: float = 1.0, measure_anticipatory: bool = False,
+        self, emg: torch.Tensor, imu: torch.Tensor, time_mask: torch.Tensor
     ) -> dict[str, torch.Tensor]:
         emg_context = self.emg_encoder(emg, time_mask)
         if self.use_imu:
@@ -292,69 +246,10 @@ class PointingIntentVAE(nn.Module):
         else:
             context = emg_context
 
-        mean = self.to_mean(context)
-        log_variance = self.to_log_variance(context).clamp(-10.0, 2.0)
-        if self.training:
-            latent = mean + torch.exp(0.5 * log_variance) * torch.randn_like(mean)
-        else:
-            latent = mean
-
-        kinematic, anticipatory, residual = self.split(latent)
-        if self.training and self.anticipatory_dropout > 0.0:
-            # Matches anticipatory_vae.py exactly: `anticipatory` is
-            # reassigned to its dropped-out value here, so everything below
-            # (the decoder AND the disentanglement losses) reads the
-            # post-dropout split, not the original. Training with the
-            # subspace occasionally zeroed is what makes silencing it at
-            # evaluation in-distribution rather than an out-of-distribution
-            # surprise - the fix already made once for the trajectory model,
-            # carried over rather than re-discovered.
-            keep = (
-                torch.rand(anticipatory.shape[:-1] + (1,), device=latent.device)
-                >= self.anticipatory_dropout
-            ).to(latent.dtype)
-            anticipatory = anticipatory * keep
-            latent = torch.cat([kinematic, anticipatory, residual], dim=-1)
-
-        outputs = self._decode(latent)
-        outputs["latent_mu"] = mean
-        outputs["latent_log_variance"] = log_variance
-        outputs["z_kinematic"] = kinematic
-        outputs["z_anticipatory"] = anticipatory
-        outputs["z_residual"] = residual
-        outputs["kinematic_prediction"] = self.kinematic_predictor(kinematic)
-        outputs["kinematic_adversarial"] = self.kinematic_discriminator(
-            gradient_reversal(torch.cat([anticipatory, residual], dim=-1), strength)
+        raw = self.point_head(context)
+        decoded = decode_grid_outputs(
+            raw["heatmap_logits"], raw["offset_logits"], self.grid_width, self.grid_height
         )
-        if self.session_discriminator is not None:
-            outputs["session_adversarial"] = self.session_discriminator(
-                gradient_reversal(latent, strength)
-            )
-
-        if measure_anticipatory:
-            # Re-decode with the anticipatory subspace forced to zero. The
-            # gap between this and the ordinary prediction is the part of
-            # WHICH TARGET the model could not have named without EMG's
-            # surplus over current motion - measured directly on the screen
-            # coordinate rather than on displacement.
-            muted = torch.cat([kinematic, torch.zeros_like(anticipatory), residual], dim=-1)
-            muted_outputs = self._decode(muted)
-            outputs["prediction_without_anticipatory"] = muted_outputs["prediction"]
+        outputs = {**raw, **decoded}
+        finalize_point_prediction(outputs)
         return outputs
-
-
-def standard_kl_loss(outputs: dict[str, torch.Tensor]) -> torch.Tensor:
-    """KL(q(z|x) || N(0, I)), per sample, unreduced.
-
-    Against a fixed isotropic prior rather than the virtual-leader attractor
-    anticipatory_vae.py uses: that prior is built from measured tracker
-    kinematics, and the tracker is label-only in every wearable-mode model
-    in this project - deriving a prior from it would leak the target through
-    the back door. N(0, I) is also this project's own earlier precedent
-    (grid_fusion_vae, before the attractor prior was added).
-    """
-    mu = outputs["latent_mu"]
-    log_variance = outputs["latent_log_variance"]
-    return 0.5 * (
-        mu.square() + log_variance.exp() - 1.0 - log_variance
-    ).sum(dim=-1)
