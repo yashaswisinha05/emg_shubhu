@@ -81,6 +81,14 @@ class AnticipatoryTrajectoryVAE(VirtualLeaderTrajectoryVAE):
         self.kinematic_dim = int(settings.get("kinematic_dim", 16))
         self.anticipatory_dim = int(settings.get("anticipatory_dim", 16))
         self.residual_dim = int(settings.get("residual_dim", 8))
+        # Probability of zeroing z_ant during training. Without it, silencing
+        # the subspace at evaluation is off-distribution - the decoder has
+        # never seen it zero, so the measured gap conflates "information the
+        # subspace carried" with "surprise at an input it was never shown",
+        # and the headline number this model exists to produce is not
+        # trustworthy. Training with the subspace occasionally dropped makes
+        # the measurement in-distribution and the attribution honest.
+        self.anticipatory_dropout = float(settings.get("anticipatory_dropout", 0.1))
         latent_dim = self.kinematic_dim + self.anticipatory_dim + self.residual_dim
         self.latent_dim = latent_dim
 
@@ -159,6 +167,14 @@ class AnticipatoryTrajectoryVAE(VirtualLeaderTrajectoryVAE):
         horizon = int(horizon or self.horizon)
         latent = self.to_latent(context)
         kinematic, anticipatory, residual = self.split(latent)
+
+        if self.training and self.anticipatory_dropout > 0.0:
+            keep = (
+                torch.rand(latent.shape[:-1] + (1,), device=latent.device)
+                >= self.anticipatory_dropout
+            ).to(latent.dtype)
+            anticipatory = anticipatory * keep
+            latent = torch.cat([kinematic, anticipatory, residual], dim=-1)
 
         eta, drag = self.attractor_parameters(latent)
         mean, log_variance = self._destination(latent, position)

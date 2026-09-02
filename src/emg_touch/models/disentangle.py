@@ -1,4 +1,4 @@
-"""Guided disentanglement: factor-aligned latent subspaces with adversarial leakage suppression.
+r"""Guided disentanglement: factor-aligned latent subspaces with adversarial leakage suppression.
 
 Follows the guided-disentanglement formulation for multi-factor EMG: split
 the latent into one subspace per generative factor plus a residual, then for

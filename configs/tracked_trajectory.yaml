@@ -53,6 +53,14 @@ virtual_leader:
   # Bounded because eta is learned and shared with the rollout - see
   # trajectory_intent_vae.py for the KL runaway this prevents.
   prior_displacement_limit_m: 0.8
+  # Latent partition for --model anticipatory.
+  kinematic_dim: 16
+  anticipatory_dim: 16
+  residual_dim: 8
+  # Drop z_ant this often during training so that silencing it at evaluation
+  # is in-distribution - otherwise the reported anticipatory gain measures
+  # the decoder's surprise rather than the subspace's information.
+  anticipatory_dropout: 0.1
   # MUST match data.decimation. The rollout computes its timestep as
   # virtual_leader.decimation / data.sample_rate_hz, and the dataset has
   # already decimated by data.decimation, so leaving this at 1 makes the
