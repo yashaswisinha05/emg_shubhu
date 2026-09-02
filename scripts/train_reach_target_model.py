@@ -327,6 +327,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--phases", type=int, default=8)
     parser.add_argument(
+        "--holdout-config",
+        help="Hold out one experimental condition (a1, b2, mix7, ...) as the "
+        "test set and train on the rest, instead of a random session split.",
+    )
+    parser.add_argument(
         "--inputs", choices=("emg", "emg+imu"), default="emg+imu",
         help="emg: the muscle signal alone. The tracker never enters the "
         "encoder in either case - it is the label.",
@@ -334,6 +339,8 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
+    if args.holdout_config:
+        config.setdefault("data", {})["holdout_config"] = args.holdout_config
     if args.epochs:
         config["training"]["epochs"] = args.epochs
     seed_everything(int(args.seed if args.seed is not None else config.get("seed", 42)))

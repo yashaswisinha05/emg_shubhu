@@ -48,6 +48,7 @@ Movement onset.
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from typing import Any
 
@@ -453,6 +454,21 @@ def discover_trials(root: str | Path) -> dict[str, list[Path]]:
     return sessions
 
 
+# Sessions are keyed by their hash directory, but the experimental condition
+# (a1..a4, b1..b3, mix1..mix7) lives in a folder further up the path, so it
+# has to be recovered rather than read off the key.
+CONFIG_PATTERN = re.compile(r"(?:^|[_-])(mix\d+|[ab]\d+)(?:_|$)", re.IGNORECASE)
+
+
+def configuration_of(path: Path) -> str:
+    """Experimental condition for a trial path, or 'unknown'."""
+    for part in reversed(path.parts):
+        match = CONFIG_PATTERN.search(part)
+        if match:
+            return match.group(1).lower()
+    return "unknown"
+
+
 def split_sessions(
     sessions: dict[str, list[Path]], config: dict[str, Any]
 ) -> tuple[list[Path], list[Path], list[Path]]:
@@ -470,6 +486,31 @@ def split_sessions(
     mode = str(config.get("data", {}).get("split_by", "session"))
     validation_fraction = float(config.get("data", {}).get("validation_fraction", 0.2))
     test_fraction = float(config.get("data", {}).get("test_fraction", 0.2))
+
+    # Hold out one experimental condition entirely. Each condition is a
+    # single session here, so this is a leave-one-session-out split labelled
+    # by condition - it answers "does the model transfer to THIS posture or
+    # task variant", which a random session split averages over.
+    holdout = config.get("data", {}).get("holdout_config")
+    if holdout:
+        test_names = [
+            n for n in names if configuration_of(sessions[n][0]) == str(holdout).lower()
+        ]
+        remaining = [n for n in names if n not in set(test_names)]
+        if not test_names or not remaining:
+            raise ValueError(
+                f"holdout_config={holdout!r} matched {len(test_names)} session(s) "
+                f"with {len(remaining)} left to train on"
+            )
+        shuffled = list(remaining)
+        generator.shuffle(shuffled)
+        n_validation = max(1, int(round(len(shuffled) * validation_fraction)))
+        pick = lambda group: [p for n in group for p in sessions[n]]  # noqa: E731
+        return (
+            pick(shuffled[n_validation:]),
+            pick(shuffled[:n_validation]),
+            pick(test_names),
+        )
 
     if mode == "session":
         shuffled = list(names)
