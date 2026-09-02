@@ -1,0 +1,66 @@
+seed: 42
+experiment_name: "tracked_grid_reach"
+
+data:
+  emg_session_normalise: true
+  imu_session_normalise: true
+  sensors: ["S0", "S4", "S8", "S12"]
+  emg_column_template: "EMG 1_{sensor}"
+  acc_column_template: "ACC {axis}_{sensor}"
+  gyro_column_template: "GYRO {axis}_{sensor}"
+  tracker_column_prefix: "VIVE"
+  tracker_id: "T0"
+  sample_rate_hz: 1259.4
+  decimation: 10
+  # Same causal high-rate EMG feature bank as tracked_trajectory_emg_enhanced.yaml.
+  emg_feature_windows_ms: [10.0, 25.0, 50.0]
+  emg_feature_kinds: ["rms", "waveform_length", "log_energy", "derivative"]
+  tracker_max_sync_error_ms: 20.0
+  split_by: "session"
+  validation_fraction: 0.2
+  test_fraction: 0.2
+
+# Everything below is copied from configs/hill_fusion.yaml, which is the
+# config that reached 184 px on the original screen-touch dataset - not
+# guessed, not re-tuned. Reusing the same operating point is deliberate: it
+# isolates "does the grid+offset architecture transfer to this dataset" from
+# "did these particular numbers happen to be right", which a fresh sweep
+# would confound.
+model:
+  grid_size: [8, 5]
+  d_model: 128
+  num_layers: 3
+  num_heads: 4
+  ffn_dim: 384
+  dropout: 0.15
+  patch_length: 16
+  patch_stride: 8
+  tcn_kernel_sizes: [3, 7, 15]
+
+virtual_leader:
+  # Required recorded history, independent of cutoff relative to onset.
+  # Must be >= model.patch_length, since PatchTransformerEncoder needs at
+  # least one full patch - enforced in the training script, not just here.
+  minimum_prefix: 16
+
+loss:
+  gaussian_sigma_cells: 0.5
+  gaussian_soft_fraction: 0.15
+  edge_weight: 0.5
+  heatmap_weight: 1.0
+  offset_weight: 0.5
+  pixel_weight: 1.0
+  radial_weight: 0.5
+  transport_weight: 0.5
+  offset_huber_beta: 0.1
+  pixel_huber_beta: 0.25
+  pixel_normalizer_px: 80.0
+  charbonnier_epsilon_px: 1.0
+
+training:
+  batch_size: 16
+  num_workers: 0
+  epochs: 20
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0

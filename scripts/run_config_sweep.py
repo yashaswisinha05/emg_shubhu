@@ -85,9 +85,16 @@ def main() -> None:
                         choices=("emg", "emg+imu"))
     parser.add_argument("--configs", nargs="+",
                         help="Conditions to hold out. Default: all discovered.")
+    parser.add_argument(
+        "--script", default="train_reach_target_model.py",
+        help="Training script to drive - must accept --root --config "
+        "--cache-dir --output-dir --device --epochs --inputs "
+        "--holdout-config --seed, matching train_reach_target_model.py's "
+        "CLI. train_grid_reach_model.py is a drop-in replacement.",
+    )
     args = parser.parse_args()
 
-    script = Path(__file__).resolve().parent / "train_reach_target_model.py"
+    script = Path(__file__).resolve().parent / args.script
     root_out = Path(args.output_dir)
     root_out.mkdir(parents=True, exist_ok=True)
 
@@ -121,37 +128,58 @@ def main() -> None:
         rows = {k[1]: v for k, v in collected.items() if k[0] == inputs}
         if not rows:
             continue
+        # Two scripts can produce this summary, with different key names:
+        # train_reach_target_model.py (model_screen_px/mean_screen_px, plus
+        # a 3-D endpoint) and train_grid_reach_model.py (direct_px/mean_px,
+        # screen-only, no endpoint). Both are read here rather than assuming
+        # one script's schema, so --script is a genuine drop-in rather than
+        # something that silently prints an empty table for the other.
+        any_score = next(iter(rows.values()))
+        screen_key = "model_screen_px" if "model_screen_px" in any_score else "direct_px"
+        mean_key = "mean_screen_px" if "mean_screen_px" in any_score else "mean_px"
+        centre_key = "centre_screen_px" if "centre_screen_px" in any_score else "centre_px"
+        has_endpoint = "model_endpoint_m" in any_score
+
         print("\n" + "=" * 82)
         print(f"inputs: {inputs}   (tracker excluded in every run)")
-        print(f"  {'condition':11}{'screen px':>11}{'vs mean':>10}{'vs centre':>11}"
-              f"{'endpoint':>12}{'vs mean':>10}")
-        print("  " + "-" * 63)
+        header = f"  {'condition':11}{'screen px':>11}{'vs mean':>10}{'vs centre':>11}"
+        if has_endpoint:
+            header += f"{'endpoint':>12}{'vs mean':>10}"
+        print(header)
+        print("  " + "-" * (63 if has_endpoint else 32))
         gains, endpoint_gains = [], []
         for label in sorted(rows):
             score = rows[label]
-            model = score.get("model_screen_px")
-            mean = score.get("mean_screen_px")
-            centre = score.get("centre_screen_px")
-            end_model = score.get("model_endpoint_m")
-            end_mean = score.get("mean_endpoint_m")
+            model = score.get(screen_key)
+            mean = score.get(mean_key)
+            centre = score.get(centre_key)
             if model is None or mean is None:
                 continue
             gain = (mean - model) / mean * 100
             centre_gain = (centre - model) / centre * 100 if centre else float("nan")
-            end_gain = (
-                (end_mean - end_model) / end_mean * 100 if end_mean else float("nan")
-            )
             gains.append(gain)
-            endpoint_gains.append(end_gain)
-            print(f"  {label:11}{model:>11.1f}{gain:>+9.1f}%{centre_gain:>+10.1f}%"
-                  f"{end_model * 100:>10.2f} cm{end_gain:>+9.1f}%")
+            row = f"  {label:11}{model:>11.1f}{gain:>+9.1f}%{centre_gain:>+10.1f}%"
+            if has_endpoint:
+                end_model = score.get("model_endpoint_m")
+                end_mean = score.get("mean_endpoint_m")
+                end_gain = (
+                    (end_mean - end_model) / end_mean * 100
+                    if end_model is not None and end_mean else float("nan")
+                )
+                endpoint_gains.append(end_gain)
+                row += f"{end_model * 100:>10.2f} cm{end_gain:>+9.1f}%"
+            print(row)
         if gains:
-            print("  " + "-" * 63)
-            print(f"  {'mean':11}{'':>11}{statistics.mean(gains):>+9.1f}%"
-                  f"{'':>11}{'':>12}{statistics.mean(endpoint_gains):>+9.1f}%")
+            print("  " + "-" * (63 if has_endpoint else 32))
+            summary = f"  {'mean':11}{'':>11}{statistics.mean(gains):>+9.1f}%"
+            if has_endpoint and endpoint_gains:
+                summary += f"{'':>11}{'':>12}{statistics.mean(endpoint_gains):>+9.1f}%"
+            print(summary)
             if len(gains) > 1:
-                print(f"  {'spread':11}{'':>11}{statistics.stdev(gains):>10.1f}"
-                      f"{'':>11}{'':>12}{statistics.stdev(endpoint_gains):>10.1f}")
+                spread = f"  {'spread':11}{'':>11}{statistics.stdev(gains):>10.1f}"
+                if has_endpoint and len(endpoint_gains) > 1:
+                    spread += f"{'':>11}{'':>12}{statistics.stdev(endpoint_gains):>10.1f}"
+                print(spread)
 
     print("\n" + "=" * 82)
     print("Positive means better than guessing ON THAT CONDITION. The baselines")
