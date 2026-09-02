@@ -36,6 +36,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from emg_touch.config import load_config  # noqa: E402
 from emg_touch.data.tracked_dataset import build_tracked_loaders  # noqa: E402
+from emg_touch.models.anticipatory_vae import (  # noqa: E402
+    AnticipatoryTrajectoryVAE,
+    anticipatory_losses,
+)
+from emg_touch.models.disentangle import reversal_strength  # noqa: E402
 from emg_touch.models.trajectory_intent_vae import (  # noqa: E402
     VirtualLeaderTrajectoryVAE,
     trajectory_loss,
@@ -86,24 +91,43 @@ class TrajectoryEncoder(torch.nn.Module):
 
 
 class TrajectoryModel(torch.nn.Module):
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, kind: str = "trajectory") -> None:
         super().__init__()
+        self.kind = kind
         self.encoder = TrajectoryEncoder(config)
         settings = dict(config.get("virtual_leader", {}))
         settings["context_dim"] = self.encoder.context_dim
-        self.vae = VirtualLeaderTrajectoryVAE({**config, "virtual_leader": settings})
+        merged = {**config, "virtual_leader": settings}
+        self.vae = (
+            AnticipatoryTrajectoryVAE(merged)
+            if kind == "anticipatory"
+            else VirtualLeaderTrajectoryVAE(merged)
+        )
 
-    def forward(self, window: dict[str, torch.Tensor], horizon: int) -> dict:
+    def forward(
+        self,
+        window: dict[str, torch.Tensor],
+        horizon: int,
+        strength: float = 1.0,
+        measure_anticipatory: bool = False,
+    ) -> dict:
         context = self.encoder(
             window["emg"], window["imu"], window["position"], window["velocity"]
         )
-        return self.vae(
+        arguments = (
             context,
             window["position"][:, -1],
             window["velocity"][:, -1],
             window["acceleration"],
-            horizon=horizon,
         )
+        if self.kind == "anticipatory":
+            return self.vae(
+                *arguments,
+                horizon=horizon,
+                strength=strength,
+                measure_anticipatory=measure_anticipatory,
+            )
+        return self.vae(*arguments, horizon=horizon)
 
 
 def make_window(
@@ -219,11 +243,18 @@ def evaluate(model, loader, config, device, horizon, minimum_prefix, dt,
             if made is None:
                 continue
             window, future, future_mask = made
-            outputs = model(window, horizon)
-            for name, prediction in {
+            anticipatory = getattr(model, "kind", "") == "anticipatory"
+            outputs = model(window, horizon, measure_anticipatory=anticipatory) \
+                if anticipatory else model(window, horizon)
+            predictions = {
                 "model": outputs["trajectory"],
                 **baselines(window, future, dt),
-            }.items():
+            }
+            if "trajectory_without_anticipatory" in outputs:
+                predictions["kinematic_only_latent"] = outputs[
+                    "trajectory_without_anticipatory"
+                ]
+            for name, prediction in predictions.items():
                 mean, final = displacement_error(prediction, future, future_mask)
                 totals.setdefault(f"{name}_mean_m", []).append(mean)
                 totals.setdefault(f"{name}_final_m", []).append(final)
@@ -239,6 +270,14 @@ def main() -> None:
     parser.add_argument("--device")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--seed", type=int)
+    parser.add_argument(
+        "--model",
+        choices=("trajectory", "anticipatory"),
+        default="trajectory",
+        help="anticipatory adds the kinematic/anticipatory latent split and "
+        "reports how much of the prediction survives with the anticipatory "
+        "subspace silenced - EMG's unique contribution, in metres.",
+    )
     parser.add_argument(
         "--ablate",
         default="",
@@ -266,7 +305,9 @@ def main() -> None:
         f"{config['data'].get('split_by', 'session')})"
     )
 
-    model = TrajectoryModel(config).to(device)
+    model = TrajectoryModel(config, args.model).to(device)
+    global_step = 0
+    ramp_steps = max(1, len(train_loader) * int(config["training"]["epochs"]) // 3)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(config["training"]["learning_rate"]),
@@ -289,7 +330,10 @@ def main() -> None:
 
     for epoch in range(1, int(config["training"]["epochs"]) + 1):
         model.train()
-        meters = {k: AverageMeter() for k in ("loss", "reconstruction", "kl")}
+        names = ["loss", "reconstruction", "kl"]
+        if args.model == "anticipatory":
+            names += ["kinematic_predict", "kinematic_adversarial"]
+        meters = {k: AverageMeter() for k in names}
         for batch in tqdm(train_loader, desc=f"epoch {epoch}"):
             if batch is None:
                 continue
@@ -300,16 +344,30 @@ def main() -> None:
             if made is None:
                 continue
             window, future, future_mask = made
-            outputs = model(window, horizon)
+            strength = reversal_strength(global_step, ramp_steps)
+            outputs = model(window, horizon, strength=strength) \
+                if args.model == "anticipatory" else model(window, horizon)
             # future_mask is already (batch, horizon); trajectory_loss wants
             # exactly that, so no reduction over a coordinate axis here.
             losses = trajectory_loss(outputs, future, future_mask, config)
+            if args.model == "anticipatory":
+                extra = anticipatory_losses(
+                    outputs,
+                    window["velocity"][:, -1],
+                    window["acceleration"],
+                    config,
+                    session=batch.get("session"),
+                )
+                losses = {**losses, **extra}
+                losses["loss"] = losses["loss"] + extra["disentangle"]
+            global_step += 1
             optimizer.zero_grad(set_to_none=True)
             losses["loss"].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
             optimizer.step()
             for name, meter in meters.items():
-                meter.update(float(losses[name].detach()), int(future.size(0)))
+                if name in losses:
+                    meter.update(float(losses[name].detach()), int(future.size(0)))
 
         scores = evaluate(
             model, validation_loader, config, device, horizon, minimum_prefix, dt,
@@ -342,11 +400,19 @@ def main() -> None:
     )
     print()
     print("=== test ===")
-    for name in ("model", "hold", "linear"):
+    for name in ("model", "kinematic_only_latent", "hold", "linear"):
         mean = test_scores.get(f"{name}_mean_m")
         final = test_scores.get(f"{name}_final_m")
         if mean is not None:
             print(f"  {name:7} mean {mean * 100:6.2f} cm | final {final * 100:6.2f} cm")
+    muted = test_scores.get("kinematic_only_latent_mean_m")
+    if muted is not None and test_scores.get("model_mean_m"):
+        gain = muted - test_scores["model_mean_m"]
+        print(f"\n  anticipatory subspace is worth {gain * 100:.2f} cm "
+              f"({gain / muted * 100:.1f}% of the muted error)")
+        print("  that is the part of the prediction the current kinematics could")
+        print("  not have produced - EMG's unique contribution, measured directly")
+        print("  rather than inferred from a separate ablation run")
     model_mean = test_scores.get("model_mean_m")
     linear_mean = test_scores.get("linear_mean_m")
     if model_mean and linear_mean:

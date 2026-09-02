@@ -199,8 +199,13 @@ class TrackedTrajectoryDataset(Dataset):
         trials: list[Path],
         data_config: dict[str, Any],
         cache_dir: Path | None = None,
+        session_index: dict[str, int] | None = None,
     ) -> None:
         self.trials = list(trials)
+        # Session identity, for the adversarial participant-invariance term.
+        # Built from the full set of sessions rather than this split's, so
+        # train and validation agree on what index a session has.
+        self.session_index = session_index or {}
         self.data_config = data_config
         self.cache_dir = Path(cache_dir) if cache_dir else None
         if self.cache_dir:
@@ -251,6 +256,7 @@ class TrackedTrajectoryDataset(Dataset):
         result["onset"] = int(np.asarray(data["onset"]))
         result["length"] = int(result["position"].shape[0])
         result["path"] = str(path)
+        result["session"] = int(self.session_index.get(path.parent.name, 0))
         return result
 
 
@@ -274,6 +280,7 @@ def collate_tracked(batch: list[dict[str, Any]]) -> dict[str, Any] | None:
     out["onset"] = torch.tensor([i["onset"] for i in usable], dtype=torch.long)
     if "screen_target" in usable[0]:
         out["screen_target"] = torch.stack([i["screen_target"] for i in usable])
+    out["session"] = torch.tensor([i.get("session", 0) for i in usable], dtype=torch.long)
     out["paths"] = [i["path"] for i in usable]
     return out
 
@@ -333,13 +340,15 @@ def build_tracked_loaders(
     if not sessions:
         raise ValueError(f"no trial_*.csv found under {root}")
     train, validation, test = split_sessions(sessions, config)
+    session_index = {name: index for index, name in enumerate(sorted(sessions))}
+    config.setdefault("virtual_leader", {})["session_count"] = len(session_index)
     data_config = config["data"]
     batch_size = int(config["training"].get("batch_size", 16))
     workers = int(config["training"].get("num_workers", 0))
 
     def loader(trials: list[Path], shuffle: bool) -> DataLoader:
         return DataLoader(
-            TrackedTrajectoryDataset(trials, data_config, cache_dir),
+            TrackedTrajectoryDataset(trials, data_config, cache_dir, session_index),
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=workers,
