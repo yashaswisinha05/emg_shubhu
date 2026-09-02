@@ -191,6 +191,45 @@ def preprocess_tracked_trial(
     return result
 
 
+def session_emg_scale(
+    trials: list[Path], data_config: dict[str, Any], sample: int = 12
+) -> np.ndarray | None:
+    """Robust per-channel EMG amplitude for one session.
+
+    Raw sEMG amplitude is not comparable between sessions: electrode
+    impedance, exact placement over the muscle belly, and skin preparation
+    move it by orders of magnitude for identical effort. On a held-out-session
+    split that is fatal - the encoder is shown one amplitude range in training
+    and a different one at test, so whatever it learned about EMG cannot
+    transfer, and the muscle channels act as noise that costs generalisation
+    rather than adding to it.
+
+    The original screen-coordinate pipeline in this repository normalised per
+    session for exactly this reason (raw_emg_features takes a `reference`);
+    the tracked pipeline was built without it, which is the most likely reason
+    EMG measured as actively harmful here.
+
+    The 95th percentile is used rather than the max, which is a single noise
+    spike, or the mean, which is dominated by the stationary pre-buffer that
+    occupies most of a trial. Normalising per session rather than per trial is
+    deliberate: per-trial scaling would divide out how hard THIS reach was,
+    which is the part of the signal actually worth having.
+    """
+    stride = max(1, len(trials) // sample)
+    collected = []
+    for path in trials[::stride][:sample]:
+        data = preprocess_tracked_trial(path, data_config)
+        if data is not None and "emg" in data:
+            collected.append(data["emg"])
+    if not collected:
+        return None
+    stacked = np.concatenate(collected, axis=0)
+    scale = np.percentile(np.abs(stacked), 95, axis=0).astype(np.float32)
+    # A dead or disconnected channel would otherwise divide by ~0 and turn
+    # its noise floor into a full-scale signal.
+    return np.maximum(scale, 1e-8)
+
+
 class TrackedTrajectoryDataset(Dataset):
     """Preprocessed trials, cached to .npz so epochs do not re-parse CSVs."""
 
@@ -207,6 +246,10 @@ class TrackedTrajectoryDataset(Dataset):
         # train and validation agree on what index a session has.
         self.session_index = session_index or {}
         self.data_config = data_config
+        # Per-session EMG scales, filled by build_tracked_loaders. Each
+        # session is normalised by its own amplitude, which is what makes the
+        # channels comparable across participants.
+        self.emg_scales: dict[str, np.ndarray] = {}
         self.cache_dir = Path(cache_dir) if cache_dir else None
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -254,6 +297,9 @@ class TrackedTrajectoryDataset(Dataset):
             if key not in {"onset", "sample_rate_hz"}
         }
         result["onset"] = int(np.asarray(data["onset"]))
+        scale = self.emg_scales.get(path.parent.name)
+        if scale is not None and "emg" in result:
+            result["emg"] = result["emg"] / torch.from_numpy(scale)
         result["length"] = int(result["position"].shape[0])
         result["path"] = str(path)
         result["session"] = int(self.session_index.get(path.parent.name, 0))
@@ -333,6 +379,11 @@ def split_sessions(
     )
 
 
+def _with_scales(dataset, scales):
+    dataset.emg_scales = scales
+    return dataset
+
+
 def build_tracked_loaders(
     config: dict[str, Any], root: str | Path, cache_dir: str | Path | None = None
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
@@ -341,6 +392,16 @@ def build_tracked_loaders(
         raise ValueError(f"no trial_*.csv found under {root}")
     train, validation, test = split_sessions(sessions, config)
     session_index = {name: index for index, name in enumerate(sorted(sessions))}
+    # Computed per session from that session's own trials, including the held
+    # out ones. That is not leakage of the label - it is the per-session
+    # calibration any real deployment performs when the electrodes go on, and
+    # withholding it would measure a system nobody would actually build.
+    scales: dict[str, np.ndarray] = {}
+    if bool(config["data"].get("emg_session_normalise", True)):
+        for name, trials in sessions.items():
+            scale = session_emg_scale(trials, config["data"])
+            if scale is not None:
+                scales[name] = scale
     config.setdefault("virtual_leader", {})["session_count"] = len(session_index)
     data_config = config["data"]
     batch_size = int(config["training"].get("batch_size", 16))
@@ -348,7 +409,10 @@ def build_tracked_loaders(
 
     def loader(trials: list[Path], shuffle: bool) -> DataLoader:
         return DataLoader(
-            TrackedTrajectoryDataset(trials, data_config, cache_dir, session_index),
+            _with_scales(
+                TrackedTrajectoryDataset(trials, data_config, cache_dir, session_index),
+                scales,
+            ),
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=workers,

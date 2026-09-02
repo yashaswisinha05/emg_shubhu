@@ -193,6 +193,17 @@ def make_window(
         if name in window:
             window[name] = torch.zeros_like(window[name])
 
+    # How far into the movement this cutoff sits, in samples past onset.
+    # Electromechanical delay means EMG leads motion by 40-80 ms, so whatever
+    # EMG contributes is concentrated in the first samples after onset - and a
+    # mean over uniformly sampled cutoffs, most of which land mid-reach where
+    # kinematics dominate, would average that away to nothing.
+    window["samples_past_onset"] = (
+        torch.full((batch["position"].size(0),), float(cut), device=batch["position"].device)
+        - batch.get("onset", torch.zeros(batch["position"].size(0),
+                                         device=batch["position"].device)).float()
+    )
+
     velocity = window["velocity"]
     window["acceleration"] = (
         (velocity[:, -1] - velocity[:, -2]) / dt
@@ -254,10 +265,25 @@ def evaluate(model, loader, config, device, horizon, minimum_prefix, dt,
                 predictions["kinematic_only_latent"] = outputs[
                     "trajectory_without_anticipatory"
                 ]
+            past_onset = window.get("samples_past_onset")
             for name, prediction in predictions.items():
                 mean, final = displacement_error(prediction, future, future_mask)
                 totals.setdefault(f"{name}_mean_m", []).append(mean)
                 totals.setdefault(f"{name}_final_m", []).append(final)
+                if past_onset is not None:
+                    # Per-sample errors, bucketed by how early the cutoff was.
+                    per_sample = (
+                        (prediction[:, : future.size(1)] - future).norm(dim=-1)
+                        * future_mask
+                    ).sum(dim=1) / future_mask.sum(dim=1).clamp_min(1.0)
+                    for label, low, high in (
+                        ("early", -1e9, 30.0), ("mid", 30.0, 90.0), ("late", 90.0, 1e9)
+                    ):
+                        chosen = (past_onset >= low) & (past_onset < high)
+                        if chosen.any():
+                            totals.setdefault(f"{name}_{label}_m", []).append(
+                                float(per_sample[chosen].mean())
+                            )
     return {k: float(np.mean(v)) for k, v in totals.items() if v}
 
 
@@ -400,6 +426,16 @@ def main() -> None:
     )
     print()
     print("=== test ===")
+    print("\n  by how early the cutoff was (samples past movement onset):")
+    print(f"    {'':22}{'early <30':>12}{'mid 30-90':>12}{'late >90':>12}")
+    for name in ("model", "kinematic_only_latent", "hold", "linear"):
+        cells = []
+        for label in ("early", "mid", "late"):
+            value = test_scores.get(f"{name}_{label}_m")
+            cells.append(f"{value * 100:9.2f} cm" if value else "         -")
+        if any(c.strip() != "-" for c in cells):
+            print(f"    {name:22}" + "".join(f"{c:>12}" for c in cells))
+    print()
     for name in ("model", "kinematic_only_latent", "hold", "linear"):
         mean = test_scores.get(f"{name}_mean_m")
         final = test_scores.get(f"{name}_final_m")

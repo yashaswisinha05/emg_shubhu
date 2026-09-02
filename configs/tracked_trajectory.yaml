@@ -2,6 +2,11 @@ seed: 42
 experiment_name: "tracked_trajectory"
 
 data:
+  # Normalise EMG per session by that session's own 95th-percentile
+  # amplitude. Without it the encoder sees a different amplitude range in
+  # every session, which is the most likely reason EMG measured as harmful
+  # under held-out-session evaluation.
+  emg_session_normalise: true
   # Read off the real export by scripts/inspect_tracked_dataset.py, not
   # assumed - the tracked rig records RAW EMG ("EMG 1_S0"), not the RMS
   # envelope ("EMG RMS 1_S0") the original project used.
@@ -70,6 +75,12 @@ virtual_leader:
   decimation: 10
 
 loss:
+  # Weight on the adversarial session term (read from loss.*, which is where
+  # anticipatory_losses looks). If EMG hurts because it is session-specific,
+  # this is the intervention that could recover it: a discriminator that
+  # cannot read participant identity out of the latent is a representation
+  # whose EMG content transfers across people.
+  session_adversarial_weight: 0.2
   kl_weight: 0.01
   trajectory_epsilon_m: 0.002
   # How tightly the KL pulls the posterior toward the attractor readout.
