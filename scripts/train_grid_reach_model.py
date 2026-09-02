@@ -84,6 +84,7 @@ def canvas_from_disk(root: str) -> tuple[float, float] | None:
 def make_grid_window(
     batch: dict, minimum_prefix: int, patch_length: int, generator,
     ablate: tuple[str, ...] = (), cutoffs_per_trial: int = 1,
+    fallback_canvas: torch.Tensor | None = None,
 ) -> dict | None:
     """Cut after onset; each row can contribute several independent cutoffs.
 
@@ -130,6 +131,23 @@ def make_grid_window(
     window["target"] = batch["screen_target"].index_select(0, rows)
     if "canvas" in batch:
         window["canvas_size"] = batch["canvas"].index_select(0, rows)
+    elif fallback_canvas is not None:
+        # grid_point_loss reads batch["canvas_size"] unconditionally (pixel,
+        # radial and transport losses all scale by it), so a missing canvas
+        # is not something training can silently skip the way an optional
+        # metric can - it has to be supplied every time "canvas" is absent
+        # from the batch, not only at evaluation. It is absent whenever the
+        # trial was cached before canvas extraction existed in
+        # preprocess_tracked_trial: the cache signature has no "canvas
+        # support" marker, so an old cache entry is reused as-is and simply
+        # lacks the field. First found and worked around in
+        # train_reach_target_model.py; that fix covered evaluation there but
+        # was never carried into this script's training loop, which is
+        # exactly where grid_point_loss's requirement is unconditional and
+        # the bug actually surfaces.
+        window["canvas_size"] = fallback_canvas.to(rows.device).unsqueeze(0).expand(
+            len(rows), -1
+        )
     # A near-touch cutoff is a fair prediction task; a cutoff right after
     # onset is close to guessing by construction, and weighting the two
     # equally blurs the gradient with examples the model cannot yet be
@@ -147,29 +165,22 @@ def make_grid_window(
 @torch.no_grad()
 def evaluate(
     model, loader, config, device, minimum_prefix, patch_length, ablate,
-    fallback_canvas, mean_target,
+    canvas_tensor, mean_target,
 ) -> dict:
     model.eval()
     totals: dict[str, list[float]] = {}
     generator = np.random.default_rng(0)
-    canvas_tensor = (
-        torch.tensor(fallback_canvas, dtype=torch.float32, device=device)
-        if fallback_canvas else None
-    )
     for batch in loader:
         if batch is None:
             continue
         batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
         window = make_grid_window(
             batch, minimum_prefix, patch_length, generator, ablate,
-            cutoffs_per_trial=1,
+            cutoffs_per_trial=1, fallback_canvas=canvas_tensor,
         )
         if window is None:
             continue
         canvas = window.get("canvas_size")
-        if canvas is None and canvas_tensor is not None:
-            canvas = canvas_tensor.unsqueeze(0).expand(window["target"].size(0), -1)
-            window["canvas_size"] = canvas
         outputs = model(window["emg"], window["imu"], window["time_mask"])
         target = window["target"]
 
@@ -255,6 +266,14 @@ def main() -> None:
     fallback_canvas = canvas_from_disk(args.root)
     if fallback_canvas:
         print(f"canvas {fallback_canvas[0]:.0f} x {fallback_canvas[1]:.0f} px")
+    else:
+        print("WARNING: no canvas found on disk, and any trial whose cache "
+              "entry also lacks it will have no canvas_size at all - "
+              "grid_point_loss will raise on that batch.")
+    canvas_tensor = (
+        torch.tensor(fallback_canvas, dtype=torch.float32, device=device)
+        if fallback_canvas else None
+    )
     mean_target = training_mean_target(train_loader)
 
     optimizer = torch.optim.AdamW(
@@ -278,7 +297,7 @@ def main() -> None:
             }
             window = make_grid_window(
                 batch, minimum_prefix, patch_length, generator, ablate,
-                args.cutoffs_per_trial,
+                args.cutoffs_per_trial, fallback_canvas=canvas_tensor,
             )
             if window is None:
                 continue
@@ -294,7 +313,7 @@ def main() -> None:
 
         scores = evaluate(
             model, validation_loader, config, device, minimum_prefix,
-            patch_length, ablate, fallback_canvas, mean_target,
+            patch_length, ablate, canvas_tensor, mean_target,
         )
         selection = scores.get("direct_px", scores.get("direct_norm", 1e9))
         history.append({"epoch": epoch, "train": float(np.mean(running or [0])), **scores})
@@ -313,7 +332,7 @@ def main() -> None:
         print(f"loaded best checkpoint (val {best:.1f} px) for test")
     test = evaluate(
         model, test_loader, config, device, minimum_prefix, patch_length,
-        ablate, fallback_canvas, mean_target,
+        ablate, canvas_tensor, mean_target,
     )
 
     print("\n=== test ===")
