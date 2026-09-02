@@ -148,10 +148,15 @@ def make_reach_window(
         if name in window:
             window[name] = torch.zeros_like(window[name])
 
-    rows = torch.tensor([row for row, _, _ in chosen], dtype=torch.long)
+    # Built on the batch's device. Constructing index/label tensors on the
+    # CPU while the batch lives on the accelerator is invisible on a CPU run
+    # and fails immediately on CUDA, so the device is taken from the data
+    # rather than assumed.
+    device = batch["position"].device
+    rows = torch.tensor([row for row, _, _ in chosen], dtype=torch.long, device=device)
     targets = {
         "path": target_path,
-        "duration": torch.tensor(durations, dtype=torch.float32),
+        "duration": torch.tensor(durations, dtype=torch.float32, device=device),
         "origin": origin,
     }
     if "screen_target" in batch:
