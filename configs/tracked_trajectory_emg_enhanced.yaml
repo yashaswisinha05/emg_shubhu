@@ -1,0 +1,67 @@
+seed: 42
+experiment_name: "tracked_trajectory_emg_enhanced"
+
+data:
+  emg_session_normalise: true
+  imu_session_normalise: true
+  sensors: ["S0", "S4", "S8", "S12"]
+  emg_column_template: "EMG 1_{sensor}"
+  acc_column_template: "ACC {axis}_{sensor}"
+  gyro_column_template: "GYRO {axis}_{sensor}"
+  tracker_column_prefix: "VIVE"
+  tracker_id: "T0"
+  sample_rate_hz: 1259.4
+  decimation: 10
+
+  # All features are calculated causally at the raw EMG rate, then sampled
+  # onto the ~126 Hz model clock. This preserves information that a single
+  # 40 ms rectified mean removes. Ablate kinds/windows individually before
+  # retaining the full bank in a final model.
+  emg_feature_windows_ms: [10.0, 25.0, 50.0]
+  emg_feature_kinds: ["rms", "waveform_length", "log_energy", "derivative"]
+  tracker_max_sync_error_ms: 20.0
+  split_by: "session"
+  validation_fraction: 0.2
+  test_fraction: 0.2
+
+model:
+  d_model: 128
+  # Equal latent capacity for EMG and IMU before fusion.
+  separate_modality_encoders: true
+  # Applied per trial only during training. Sweep 0.25, 0.50 and 0.75.
+  imu_modality_dropout: 0.5
+
+virtual_leader:
+  horizon: 32
+  # Required recorded history, independent of cutoff relative to onset.
+  minimum_prefix: 16
+  position_dim: 3
+  substeps: 4
+  prior_displacement_limit_m: 0.8
+  kinematic_dim: 16
+  anticipatory_dim: 16
+  residual_dim: 8
+  anticipatory_dropout: 0.1
+  decimation: 10
+
+loss:
+  session_adversarial_weight: 0.2
+  kl_weight: 0.01
+  trajectory_epsilon_m: 0.002
+  trajectory_prior_sigma: 0.15
+  # The shared decoder must also solve the task from EMG alone. Sweep
+  # 0.25, 0.50 and 1.00; select on validation, never on test.
+  emg_only_weight: 0.5
+
+evaluation:
+  # Same checkpoint, same trials and same cutoffs: directly measures whether
+  # removing or de-pairing a modality changes its predictions.
+  paired_modality_interventions: true
+
+training:
+  batch_size: 16
+  num_workers: 0
+  epochs: 20
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0

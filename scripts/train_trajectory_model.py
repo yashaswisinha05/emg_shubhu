@@ -54,25 +54,51 @@ from emg_touch.utils import (  # noqa: E402
 
 
 class TrajectoryEncoder(torch.nn.Module):
-    """Causal encoder over EMG + IMU + tracked kinematics -> pooled context."""
+    """Causal encoder with an optional balanced, modality-separated pathway."""
 
     def __init__(self, config: dict) -> None:
         super().__init__()
         data = config["data"]
         model = config["model"]
-        from emg_touch.data.grid_trajectory import (
-            emg_channel_count,
-            grid_imu_feature_dim,
-        )
+        from emg_touch.data.tracked_dataset import emg_feature_count
 
         width = int(model["d_model"])
-        emg_channels = len(data.get("sensors", ["S0", "S4", "S8", "S12"]))
-        imu_channels = 6 * emg_channels  # raw ACC/GYRO per sensor
-        # 3 position + 3 velocity: the kinematics the attractor is written in.
-        self.project = torch.nn.Linear(emg_channels + imu_channels + 6, width)
-        self.encoder = torch.nn.GRU(width, width, num_layers=1, batch_first=True)
-        self.normalise = torch.nn.LayerNorm(width)
+        emg_channels = emg_feature_count(data)
+        # Derived EMG features increase EMG width but do not create more IMU
+        # channels; IMU remains six axes for each physical sensor.
+        imu_channels = 6 * len(data.get("sensors", ["S0", "S4", "S8", "S12"]))
+        self.separate_modalities = bool(model.get("separate_modality_encoders", False))
+        self.imu_dropout = float(model.get("imu_modality_dropout", 0.0))
+        if self.separate_modalities:
+            self.emg_project = torch.nn.Linear(emg_channels, width)
+            self.emg_encoder = torch.nn.GRU(width, width, num_layers=1, batch_first=True)
+            self.emg_normalise = torch.nn.LayerNorm(width)
+            self.imu_project = torch.nn.Linear(imu_channels, width)
+            self.imu_encoder = torch.nn.GRU(width, width, num_layers=1, batch_first=True)
+            self.imu_normalise = torch.nn.LayerNorm(width)
+            # Each branch gets the same hidden width irrespective of its raw
+            # channel count.  The fusion returns the legacy 2*width contract.
+            self.fusion = torch.nn.Sequential(
+                torch.nn.LayerNorm(4 * width),
+                torch.nn.Linear(4 * width, 2 * width),
+                torch.nn.GELU(),
+            )
+            self.emg_only_projection = torch.nn.Sequential(
+                torch.nn.LayerNorm(2 * width),
+                torch.nn.Linear(2 * width, 2 * width),
+                torch.nn.GELU(),
+            )
+        else:
+            # 3 position + 3 velocity: retained for checkpoint-compatible
+            # forecast-mode and legacy wearable baselines.
+            self.project = torch.nn.Linear(emg_channels + imu_channels + 6, width)
+            self.encoder = torch.nn.GRU(width, width, num_layers=1, batch_first=True)
+            self.normalise = torch.nn.LayerNorm(width)
         self.context_dim = 2 * width
+
+    @staticmethod
+    def _pool(hidden: torch.Tensor) -> torch.Tensor:
+        return torch.cat([hidden[:, -1], hidden.mean(dim=1)], dim=-1)
 
     def forward(
         self,
@@ -80,14 +106,30 @@ class TrajectoryEncoder(torch.nn.Module):
         imu: torch.Tensor,
         position: torch.Tensor,
         velocity: torch.Tensor,
-    ) -> torch.Tensor:
+        return_modalities: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.separate_modalities:
+            emg_hidden, _ = self.emg_encoder(self.emg_project(emg))
+            imu_hidden, _ = self.imu_encoder(self.imu_project(imu))
+            emg_context = self._pool(self.emg_normalise(emg_hidden))
+            imu_context = self._pool(self.imu_normalise(imu_hidden))
+            if self.training and self.imu_dropout > 0.0:
+                keep = (
+                    torch.rand(imu_context.size(0), 1, device=imu_context.device)
+                    >= self.imu_dropout
+                ).to(imu_context.dtype)
+                imu_context = imu_context * keep
+            context = self.fusion(torch.cat([emg_context, imu_context], dim=-1))
+            emg_only = self.emg_only_projection(emg_context)
+            return (context, emg_only) if return_modalities else context
         features = torch.cat([emg, imu, position, velocity], dim=-1)
         hidden, _ = self.encoder(self.project(features))
         hidden = self.normalise(hidden)
         # Last state plus a mean over the prefix: the last state carries the
         # instant the prediction is made from, the mean carries the whole
         # approach.
-        return torch.cat([hidden[:, -1], hidden.mean(dim=1)], dim=-1)
+        context = self._pool(hidden)
+        return (context, context) if return_modalities else context
 
 
 class TrajectoryModel(torch.nn.Module):
@@ -133,10 +175,29 @@ class TrajectoryModel(torch.nn.Module):
         horizon: int,
         strength: float = 1.0,
         measure_anticipatory: bool = False,
+        include_emg_only: bool = False,
     ) -> dict:
-        context = self.encoder(
-            window["emg"], window["imu"], window["position"], window["velocity"]
+        context, emg_context = self.encoder(
+            window["emg"], window["imu"], window["position"], window["velocity"],
+            return_modalities=True,
         )
+        outputs = self._decode(
+            context, window, horizon, strength, measure_anticipatory
+        )
+        if include_emg_only and self.encoder.separate_modalities:
+            outputs["emg_only_outputs"] = self._decode(
+                emg_context, window, horizon, strength, False
+            )
+        return outputs
+
+    def _decode(
+        self,
+        context: torch.Tensor,
+        window: dict[str, torch.Tensor],
+        horizon: int,
+        strength: float,
+        measure_anticipatory: bool,
+    ) -> dict:
         if self.task == "wearable":
             # Origin, not the tracked position: the model predicts
             # displacement, so its own frame starts at zero. Velocity and
@@ -165,8 +226,9 @@ class TrajectoryModel(torch.nn.Module):
 def make_window(
     batch: dict[str, torch.Tensor], horizon: int, minimum_prefix: int, generator,
     dt: float = 1.0, ablate: tuple[str, ...] = (), relative: bool = False,
+    cutoff_offsets: tuple[int, ...] = (),
 ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor] | None:
-    """Cut each trial at a random point after movement onset.
+    """Cut each trial randomly or at configured offsets from movement onset.
 
     Cutoffs are drawn past the onset because a stationary hand has no
     destination-directed acceleration for the attractor to read - predicting
@@ -175,16 +237,28 @@ def make_window(
     """
     lengths = batch["lengths"]
     onsets = batch["onset"]
-    prefixes, futures = [], []
+    prefixes, futures, offsets = [], [], []
     for row in range(len(lengths)):
         length = int(lengths[row])
-        start = max(int(onsets[row]) + minimum_prefix, minimum_prefix)
-        latest = length - horizon
-        if latest <= start:
-            continue
-        cut = int(generator.integers(start, latest))
+        onset = int(onsets[row])
+        if cutoff_offsets:
+            # History length and time relative to movement onset are separate
+            # concepts.  A negative offset is legal when the pre-buffer is
+            # long enough, which finally tests the anticipatory EMG interval.
+            offset = int(generator.choice(cutoff_offsets))
+            cut = onset + offset
+            if cut < minimum_prefix or cut + horizon > length:
+                continue
+        else:
+            start = max(onset + minimum_prefix, minimum_prefix)
+            latest = length - horizon
+            if latest <= start:
+                continue
+            cut = int(generator.integers(start, latest))
+            offset = cut - onset
         prefixes.append((row, cut))
         futures.append(row)
+        offsets.append(offset)
     if not prefixes:
         return None
 
@@ -193,7 +267,6 @@ def make_window(
     # the batch happened to be (measured: 24 samples, ~0.19 s), which starves
     # the encoder of exactly the approach it is supposed to read intent from.
     prefix_length = min(minimum_prefix * 4, min(cut for _, cut in prefixes))
-    rows = torch.tensor([row for row, _ in prefixes], dtype=torch.long)
     window: dict[str, torch.Tensor] = {}
     for key in ("emg", "imu", "position", "velocity"):
         window[key] = torch.stack(
@@ -242,10 +315,8 @@ def make_window(
     # EMG contributes is concentrated in the first samples after onset - and a
     # mean over uniformly sampled cutoffs, most of which land mid-reach where
     # kinematics dominate, would average that away to nothing.
-    window["samples_past_onset"] = (
-        torch.full((batch["position"].size(0),), float(cut), device=batch["position"].device)
-        - batch.get("onset", torch.zeros(batch["position"].size(0),
-                                         device=batch["position"].device)).float()
+    window["samples_past_onset"] = torch.tensor(
+        offsets, dtype=torch.float32, device=batch["position"].device
     )
 
     velocity = window["_true_velocity"] if relative else window["velocity"]
@@ -291,15 +362,19 @@ def baselines(
 
 
 def training_mean_profile(
-    loader, horizon: int, minimum_prefix: int, dt: float, batches: int = 40
+    loader, horizon: int, minimum_prefix: int, dt: float, batches: int | None = None,
+    cutoff_offsets: tuple[int, ...] = (),
 ) -> torch.Tensor:
     """Average displacement trajectory over the training set."""
     generator = np.random.default_rng(0)
     collected = []
     for index, batch in enumerate(loader):
-        if index >= batches:
+        if batches is not None and index >= batches:
             break
-        made = make_window(batch, horizon, minimum_prefix, generator, dt, relative=True)
+        made = make_window(
+            batch, horizon, minimum_prefix, generator, dt, relative=True,
+            cutoff_offsets=cutoff_offsets,
+        )
         if made is None:
             continue
         _, future, mask = made
@@ -327,10 +402,14 @@ def displacement_error(predicted: torch.Tensor, target: torch.Tensor,
 
 def evaluate(model, loader, config, device, horizon, minimum_prefix, dt,
              ablate: tuple[str, ...] = (), relative: bool = False,
-             mean_profile: torch.Tensor | None = None) -> dict:
+             mean_profile: torch.Tensor | dict[int, torch.Tensor] | None = None,
+             cutoff_offsets: tuple[int, ...] = ()) -> dict:
     model.eval()
     totals: dict[str, list[float]] = {}
     generator = np.random.default_rng(0)  # fixed cutoffs, so runs compare
+    paired_interventions = bool(
+        config.get("evaluation", {}).get("paired_modality_interventions", False)
+    )
     with torch.no_grad():
         for batch in loader:
             if batch is None:
@@ -338,42 +417,75 @@ def evaluate(model, loader, config, device, horizon, minimum_prefix, dt,
             batch = {
                 k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()
             }
-            made = make_window(
-                batch, horizon, minimum_prefix, generator, dt, ablate, relative
-            )
-            if made is None:
-                continue
-            window, future, future_mask = made
-            anticipatory = getattr(model, "kind", "") == "anticipatory"
-            outputs = model(window, horizon, measure_anticipatory=anticipatory) \
-                if anticipatory else model(window, horizon)
-            predictions = {
-                "model": outputs["trajectory"],
-                **baselines(window, future, dt, relative, mean_profile),
-            }
-            if "trajectory_without_anticipatory" in outputs:
-                predictions["kinematic_only_latent"] = outputs[
-                    "trajectory_without_anticipatory"
-                ]
-            past_onset = window.get("samples_past_onset")
-            for name, prediction in predictions.items():
-                mean, final = displacement_error(prediction, future, future_mask)
-                totals.setdefault(f"{name}_mean_m", []).append(mean)
-                totals.setdefault(f"{name}_final_m", []).append(final)
-                if past_onset is not None:
-                    # Per-sample errors, bucketed by how early the cutoff was.
-                    per_sample = (
-                        (prediction[:, : future.size(1)] - future).norm(dim=-1)
-                        * future_mask
-                    ).sum(dim=1) / future_mask.sum(dim=1).clamp_min(1.0)
-                    for label, low, high in (
-                        ("early", -1e9, 30.0), ("mid", 30.0, 90.0), ("late", 90.0, 1e9)
-                    ):
-                        chosen = (past_onset >= low) & (past_onset < high)
-                        if chosen.any():
-                            totals.setdefault(f"{name}_{label}_m", []).append(
-                                float(per_sample[chosen].mean())
-                            )
+            # Evaluation visits every requested offset for every eligible
+            # trial. Training randomly chooses among them, but evaluating one
+            # random offset per trial would confound time with trial identity.
+            evaluation_offsets = tuple((offset,) for offset in cutoff_offsets) or ((),)
+            for selected_offsets in evaluation_offsets:
+                made = make_window(
+                    batch, horizon, minimum_prefix, generator, dt, ablate, relative,
+                    selected_offsets,
+                )
+                if made is None:
+                    continue
+                window, future, future_mask = made
+                anticipatory = getattr(model, "kind", "") == "anticipatory"
+                outputs = model(
+                    window, horizon, measure_anticipatory=anticipatory,
+                    include_emg_only=True,
+                )
+                selected_profile = mean_profile
+                if isinstance(mean_profile, dict):
+                    selected_profile = mean_profile[selected_offsets[0]]
+                predictions = {
+                    "model": outputs["trajectory"],
+                    **baselines(window, future, dt, relative, selected_profile),
+                }
+                if "trajectory_without_anticipatory" in outputs:
+                    predictions["kinematic_only_latent"] = outputs[
+                        "trajectory_without_anticipatory"
+                    ]
+                if "emg_only_outputs" in outputs:
+                    predictions["emg_only"] = outputs["emg_only_outputs"]["trajectory"]
+
+                if paired_interventions:
+                    interventions = {
+                        "without_emg": ("emg", torch.zeros_like(window["emg"])),
+                        "without_imu": ("imu", torch.zeros_like(window["imu"])),
+                    }
+                    if window["emg"].size(0) > 1:
+                        interventions["shuffled_emg"] = (
+                            "emg", torch.roll(window["emg"], shifts=1, dims=0)
+                        )
+                    for label, (key, replacement) in interventions.items():
+                        changed = {**window, key: replacement}
+                        predictions[label] = model(changed, horizon)["trajectory"]
+
+                past_onset = window.get("samples_past_onset")
+                for name, prediction in predictions.items():
+                    mean, final = displacement_error(prediction, future, future_mask)
+                    totals.setdefault(f"{name}_mean_m", []).append(mean)
+                    totals.setdefault(f"{name}_final_m", []).append(final)
+                    if past_onset is not None:
+                        per_sample = (
+                            (prediction[:, : future.size(1)] - future).norm(dim=-1)
+                            * future_mask
+                        ).sum(dim=1) / future_mask.sum(dim=1).clamp_min(1.0)
+                        for label, low, high in (
+                            ("early", -1e9, 30.0),
+                            ("mid", 30.0, 90.0),
+                            ("late", 90.0, 1e9),
+                        ):
+                            chosen = (past_onset >= low) & (past_onset < high)
+                            if chosen.any():
+                                totals.setdefault(f"{name}_{label}_m", []).append(
+                                    float(per_sample[chosen].mean())
+                                )
+                        for offset in past_onset.unique():
+                            chosen = past_onset == offset
+                            totals.setdefault(
+                                f"{name}_offset_{int(offset.item()):+d}_m", []
+                            ).append(float(per_sample[chosen].mean()))
     return {k: float(np.mean(v)) for k, v in totals.items() if v}
 
 
@@ -396,6 +508,28 @@ def main() -> None:
         "tracker's own history is an input and the model extrapolates it.",
     )
     parser.add_argument(
+        "--cutoff-offset-ms", type=float, nargs="+",
+        help="Prediction cutoff(s) relative to tracker-defined movement onset. "
+        "Example: --cutoff-offset-ms -100 -50 0 50 100. History length is "
+        "controlled independently by virtual_leader.minimum_prefix.",
+    )
+    parser.add_argument(
+        "--separate-modalities", action="store_true",
+        help="Use equal-width EMG and IMU encoders before fusion.",
+    )
+    parser.add_argument("--emg-only-weight", type=float)
+    parser.add_argument("--imu-dropout", type=float)
+    parser.add_argument("--emg-feature-windows-ms", type=float, nargs="+")
+    parser.add_argument(
+        "--emg-feature-kinds", nargs="+",
+        choices=("rms", "waveform_length", "log_energy", "derivative"),
+    )
+    parser.add_argument(
+        "--paired-modality-interventions", action="store_true",
+        help="At validation/test time, score the same checkpoint with EMG "
+        "zeroed, EMG shuffled between trials, and IMU zeroed.",
+    )
+    parser.add_argument(
         "--model",
         choices=("trajectory", "anticipatory"),
         default="trajectory",
@@ -414,6 +548,30 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
+    if args.separate_modalities:
+        config["model"]["separate_modality_encoders"] = True
+    if args.emg_only_weight is not None:
+        config["loss"]["emg_only_weight"] = args.emg_only_weight
+    if args.imu_dropout is not None:
+        config["model"]["imu_modality_dropout"] = args.imu_dropout
+    if args.emg_feature_windows_ms:
+        config["data"]["emg_feature_windows_ms"] = args.emg_feature_windows_ms
+    if args.emg_feature_kinds:
+        config["data"]["emg_feature_kinds"] = args.emg_feature_kinds
+    if args.paired_modality_interventions:
+        config.setdefault("evaluation", {})["paired_modality_interventions"] = True
+    if not 0.0 <= float(config["model"].get("imu_modality_dropout", 0.0)) < 1.0:
+        parser.error("IMU modality dropout must be in [0, 1)")
+    if float(config.get("loss", {}).get("emg_only_weight", 0.0)) < 0.0:
+        parser.error("EMG-only loss weight must be non-negative")
+    if bool(config.get("loss", {}).get("emg_only_weight", 0.0)) and not bool(
+        config["model"].get("separate_modality_encoders", False)
+    ):
+        parser.error("EMG-only loss requires --separate-modalities")
+    if args.task != "wearable" and bool(
+        config["model"].get("separate_modality_encoders", False)
+    ):
+        parser.error("separate modality encoders currently require --task wearable")
     if args.epochs:
         config["training"]["epochs"] = args.epochs
     if args.seed is not None:
@@ -452,12 +610,28 @@ def main() -> None:
     minimum_prefix = int(config["virtual_leader"].get("minimum_prefix", 16))
     rate = float(config["data"]["sample_rate_hz"]) / int(config["data"]["decimation"])
     dt = 1.0 / rate
+    cutoff_offsets = tuple(dict.fromkeys(
+        int(round(value / 1000.0 / dt)) for value in (args.cutoff_offset_ms or [])
+    ))
+    if cutoff_offsets:
+        print("CUTOFF OFFSETS: " + ", ".join(
+            f"{offset * dt * 1000:+.1f} ms" for offset in cutoff_offsets
+        ))
     # Needs horizon and dt, so computed once both exist. Only meaningful in
     # wearable mode, where beating the average reach is the real test.
-    mean_profile = (
-        training_mean_profile(train_loader, horizon, minimum_prefix, dt)
-        if relative else None
-    )
+    mean_profile = None
+    if relative:
+        mean_profile = (
+            {
+                offset: training_mean_profile(
+                    train_loader, horizon, minimum_prefix, dt,
+                    cutoff_offsets=(offset,),
+                )
+                for offset in cutoff_offsets
+            }
+            if cutoff_offsets
+            else training_mean_profile(train_loader, horizon, minimum_prefix, dt)
+        )
     clip = float(config["training"].get("gradient_clip_norm", 1.0))
 
     output = Path(args.output_dir)
@@ -469,6 +643,9 @@ def main() -> None:
     for epoch in range(1, int(config["training"]["epochs"]) + 1):
         model.train()
         names = ["loss", "reconstruction", "kl"]
+        emg_only_weight = float(config.get("loss", {}).get("emg_only_weight", 0.0))
+        if emg_only_weight > 0.0:
+            names += ["emg_only_reconstruction", "emg_only_kl"]
         if args.model == "anticipatory":
             names += ["kinematic_predict", "kinematic_adversarial"]
         meters = {k: AverageMeter() for k in names}
@@ -479,17 +656,31 @@ def main() -> None:
                 k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()
             }
             made = make_window(
-                batch, horizon, minimum_prefix, generator, dt, ablate, relative
+                batch, horizon, minimum_prefix, generator, dt, ablate, relative,
+                cutoff_offsets,
             )
             if made is None:
                 continue
             window, future, future_mask = made
             strength = reversal_strength(global_step, ramp_steps)
-            outputs = model(window, horizon, strength=strength) \
-                if args.model == "anticipatory" else model(window, horizon)
+            outputs = model(
+                window, horizon, strength=strength,
+                include_emg_only=emg_only_weight > 0.0,
+            )
             # future_mask is already (batch, horizon); trajectory_loss wants
             # exactly that, so no reduction over a coordinate axis here.
             losses = trajectory_loss(outputs, future, future_mask, config)
+            if emg_only_weight > 0.0:
+                if "emg_only_outputs" not in outputs:
+                    raise ValueError(
+                        "loss.emg_only_weight requires model.separate_modality_encoders"
+                    )
+                emg_losses = trajectory_loss(
+                    outputs["emg_only_outputs"], future, future_mask, config
+                )
+                losses["loss"] = losses["loss"] + emg_only_weight * emg_losses["loss"]
+                losses["emg_only_reconstruction"] = emg_losses["reconstruction"]
+                losses["emg_only_kl"] = emg_losses["kl"]
             if args.model == "anticipatory":
                 # The TRUE velocity, not the encoder's copy. In wearable
                 # mode the encoder's velocity is zeroed, so passing it here
@@ -519,7 +710,7 @@ def main() -> None:
 
         scores = evaluate(
             model, validation_loader, config, device, horizon, minimum_prefix, dt,
-            ablate, relative, mean_profile,
+            ablate, relative, mean_profile, cutoff_offsets,
         )
         record = {"epoch": epoch, **{k: m.average for k, m in meters.items()}, **scores}
         history.append(record)
@@ -545,13 +736,15 @@ def main() -> None:
         print(f"loaded best checkpoint (val {best:.4f} m) for test evaluation")
     test_scores = evaluate(
         model, test_loader, config, device, horizon, minimum_prefix, dt, ablate,
-        relative, mean_profile,
+        relative, mean_profile, cutoff_offsets,
     )
     print()
     print("=== test ===")
     print("\n  by how early the cutoff was (samples past movement onset):")
     print(f"    {'':22}{'early <30':>12}{'mid 30-90':>12}{'late >90':>12}")
-    for name in ("model", "kinematic_only_latent", "hold", "linear", "mean_reach"):
+    for name in (
+        "model", "emg_only", "kinematic_only_latent", "hold", "linear", "mean_reach"
+    ):
         cells = []
         for label in ("early", "mid", "late"):
             value = test_scores.get(f"{name}_{label}_m")
@@ -559,11 +752,41 @@ def main() -> None:
         if any(c.strip() != "-" for c in cells):
             print(f"    {name:22}" + "".join(f"{c:>12}" for c in cells))
     print()
-    for name in ("model", "kinematic_only_latent", "hold", "linear", "mean_reach"):
+    if cutoff_offsets:
+        print("\n  by exact cutoff relative to movement onset:")
+        for name in (
+            "model", "emg_only", "without_emg", "shuffled_emg", "without_imu",
+            "hold", "mean_reach",
+        ):
+            cells = []
+            for offset in cutoff_offsets:
+                value = test_scores.get(f"{name}_offset_{offset:+d}_m")
+                cells.append(
+                    f"{offset * dt * 1000:+.0f} ms={value * 100:.2f} cm"
+                    if value is not None else f"{offset * dt * 1000:+.0f} ms=-"
+                )
+            if any(test_scores.get(f"{name}_offset_{o:+d}_m") is not None
+                   for o in cutoff_offsets):
+                print(f"    {name:12} " + " | ".join(cells))
+    print()
+    for name in (
+        "model", "emg_only", "without_emg", "shuffled_emg", "without_imu",
+        "kinematic_only_latent", "hold", "linear", "mean_reach"
+    ):
         mean = test_scores.get(f"{name}_mean_m")
         final = test_scores.get(f"{name}_final_m")
         if mean is not None:
             print(f"  {name:7} mean {mean * 100:6.2f} cm | final {final * 100:6.2f} cm")
+    if test_scores.get("without_emg_mean_m") is not None:
+        full = test_scores["model_mean_m"]
+        print("\n  paired same-checkpoint modality effects (positive = modality helps):")
+        print(f"    EMG removal:  "
+              f"{(test_scores['without_emg_mean_m'] - full) * 100:+.2f} cm")
+        if test_scores.get("shuffled_emg_mean_m") is not None:
+            print(f"    EMG shuffle:  "
+                  f"{(test_scores['shuffled_emg_mean_m'] - full) * 100:+.2f} cm")
+        print(f"    IMU removal:  "
+              f"{(test_scores['without_imu_mean_m'] - full) * 100:+.2f} cm")
     muted = test_scores.get("kinematic_only_latent_mean_m")
     if muted is not None and test_scores.get("model_mean_m"):
         gain = muted - test_scores["model_mean_m"]

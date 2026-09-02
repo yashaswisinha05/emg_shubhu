@@ -84,6 +84,64 @@ def causal_envelope(values: np.ndarray, window: int) -> np.ndarray:
     )
 
 
+def emg_feature_count(data_config: dict[str, Any]) -> int:
+    """Number of EMG features emitted per timestep for this configuration."""
+    sensors = len(data_config.get("sensors", ["S0", "S4", "S8", "S12"]))
+    windows = data_config.get("emg_feature_windows_ms")
+    kinds = data_config.get("emg_feature_kinds")
+    if not windows or not kinds:
+        return sensors
+    return sensors * len(windows) * len(kinds)
+
+
+def emg_feature_bank(
+    values: np.ndarray, sample_rate_hz: float, data_config: dict[str, Any]
+) -> np.ndarray:
+    """Build causal high-rate EMG features before decimation.
+
+    With no explicit feature configuration this returns the legacy 40 ms
+    rectified moving average.  Enhanced configurations can retain several
+    complementary views of the raw waveform.  Every operation is trailing or
+    backward-looking, so no sample after the prediction cutoff is consulted.
+    """
+    windows_ms = data_config.get("emg_feature_windows_ms")
+    kinds = data_config.get("emg_feature_kinds")
+    if not windows_ms or not kinds:
+        window = max(
+            1,
+            int(round(float(data_config.get("emg_envelope_ms", 40.0))
+                      * sample_rate_hz / 1000.0)),
+        )
+        return causal_envelope(values, window)
+
+    allowed = {"rms", "waveform_length", "log_energy", "derivative"}
+    unknown = set(kinds) - allowed
+    if unknown:
+        raise ValueError(f"unknown EMG feature kind(s): {sorted(unknown)}")
+
+    squared = np.square(values, dtype=np.float64)
+    absolute_difference = np.abs(
+        np.diff(values, axis=0, prepend=values[:1])
+    )
+    features: list[np.ndarray] = []
+    for requested_ms in windows_ms:
+        window = max(1, int(round(float(requested_ms) * sample_rate_hz / 1000.0)))
+        mean_square = causal_envelope(squared, window)
+        rms = np.sqrt(np.maximum(mean_square, 0.0)).astype(np.float32)
+        by_kind = {
+            "rms": rms,
+            # Averaging rather than summing makes windows comparable; the
+            # window duration is already represented by a separate feature.
+            "waveform_length": causal_envelope(absolute_difference, window),
+            "log_energy": np.log1p(mean_square).astype(np.float32),
+            "derivative": (
+                np.diff(rms, axis=0, prepend=rms[:1]) * float(sample_rate_hz)
+            ).astype(np.float32),
+        }
+        features.extend(by_kind[str(kind)] for kind in kinds)
+    return np.concatenate(features, axis=1).astype(np.float32)
+
+
 def movement_onset(speed: np.ndarray, fraction: float = 0.05) -> int:
     """First index where speed passes a fraction of the trial's peak.
 
@@ -145,12 +203,8 @@ def preprocess_tracked_trial(
     if valid.sum() < 64:
         return None
 
-    window = max(
-        1,
-        int(round(float(data_config.get("emg_envelope_ms", 40.0))
-                  * len(perf) / max(perf[-1] - perf[0], 1e-9) / 1000.0)),
-    )
-    emg = causal_envelope(np.nan_to_num(emg_raw), window)
+    raw_rate = len(perf) / max(perf[-1] - perf[0], 1e-9)
+    emg = emg_feature_bank(np.nan_to_num(emg_raw), raw_rate, data_config)
 
     decimation = max(1, int(data_config.get("decimation", 10)))
     index = np.arange(0, len(perf), decimation)
@@ -302,8 +356,9 @@ class TrackedTrajectoryDataset(Dataset):
                 for k, v in data_config.items()
                 if k
                 in {
-                    "decimation", "emg_envelope_ms", "tracker_max_sync_error_ms",
-                    "sensors", "emg_column_template", "tracker_id",
+                    "decimation", "emg_envelope_ms", "emg_feature_windows_ms",
+                    "emg_feature_kinds", "tracker_max_sync_error_ms", "sensors",
+                    "emg_column_template", "tracker_id",
                 }
             )
         )

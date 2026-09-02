@@ -36,6 +36,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 ABLATIONS = {
     "all-inputs": "",
     "no-emg": "emg",
@@ -56,6 +58,7 @@ def run_one(
     epochs: int,
     device: str,
     task: str = "forecast",
+    extra_args: tuple[str, ...] = (),
 ) -> dict | None:
     results = output / "results.json"
     if results.exists():
@@ -69,6 +72,7 @@ def run_one(
         "--epochs", str(epochs), "--model", model, "--seed", str(seed),
         "--task", task,
     ]
+    command += list(extra_args)
     if ablate:
         command += ["--ablate", ablate]
     print(f"  running {output.name} ...", flush=True)
@@ -100,6 +104,16 @@ def main() -> None:
     parser.add_argument("--output-dir", default="runs/sweep")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--cutoff-offset-ms", type=float, nargs="+")
+    parser.add_argument("--separate-modalities", action="store_true")
+    parser.add_argument("--emg-only-weight", type=float)
+    parser.add_argument("--imu-dropout", type=float)
+    parser.add_argument("--emg-feature-windows-ms", type=float, nargs="+")
+    parser.add_argument(
+        "--emg-feature-kinds", nargs="+",
+        choices=("rms", "waveform_length", "log_energy", "derivative"),
+    )
+    parser.add_argument("--paired-modality-interventions", action="store_true")
     parser.add_argument(
         "--task", choices=("forecast", "wearable"), default="forecast",
         help="wearable: tracker is label-only, EMG+IMU are the whole input. "
@@ -130,11 +144,27 @@ def main() -> None:
           f"{len(args.ablations)} ablation(s) x {len(args.seeds)} seed(s)\n")
 
     collected: dict[tuple[str, str], list[dict]] = {}
+    extra_args: list[str] = []
+    if args.cutoff_offset_ms:
+        extra_args += ["--cutoff-offset-ms", *map(str, args.cutoff_offset_ms)]
+    if args.separate_modalities:
+        extra_args.append("--separate-modalities")
+    if args.emg_only_weight is not None:
+        extra_args += ["--emg-only-weight", str(args.emg_only_weight)]
+    if args.imu_dropout is not None:
+        extra_args += ["--imu-dropout", str(args.imu_dropout)]
+    if args.emg_feature_windows_ms:
+        extra_args += ["--emg-feature-windows-ms", *map(str, args.emg_feature_windows_ms)]
+    if args.emg_feature_kinds:
+        extra_args += ["--emg-feature-kinds", *args.emg_feature_kinds]
+    if args.paired_modality_interventions:
+        extra_args.append("--paired-modality-interventions")
     for model, ablation, seed in combinations:
         output = root_out / f"{model}__{ablation}__seed{seed}"
         scores = run_one(
             script, args.root, args.config, args.cache_dir, output,
             model, ABLATIONS[ablation], seed, args.epochs, args.device, args.task,
+            tuple(extra_args),
         )
         if scores:
             collected.setdefault((model, ablation), []).append(scores)
@@ -191,6 +221,55 @@ def main() -> None:
     for _, model, ablation, means, finals, improvement in sorted(rows):
         print(f"{model:13} {ablation:17} {summarise(means):>13} "
               f"{summarise(finals):>13} {improvement:>12}")
+
+    # These are interventions on the SAME trained checkpoint, unlike the
+    # separately trained ablation rows above. Positive costs mean destroying
+    # that modality made prediction worse; the shuffled-EMG cost is the
+    # cleanest check that the model uses trial-specific EMG rather than its
+    # marginal amplitude distribution.
+    if any("without_emg_mean_m" in run for runs in collected.values() for run in runs):
+        print("\n" + "=" * 78)
+        print("paired same-checkpoint modality effects (positive = modality helps)")
+        print(f"{'model':13} {'inputs':17} {'remove EMG':>13} "
+              f"{'shuffle EMG':>13} {'remove IMU':>13}")
+        print("-" * 78)
+        for (model, ablation), runs in sorted(collected.items()):
+            def costs(intervention: str) -> list[float]:
+                return [
+                    run[f"{intervention}_mean_m"] - run["model_mean_m"]
+                    for run in runs
+                    if run.get(f"{intervention}_mean_m") is not None
+                    and run.get("model_mean_m") is not None
+                ]
+
+            print(
+                f"{model:13} {ablation:17} {summarise(costs('without_emg')):>13} "
+                f"{summarise(costs('shuffled_emg')):>13} "
+                f"{summarise(costs('without_imu')):>13}"
+            )
+
+    if args.cutoff_offset_ms:
+        print("\n" + "=" * 78)
+        print("intact model by exact cutoff relative to movement onset")
+        print(f"{'model':13} {'inputs':17}" + "".join(
+            f"{value:+.0f} ms".rjust(13) for value in args.cutoff_offset_ms
+        ))
+        print("-" * 78)
+        raw_config = yaml.safe_load(Path(args.config).read_text())
+        rate = (
+            float(raw_config["data"]["sample_rate_hz"])
+            / int(raw_config["data"]["decimation"])
+        )
+        sample_keys = [
+            f"{int(round(value * rate / 1000.0)):+d}"
+            for value in args.cutoff_offset_ms
+        ]
+        for (model, ablation), runs in sorted(collected.items()):
+            cells = []
+            for key in sample_keys:
+                values = [run.get(f"model_offset_{key}_m") for run in runs]
+                cells.append(summarise([value for value in values if value is not None]))
+            print(f"{model:13} {ablation:17}" + "".join(f"{cell:>13}" for cell in cells))
 
     # Errors split by how early the cutoff sat. Electromechanical delay puts
     # any EMG contribution in the first samples after onset, so an effect can
