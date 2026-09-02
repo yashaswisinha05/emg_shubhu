@@ -78,11 +78,22 @@ class VirtualLeaderTrajectoryVAE(nn.Module):
             nn.Linear(128, self.position_dim),
         )
         # Posterior mean is a residual on the current measured position, so an
-        # untrained model predicts "the hand stays put" rather than an
-        # arbitrary point in space - a sane, physically meaningful start.
-        nn.init.zeros_(self.posterior_mean[-1].weight)
+        # untrained model predicts approximately "the hand stays put" rather
+        # than an arbitrary point in space - a sane, physically meaningful
+        # start. The BIAS carries that; the weight is small but deliberately
+        # NOT zero.
+        #
+        # Zeroing the final weight of every head instead - the obvious way to
+        # get that same starting behaviour - silently severs the encoder.
+        # d(head output)/d(context) is W^T, so a zero W means the context, and
+        # therefore the whole EMG/IMU encoder feeding it, receives exactly no
+        # gradient. Measured before this fix: encoder GRU gradient norm 0.0,
+        # and validation error frozen to four decimals across six epochs while
+        # the training loss moved. This is the same trap as the kinematics
+        # head in virtual_leader.py, and it is worth the second explicit note.
+        nn.init.normal_(self.posterior_mean[-1].weight, std=0.01)
         nn.init.zeros_(self.posterior_mean[-1].bias)
-        nn.init.zeros_(self.posterior_log_variance[-1].weight)
+        nn.init.normal_(self.posterior_log_variance[-1].weight, std=0.01)
         # sigma ~0.05 m at init: small against a reach, large enough that the
         # sampling noise is not degenerate.
         nn.init.constant_(self.posterior_log_variance[-1].bias, -6.0)
@@ -91,7 +102,10 @@ class VirtualLeaderTrajectoryVAE(nn.Module):
             nn.LayerNorm(context_dim), nn.Linear(context_dim, 64), nn.GELU(),
             nn.Linear(64, 2),
         )
-        nn.init.zeros_(self.dynamics[-1].weight)
+        # Same reasoning: small random rather than zero, so eta and rho are
+        # a real path from the context rather than a dead one. Bias stays at
+        # zero, putting both at their range midpoint to begin with.
+        nn.init.normal_(self.dynamics[-1].weight, std=0.01)
         nn.init.zeros_(self.dynamics[-1].bias)
 
     def attractor_parameters(self, context: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

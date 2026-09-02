@@ -1,0 +1,71 @@
+seed: 42
+experiment_name: "tracked_trajectory"
+
+data:
+  # Read off the real export by scripts/inspect_tracked_dataset.py, not
+  # assumed - the tracked rig records RAW EMG ("EMG 1_S0"), not the RMS
+  # envelope ("EMG RMS 1_S0") the original project used.
+  sensors: ["S0", "S4", "S8", "S12"]
+  emg_column_template: "EMG 1_{sensor}"
+  acc_column_template: "ACC {axis}_{sensor}"
+  gyro_column_template: "GYRO {axis}_{sensor}"
+  tracker_column_prefix: "VIVE"
+  tracker_id: "T0"
+
+  # Measured at 1259.4 Hz on every one of the 15 sessions (min = max),
+  # against a declared 1259.26 - agreement to 0.01%.
+  sample_rate_hz: 1259.4
+  # -> ~126 Hz. Deliberately below the Vive's true ~250 Hz lighthouse rate:
+  # the export carries a distinct pose on every row at 1259 Hz, so something
+  # upsamples onto the EMG clock, and sampling below the true rate means we
+  # read the underlying trajectory rather than whatever the interpolant
+  # invented. Differentiating at the row rate would amplify it instead.
+  decimation: 10
+  # Causal rectify-and-average window for the raw bipolar EMG (52% of
+  # samples measured negative).
+  emg_envelope_ms: 40.0
+  # sync_error_ms median ~3 ms with a tail to 89 ms. Measured: 0.70% of
+  # samples over 10 ms, 0.13% over 20, 0.05% over 40. A 20 ms cut discards
+  # roughly one sample in 800, and keeps misalignment well inside the
+  # 40-80 ms electromechanical delay that makes EMG predictive.
+  # tracking_age_us is deliberately unused: it reads exactly zero in every
+  # trial across all 15 sessions, so it is a stub, not a clean tracker.
+  tracker_max_sync_error_ms: 20.0
+
+  # Hold out whole sessions. Splitting trials within a session shares that
+  # session's electrode placement and skin condition across train and test,
+  # which flatters the result; session-level asks whether the model
+  # transfers to an unseen participant, which is the question for a wearable.
+  split_by: "session"
+  validation_fraction: 0.2
+  test_fraction: 0.2
+
+model:
+  d_model: 128
+
+virtual_leader:
+  # 32 steps at ~126 Hz is ~0.25 s of prediction.
+  horizon: 32
+  minimum_prefix: 16
+  position_dim: 3
+  substeps: 4
+  # MUST match data.decimation. The rollout computes its timestep as
+  # virtual_leader.decimation / data.sample_rate_hz, and the dataset has
+  # already decimated by data.decimation, so leaving this at 1 makes the
+  # model integrate with a dt ten times too small - it covers 0.025 s while
+  # being scored against 0.25 s of real motion, and cannot reach anywhere.
+  # The baselines use the effective rate, so only the model was handicapped.
+  decimation: 10
+
+loss:
+  kl_weight: 0.01
+  trajectory_epsilon_m: 0.002
+  trajectory_prior_sigma: 0.05
+
+training:
+  batch_size: 16
+  num_workers: 0
+  epochs: 20
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
