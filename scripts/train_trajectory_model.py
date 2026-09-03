@@ -321,6 +321,17 @@ def make_window(
     window["samples_past_onset"] = torch.tensor(
         offsets, dtype=torch.float32, device=batch["position"].device
     )
+    # Original batch-row index for each surviving cutoff, in the same order
+    # as every other window[...] tensor. Needed to re-index any per-trial
+    # field read from the UNFILTERED batch (e.g. batch["session"]) after
+    # make_window has dropped rows without a valid cutoff - passing such a
+    # field through unindexed silently assumes nothing was dropped, which a
+    # long horizon makes false on almost every batch (see the crash this
+    # fixes: 16-row batch, one trial too short for a 1000 ms cutoff, 15-row
+    # window, cross_entropy given a 16-row target against a 15-row input).
+    window["_rows"] = torch.tensor(
+        [row for row, _ in prefixes], dtype=torch.long, device=batch["position"].device
+    )
 
     velocity = window["_true_velocity"] if relative else window["velocity"]
     window["acceleration"] = (
@@ -709,12 +720,19 @@ def main() -> None:
                 # the tracker value as a supervision TARGET is legitimate: it
                 # is ground truth, exactly like the trajectory, and never
                 # reaches the model as an input.
+                session = batch.get("session")
+                if session is not None:
+                    # Re-index to the rows make_window actually kept - see
+                    # window["_rows"]'s own comment for why this is required
+                    # rather than optional whenever a horizon is long enough
+                    # to drop any trial from the batch.
+                    session = session.index_select(0, window["_rows"])
                 extra = anticipatory_losses(
                     outputs,
                     window["_true_velocity"][:, -1],
                     window["acceleration"],
                     config,
-                    session=batch.get("session"),
+                    session=session,
                 )
                 losses = {**losses, **extra}
                 losses["loss"] = losses["loss"] + extra["disentangle"]
