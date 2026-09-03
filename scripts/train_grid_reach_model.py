@@ -86,12 +86,25 @@ def make_grid_window(
     batch: dict, minimum_prefix: int, patch_length: int, generator,
     ablate: tuple[str, ...] = (), cutoffs_per_trial: int = 1,
     fallback_canvas: torch.Tensor | None = None,
+    lead_window: tuple[int, int] | None = None,
 ) -> dict | None:
     """Cut after onset; each row can contribute several independent cutoffs.
 
     Returns a single dict usable directly as grid_point_loss's `batch`
     argument (it carries `target`, `canvas_size`, `loss_weight`) as well as
     the model's own inputs (`emg`, `imu`, `time_mask`).
+
+    `lead_window` is (minimum, maximum) samples BEFORE TOUCH to cut at, and
+    changes what the model is trained to be good at. Without it, cutoffs are
+    drawn uniformly between onset and touch - which sounds neutral but is
+    not, because the lead-time sweep showed the task is at chance beyond
+    roughly 600 ms before touch (+1.1% over guessing at 1000 ms). Uniform
+    sampling therefore spends most of its gradient on examples carrying no
+    recoverable signal, and the only way to fit them is to hedge toward the
+    mean target - a hedge that is then also applied near contact, where the
+    signal is strong (+50.6% at 100 ms). Restricting cutoffs to the window
+    where information exists trades far-out accuracy, which is chance
+    anyway, for accuracy at the operating point that a real interface uses.
     """
     lengths, onsets = batch["lengths"], batch["onset"]
     chosen = []
@@ -103,7 +116,15 @@ def make_grid_window(
         if latest <= start:
             continue
         for _ in range(cutoffs_per_trial):
-            cut = int(generator.integers(start, latest))
+            if lead_window is not None:
+                low, high = lead_window
+                cut = touch - int(generator.integers(low, high + 1))
+                # Clamped rather than skipped: a reach shorter than the
+                # requested lead would otherwise drop out of training
+                # entirely, quietly biasing the set toward long reaches.
+                cut = max(start, min(cut, latest))
+            else:
+                cut = int(generator.integers(start, latest))
             progress = (cut - start) / max(latest - start, 1)
             chosen.append((row, cut, touch, progress))
     if not chosen:
@@ -166,7 +187,7 @@ def make_grid_window(
 @torch.no_grad()
 def evaluate(
     model, loader, config, device, minimum_prefix, patch_length, ablate,
-    canvas_tensor, mean_target,
+    canvas_tensor, mean_target, lead_window: tuple[int, int] | None = None,
 ) -> dict:
     model.eval()
     totals: dict[str, list[float]] = {}
@@ -178,6 +199,7 @@ def evaluate(
         window = make_grid_window(
             batch, minimum_prefix, patch_length, generator, ablate,
             cutoffs_per_trial=1, fallback_canvas=canvas_tensor,
+            lead_window=lead_window,
         )
         if window is None:
             continue
@@ -223,6 +245,17 @@ def main() -> None:
     parser.add_argument("--cutoffs-per-trial", type=int, default=3)
     parser.add_argument("--holdout-config")
     parser.add_argument(
+        "--lead-window-ms", type=float, nargs=2, metavar=("MIN", "MAX"),
+        help="Train on cutoffs this many milliseconds before touch instead "
+        "of uniformly between onset and touch. The lead-time sweep measured "
+        "the task at chance beyond ~600 ms (+1.1%% at 1000 ms) but strong "
+        "near contact (+50.6%% at 100 ms), so uniform sampling spends most "
+        "of its gradient teaching the model to hedge on unanswerable "
+        "examples. Validation and test use the same window, so the reported "
+        "number is the operating point - NOT comparable to uniform-cutoff "
+        "runs.",
+    )
+    parser.add_argument(
         "--inputs", choices=("emg", "emg+imu"), default="emg+imu",
         help="emg: the muscle signal alone, no separate IMU encoder is even "
         "built. The tracker never enters the encoder in either case.",
@@ -258,6 +291,23 @@ def main() -> None:
             f"virtual_leader.minimum_prefix ({minimum_prefix}) must be >= "
             f"model.patch_length ({patch_length}) - the encoder needs at "
             "least one full patch per window."
+        )
+
+    lead_window = None
+    if args.lead_window_ms:
+        rate = float(config["data"]["sample_rate_hz"]) / max(
+            1, int(config["data"].get("decimation", 10))
+        )
+        low, high = sorted(args.lead_window_ms)
+        lead_window = (
+            max(1, int(round(low * rate / 1000.0))),
+            max(2, int(round(high * rate / 1000.0))),
+        )
+        print(
+            f"training cutoffs restricted to {low:.0f}-{high:.0f} ms before touch "
+            f"({lead_window[0]}-{lead_window[1]} samples at {rate:.1f} Hz); "
+            "reported scores are the operating point, not comparable to "
+            "uniform-cutoff runs"
         )
 
     emg_channels = emg_feature_count(config["data"])
@@ -299,6 +349,7 @@ def main() -> None:
             window = make_grid_window(
                 batch, minimum_prefix, patch_length, generator, ablate,
                 args.cutoffs_per_trial, fallback_canvas=canvas_tensor,
+                lead_window=lead_window,
             )
             if window is None:
                 continue
@@ -314,7 +365,7 @@ def main() -> None:
 
         scores = evaluate(
             model, validation_loader, config, device, minimum_prefix,
-            patch_length, ablate, canvas_tensor, mean_target,
+            patch_length, ablate, canvas_tensor, mean_target, lead_window,
         )
         selection = scores.get("direct_px", scores.get("direct_norm", 1e9))
         history.append({"epoch": epoch, "train": float(np.mean(running or [0])), **scores})
@@ -333,7 +384,7 @@ def main() -> None:
         print(f"loaded best checkpoint (val {best:.1f} px) for test")
     test = evaluate(
         model, test_loader, config, device, minimum_prefix, patch_length,
-        ablate, canvas_tensor, mean_target,
+        ablate, canvas_tensor, mean_target, lead_window,
     )
 
     print("\n=== test ===")

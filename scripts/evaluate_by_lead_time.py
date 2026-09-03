@@ -233,21 +233,45 @@ def main() -> None:
         history.append({"lead_ms": lead_ms, **scores})
 
     print()
-    under = [h for h in history if h["direct_px"] < 200]
-    if under:
-        best = max(under, key=lambda h: h["lead_ms"])
-        print(f"  Under 200 px from {best['lead_ms']:.0f} ms before touch inwards "
-              f"({best['direct_px']:.1f} px).")
-        print("  Reported as a lead time rather than a single average, which is")
-        print("  the honest form of the claim: an interface has a latency budget.")
+    if not history:
+        return
+    # Report the mean and the median separately. They answer different
+    # questions and on this data they disagree: a right-skewed error
+    # distribution drags the mean well above the typical trial, so quoting
+    # only the mean understates how often the prediction is good, and
+    # quoting only the median hides how bad the tail is.
+    mean_under = [h for h in history if h["direct_px"] < 200]
+    median_under = [h for h in history if h["direct_median_px"] < 200]
+    best = min(history, key=lambda h: h["direct_px"])
+    worst = max(history, key=lambda h: h["lead_ms"])
+    slope = worst["direct_px"] - best["direct_px"]
+
+    if mean_under:
+        edge = max(mean_under, key=lambda h: h["lead_ms"])
+        print(f"  MEAN under 200 px out to {edge['lead_ms']:.0f} ms before touch "
+              f"({edge['direct_px']:.1f} px).")
+    elif median_under:
+        edge = max(median_under, key=lambda h: h["lead_ms"])
+        print(f"  MEDIAN under 200 px out to {edge['lead_ms']:.0f} ms before touch "
+              f"({edge['direct_median_px']:.1f} px), while the mean at that lead is "
+              f"{edge['direct_px']:.1f} px.")
+        print("  So the typical trial already clears 200 px and a skewed tail is")
+        print("  what holds the mean above it - a tail problem, not a signal problem.")
     else:
-        closest = min(history, key=lambda h: h["direct_px"]) if history else None
-        if closest:
-            print(f"  Never under 200 px. Best is {closest['direct_px']:.1f} px at "
-                  f"{closest['lead_ms']:.0f} ms before touch.")
-            print("  If even the shortest lead time is far above 200 px, the limit is")
-            print("  not how much of the reach remains - it is that the wearables do")
-            print("  not localise the hand, and no lead time fixes that.")
+        print(f"  Neither mean nor median reaches 200 px. Best mean is "
+              f"{best['direct_px']:.1f} px at {best['lead_ms']:.0f} ms.")
+
+    print(f"\n  Error runs {best['direct_px']:.0f} px at {best['lead_ms']:.0f} ms to "
+          f"{worst['direct_px']:.0f} px at {worst['lead_ms']:.0f} ms "
+          f"({slope:+.0f} px across the range).")
+    if slope > 100:
+        print("  Lead time is the dominant variable, so no single averaged number")
+        print("  describes this model - the operating point has to be quoted with it.")
+        far = [h for h in history if h["mean_px"] - h["direct_px"] < 0.05 * h["mean_px"]]
+        if far:
+            print(f"  Beyond ~{min(f['lead_ms'] for f in far):.0f} ms the model is at "
+                  "chance: nothing about the target is\n  readable that early, which is "
+                  "a statement about the reach, not the model.")
 
     if history:
         median_trials = float(np.median([h["trials"] for h in history]))
