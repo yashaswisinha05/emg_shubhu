@@ -11,7 +11,7 @@ the red ground-truth target and calculate the displayed pixel error.
       --trial-root "/media/.../emg_imu_vive" \
       --checkpoint runs/semantic_residual_distillation/best.pt \
       --config configs/tracked_semantic_residual_distillation.yaml \
-      --device cuda --speed 1.0
+      --device cuda --speed 1.0 --prediction-delay-ms 600
 """
 from __future__ import annotations
 
@@ -141,6 +141,12 @@ def main() -> None:
     )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--speed", type=float, default=1.0)
+    parser.add_argument(
+        "--prediction-delay-ms",
+        type=float,
+        default=600.0,
+        help="Wait this long after movement onset before the first prediction",
+    )
     parser.add_argument("--shuffle", action="store_true")
     args = parser.parse_args()
 
@@ -187,6 +193,10 @@ def main() -> None:
         "deployment check: predictions receive causal EMG+IMU only; VIVE/target "
         "are display-only ground truth"
     )
+    print(
+        f"first prediction: {args.prediction_delay_ms:.0f} ms after detected "
+        "movement onset"
+    )
 
     app = QApplication(sys.argv)
     window = PredictionReplayWindow(
@@ -198,6 +208,7 @@ def main() -> None:
         trial_loader=trial_loader,
         window_title="Best Wearable Model — Live Prediction Replay",
         maximum_prefix=runner.context_samples,
+        prediction_delay_ms=args.prediction_delay_ms,
     )
     window.resize(1100, 720)
     window.show()

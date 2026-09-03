@@ -103,6 +103,7 @@ class PredictionReplayWindow(QMainWindow):
         trial_loader: Callable[[Path], dict[str, Any] | None] | None = None,
         window_title: str = "Live Prediction Replay",
         maximum_prefix: int | None = None,
+        prediction_delay_ms: float = 0.0,
     ) -> None:
         super().__init__()
         self.setWindowTitle(window_title)
@@ -119,6 +120,9 @@ class PredictionReplayWindow(QMainWindow):
             lambda path: preprocess_tracked_trial(path, self.config["data"])
         )
         self.maximum_prefix = maximum_prefix
+        if prediction_delay_ms < 0.0:
+            raise ValueError("prediction_delay_ms cannot be negative")
+        self.prediction_delay_ms = float(prediction_delay_ms)
         self.btn_size = 80
         self.marker_size = 36
         self.records: list[dict] = []
@@ -260,6 +264,9 @@ class PredictionReplayWindow(QMainWindow):
             self.model, None, emg, imu, onset, touch, minimum_prefix, patch_length,
             stride, canvas.to(self.device), target_px.to(self.device),
             maximum_prefix=self.maximum_prefix,
+            prediction_delay_samples=max(
+                0, int(round(self.prediction_delay_ms * rate / 1000.0))
+            ),
         )
         if not self.records:
             self.trial_label.setText(f"Trial {self.trial_index + 1}: too short, skipping")
@@ -283,9 +290,25 @@ class PredictionReplayWindow(QMainWindow):
             f"({len(self.records)} predictions)"
         )
         self.playback_index = 0
-        self.playback_timer.start(max(1, int(round(stride_ms / self.speed))))
+        self._playback_interval_ms = max(
+            1, int(round(stride_ms / self.speed))
+        )
+        first_wait_ms = max(
+            self._playback_interval_ms,
+            int(round(self.prediction_delay_ms / self.speed)),
+        )
+        self._waiting_for_first_prediction = True
+        if self.prediction_delay_ms > 0.0:
+            self.time_label.setText(
+                f"collecting first {self.prediction_delay_ms:.0f} ms after "
+                "movement onset…"
+            )
+        self.playback_timer.start(first_wait_ms)
 
     def _advance_playback(self) -> None:
+        if self._waiting_for_first_prediction:
+            self._waiting_for_first_prediction = False
+            self.playback_timer.setInterval(self._playback_interval_ms)
         if self.playback_index >= len(self.records):
             self.playback_timer.stop()
             self._on_touch()

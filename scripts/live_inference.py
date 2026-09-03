@@ -78,10 +78,12 @@ def replay_trial(
     base, head, emg: torch.Tensor, imu: torch.Tensor, onset: int, touch: int,
     minimum_prefix: int, patch_length: int, stride: int, canvas: torch.Tensor,
     target_px: torch.Tensor, maximum_prefix: int | None = None,
+    prediction_delay_samples: int = 0,
 ) -> list[dict]:
     """One causal forward pass per step. Buffer is emg[:cut]/imu[:cut] only."""
     records = []
-    start = max(onset + minimum_prefix, patch_length)
+    movement_history = max(minimum_prefix, int(prediction_delay_samples))
+    start = max(onset + movement_history, patch_length)
     for cut in range(start, touch + 1, stride):
         # The causal invariant this whole function exists to hold: only
         # samples strictly before `cut` are visible at step `cut`.

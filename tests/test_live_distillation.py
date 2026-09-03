@@ -125,6 +125,28 @@ def test_best_ui_adapter_uses_fixed_causal_training_context() -> None:
     assert student.seen[-1][2].sum() == 24
 
 
+def test_replay_can_delay_first_prediction_until_600ms_after_onset() -> None:
+    student = _RecordingStudent()
+    adapter = StudentForwardAdapter(student, context_samples=80)
+    records = replay_trial(
+        adapter,
+        None,
+        torch.randn(120, 4),
+        torch.randn(120, 6),
+        onset=10,
+        touch=119,
+        minimum_prefix=4,
+        patch_length=4,
+        stride=5,
+        canvas=torch.tensor([1000.0, 500.0]),
+        target_px=torch.tensor([500.0, 250.0]),
+        maximum_prefix=80,
+        prediction_delay_samples=60,
+    )
+    assert records[0]["sample"] == 70
+    assert all(record["sample"] >= 70 for record in records)
+
+
 def test_best_ui_regroups_nested_trials_by_selected_session() -> None:
     path = Path(
         "/dataset/dev_a2_vive__abc/nested/export/trial_001.csv"
