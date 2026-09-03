@@ -241,6 +241,8 @@ def _equal_limits(axis: Any, trials: list[dict[str, Any]], reach: float) -> None
             trial["forecast_true_path"],
             trial["followed"]["chain"].reshape(-1, 3),
         ])
+        if "explicit_endpoint" in trial:
+            points.append(np.asarray(trial["explicit_endpoint"])[None, :])
     all_points = np.concatenate(points)
     centre = 0.5 * (all_points.min(axis=0) + all_points.max(axis=0))
     span = max(float(np.ptp(all_points, axis=0).max()), 0.5 * reach)
@@ -289,7 +291,7 @@ def run_viewer(
     )
     (prediction_line,) = arm_axis.plot(
         [], [], [], "--", color="#17A6B6", linewidth=2.2,
-        label="EMG+IMU forecast",
+        label=trials[0].get("prediction_label", "EMG+IMU forecast"),
     )
     (executed_line,) = arm_axis.plot(
         [], [], [], ":", color="#2E8B57", linewidth=2.2,
@@ -305,6 +307,10 @@ def run_viewer(
     (predicted_current,) = arm_axis.plot(
         [], [], [], marker="o", color="#17A6B6", markersize=7, linestyle="None"
     )
+    (endpoint_marker,) = arm_axis.plot(
+        [], [], [], marker="*", color="#8B3FC7", markersize=12,
+        linestyle="None", label="explicit model 3D endpoint",
+    )
     arm_axis.legend(loc="upper left", fontsize=8)
 
     joint_lines = [
@@ -313,18 +319,23 @@ def run_viewer(
     ]
     joint_cursor = joint_axis.axvline(0.0, color="0.25", linewidth=1)
     joint_axis.set_ylabel("joint angle (degrees)")
-    joint_axis.set_xlabel("time from model cutoff (ms)")
+    joint_axis.set_xlabel(
+        trials[0].get("time_axis_label", "time from model cutoff (ms)")
+    )
     joint_axis.set_title("model-driven inverse-kinematics joint trajectory")
     joint_axis.legend(fontsize=8)
 
     (model_error_line,) = error_axis.plot(
-        [], [], color="#17A6B6", label="model forecast vs VIVE"
+        [], [], color="#17A6B6",
+        label=trials[0].get("model_error_label", "model forecast vs VIVE"),
     )
     (ik_error_line,) = error_axis.plot(
         [], [], color="#2E8B57", label="IK/FK vs model request"
     )
     error_cursor = error_axis.axvline(0.0, color="0.25", linewidth=1)
-    error_axis.set_xlabel("time from model cutoff (ms)")
+    error_axis.set_xlabel(
+        trials[0].get("time_axis_label", "time from model cutoff (ms)")
+    )
     error_axis.set_ylabel("3D Euclidean error (cm)")
     error_axis.set_title("trajectory and reachability errors")
     error_axis.legend(fontsize=8)
@@ -361,6 +372,11 @@ def run_viewer(
         _set_line_3d(
             predicted_current, trial["predicted_path"][frame : frame + 1]
         )
+        if "explicit_endpoint" in trial:
+            endpoint = np.asarray(trial["explicit_endpoint"])[None, :]
+            _set_line_3d(endpoint_marker, endpoint)
+        else:
+            _set_line_3d(endpoint_marker, np.empty((0, 3)))
 
         time = trial["time_ms"]
         angles_deg = np.rad2deg(followed["angles"])
@@ -396,13 +412,17 @@ def run_viewer(
             f"{trial['label']} — model-driven trajectory {frame + 1}/{len(time)} — "
             f"{trial['calibration']}"
         )
+        endpoint_text = (
+            f"  |  endpoint/path={trial['endpoint_agreement_cm']:.2f} cm"
+            if "endpoint_agreement_cm" in trial else ""
+        )
         summary.set_text(
             f"EMG+IMU MODEL-DRIVEN IK  |  {range_label}  |  mean model↔VIVE "
             f"{trial['model_error_cm'][1:].mean():.2f} cm  |  "
             f"current={trial['model_error_cm'][frame]:.2f} cm  |  "
             f"model workspace projections={projected}/{len(time)}  |  "
             f"q=[{angles_deg[frame, 0]:.1f}°, {angles_deg[frame, 1]:.1f}°, "
-            f"{angles_deg[frame, 2]:.1f}°]"
+            f"{angles_deg[frame, 2]:.1f}°]{endpoint_text}"
         )
         figure.canvas.draw_idle()
 
