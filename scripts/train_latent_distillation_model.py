@@ -826,6 +826,27 @@ def clone_state(module: torch.nn.Module) -> dict[str, torch.Tensor]:
     return {name: value.detach().cpu().clone() for name, value in module.state_dict().items()}
 
 
+def student_validation_selection(
+    validation: dict[str, float], config: dict[str, Any]
+) -> tuple[str, float]:
+    """Resolve the configured validation metric used for student checkpoints.
+
+    Existing experiments omit this setting and retain ``student_px`` exactly.
+    Experiments with non-screen deployment objectives can expose a named
+    validation composite without overwriting or mislabelling the pixel metric.
+    """
+    metric = str(
+        config.get("distillation", {}).get(
+            "student_selection_metric", "student_px"
+        )
+    )
+    if metric not in validation:
+        raise KeyError(
+            f"student selection metric {metric!r} is absent from validation"
+        )
+    return metric, float(validation[metric])
+
+
 def train_teacher(
     model: WearableLatentDistillationModel,
     train_loader: DataLoader,
@@ -1019,7 +1040,7 @@ def train_student_phase(
     )
     history, best_state = [], clone_state(model)
     best_validation = baseline
-    best = baseline.get("student_px", float("inf"))
+    selection_metric, best = student_validation_selection(baseline, config)
     stale = 0
 
     for epoch in range(1, epochs + 1):
@@ -1074,7 +1095,9 @@ def train_student_phase(
             model, validation_loader, config, context_samples, patch_length,
             evaluation_leads, canvas_tensor, mean_target, device,
         )
-        selection = validation.get("student_px", float("inf"))
+        selection_metric, selection = student_validation_selection(
+            validation, config
+        )
         scheduler.step(selection)
         record = {
             "phase": phase, "epoch": epoch,
@@ -1083,13 +1106,20 @@ def train_student_phase(
             **validation,
         }
         history.append(record)
+        validation_pixel = validation.get("student_px", float("nan"))
+        selection_text = (
+            ""
+            if selection_metric == "student_px"
+            else f" select[{selection_metric}]={selection:.1f}"
+        )
         print(
             f"{phase} epoch={epoch} loss={record['train_loss']:.4f} "
             f"latent={record['train_latent']:.4f} | "
-            f"val student={selection:.1f}px "
+            f"val student={validation_pixel:.1f}px{selection_text} "
             f"teacher={validation.get('teacher_px', float('nan')):.1f}px "
             f"traj={validation.get('student_trajectory_cm', float('nan')):.2f}cm "
-            f"EMG gain={validation.get('without_emg_px', selection) - selection:+.1f}px"
+            f"EMG gain="
+            f"{validation.get('without_emg_px', validation_pixel) - validation_pixel:+.1f}px"
         )
         if selection < best:
             best, stale = selection, 0
