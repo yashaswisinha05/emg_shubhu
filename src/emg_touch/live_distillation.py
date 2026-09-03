@@ -34,6 +34,7 @@ from .models.semantic_residual_distillation import (
 from .models.temporal_cross_attention_distillation import (
     TemporalCrossAttentionDistillationModel,
 )
+from .models.teacher_bridge_distillation import TeacherBridgeDistillationModel
 from .utils import choose_device
 
 
@@ -42,6 +43,10 @@ RAW_IMU_AXES_PER_SENSOR = 6
 
 def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     keys = tuple(state)
+    if any(key.startswith("student.teacher_latent_bridge.") for key in keys) and any(
+        key.startswith("student.endpoint_decoder.") for key in keys
+    ):
+        return "teacher_bridge"
     if any(key.startswith("student.lag_attention.") for key in keys) and any(
         key.startswith("student.emg_from_imu.") for key in keys
     ):
@@ -56,7 +61,8 @@ def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
         return "latent_distillation"
     raise ValueError(
         "unsupported checkpoint architecture; expected a latent-distillation, "
-        "channel+horizon, semantic-residual, or temporal-cross-attention "
+        "channel+horizon, semantic-residual, temporal-cross-attention, or "
+        "teacher-bridge "
         "final.pt/best.pt"
     )
 
@@ -255,7 +261,11 @@ class LiveDistillationModel:
         self.device = choose_device(device)
         emg_dim = emg_feature_count(self.config["data"])
         imu_dim = imu_feature_count(self.config["data"])
-        if self.kind == "temporal_cross_attention":
+        if self.kind == "teacher_bridge":
+            self.model = TeacherBridgeDistillationModel(
+                self.config, emg_dim, imu_dim
+            )
+        elif self.kind == "temporal_cross_attention":
             self.model = TemporalCrossAttentionDistillationModel(
                 self.config, emg_dim, imu_dim
             )
