@@ -27,6 +27,9 @@ from .data.tracked_dataset import (
 from .models.channel_horizon_distillation import (
     ChannelHorizonLatentDistillationModel,
 )
+from .models.complete_reach_distillation import (
+    CompleteReachDistillationModel,
+)
 from .models.latent_distillation import WearableLatentDistillationModel
 from .models.rolling_dual_head_distillation import (
     RollingDualHeadDistillationModel,
@@ -46,6 +49,11 @@ RAW_IMU_AXES_PER_SENSOR = 6
 
 def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     keys = tuple(state)
+    if any(
+        key.startswith("student.endpoint_decoder.endpoint_3d_head.")
+        for key in keys
+    ):
+        return "complete_reach"
     if any(
         key.startswith("student.endpoint_decoder.screen_semantic.")
         for key in keys
@@ -71,7 +79,8 @@ def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     ):
         return "latent_distillation"
     raise ValueError(
-        "unsupported checkpoint architecture; expected a rolling-dual-head, "
+        "unsupported checkpoint architecture; expected a complete-reach, "
+        "rolling-dual-head, "
         "latent-distillation, "
         "channel+horizon, semantic-residual, temporal-cross-attention, or "
         "teacher-bridge "
@@ -273,7 +282,11 @@ class LiveDistillationModel:
         self.device = choose_device(device)
         emg_dim = emg_feature_count(self.config["data"])
         imu_dim = imu_feature_count(self.config["data"])
-        if self.kind == "rolling_dual_head":
+        if self.kind == "complete_reach":
+            self.model = CompleteReachDistillationModel(
+                self.config, emg_dim, imu_dim
+            )
+        elif self.kind == "rolling_dual_head":
             self.model = RollingDualHeadDistillationModel(
                 self.config, emg_dim, imu_dim
             )
@@ -362,6 +375,14 @@ class LiveDistillationModel:
             relative = trajectory[0].detach().cpu().numpy()
             result["trajectory_relative_m"] = relative.tolist()
             result["trajectory_endpoint_relative_m"] = relative[-1].tolist()
+        endpoint_3d = outputs.get("endpoint_3d")
+        if endpoint_3d is not None:
+            result["endpoint_3d_relative_m"] = (
+                endpoint_3d[0].detach().cpu().tolist()
+            )
+            result["complete_trajectory_relative_m"] = result.get(
+                "trajectory_relative_m", []
+            )
         guidance = outputs.get("guidance", {})
         if "horizon_expected_ms" in guidance:
             result["horizon_ms"] = float(
