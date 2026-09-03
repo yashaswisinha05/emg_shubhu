@@ -80,6 +80,7 @@ from emg_touch.data.tracked_dataset import (  # noqa: E402
     CANVAS_COLUMNS,
     build_tracked_loaders,
     emg_feature_count,
+    imu_feature_count,
 )
 from emg_touch.grid_training import grid_point_loss  # noqa: E402
 from emg_touch.models.grid_reach import PointingBottleneckModel  # noqa: E402
@@ -389,7 +390,7 @@ def main() -> None:
         ))
 
     emg_channels = emg_feature_count(config["data"])
-    imu_channels = 6 * len(config["data"].get("sensors", ["S0", "S4", "S8", "S12"]))
+    imu_channels = imu_feature_count(config["data"])
     model = PointingBottleneckModel(config, emg_channels, imu_channels, use_imu).to(device)
 
     # Structural tracker-blindness check, on a real batch from the real

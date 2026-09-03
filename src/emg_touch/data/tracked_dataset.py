@@ -146,6 +146,120 @@ def emg_feature_bank(
     return np.concatenate(features, axis=1).astype(np.float32)
 
 
+def causal_mean(values: np.ndarray, window: int) -> np.ndarray:
+    """Trailing mean that keeps the sign. Never reads a future sample.
+
+    causal_envelope rectifies first, which is right for an EMG envelope and
+    wrong here: the sign of an accelerometer axis IS the direction gravity
+    points along it, and that direction is the whole signal below.
+    """
+    if window <= 1:
+        return values.astype(np.float32)
+    padded = np.concatenate(
+        [np.repeat(values[:1], window - 1, axis=0), values], axis=0
+    )
+    cumulative = np.cumsum(padded, axis=0, dtype=np.float64)
+    cumulative = np.concatenate(
+        [np.zeros((1, values.shape[1])), cumulative], axis=0
+    )
+    return ((cumulative[window:] - cumulative[:-window]) / float(window)).astype(
+        np.float32
+    )
+
+
+def imu_feature_count(data_config: dict[str, Any]) -> int:
+    """IMU channels per timestep, including posture features when enabled."""
+    sensors = len(data_config.get("sensors", ["S0", "S4", "S8", "S12"]))
+    base = 6 * sensors
+    if not data_config.get("imu_posture_features", False):
+        return base
+    pairs = sensors * (sensors - 1) // 2
+    return base + 4 * sensors + pairs
+
+
+def imu_posture_bank(
+    imu: np.ndarray, sample_rate_hz: float, data_config: dict[str, Any]
+) -> np.ndarray:
+    """Gravity-referenced posture, which does not drift.
+
+    Integrating acceleration to find where the arm IS accumulates error
+    without bound - measured directly on this data, dead reckoning drifts
+    ~19 cm over a single reach. But a low-passed accelerometer reads the
+    direction of gravity, and gravity does not drift: it says how each
+    sensor is TILTED, absolutely, at every instant, no integration involved.
+    Limb tilt is exactly the quantity a reach changes, and the model has so
+    far had to discover it for itself from raw acceleration - separating a
+    slow gravity component from fast motion transients, which is a lot to
+    ask of a network with this much data.
+
+    All features are referenced to the trial's own opening rest posture, but
+    they are NOT equally robust to the sensors being re-applied differently
+    between sessions - the objection that motivated per-session IMU centring
+    (see session_imu_statistics). Measured directly, by re-running this
+    function on one recording rotated as if the band had been worn 52 deg
+    around:
+
+      per sensor    tilt change from rest as a 3-vector (ROTATES with the
+                    mounting - 87% of its own scale under that test) plus
+                    the angle of that change (invariant to 3e-06).
+      per pair      the angle between two sensors' gravity directions,
+                    relative to its own resting value (invariant to 3e-07).
+                    If the sensors sit on different segments this is a joint
+                    angle, and joint angles are what forward kinematics turns
+                    into a hand position. If they share a segment it is
+                    near-constant and the model can ignore it at no cost.
+
+    The 3-vectors are kept despite rotating, because direction is what
+    separates a leftward reach from a rightward one and the scalar angles
+    throw exactly that away. This is a real trade, not an oversight: they
+    are dependable within a session and suspect across one. It cannot be
+    fixed by cleverer referencing either - rotation about the gravity axis
+    is unobservable to an accelerometer, so no amount of post-processing
+    recovers it without a magnetometer. The invariant angles are the safe
+    floor; the vectors are the upside; a held-out-session ablation is what
+    settles whether the upside survives.
+
+    The baseline comes from a fixed leading window of the recording, NOT
+    from the detected movement onset: onset is derived from tracker
+    velocity, and a feature built on it would smuggle the tracker into the
+    encoder in wearable mode. A fixed leading window is causal and needs
+    no tracker at all.
+    """
+    sensors = imu.shape[1] // 6
+    window = max(1, int(round(
+        float(data_config.get("posture_lowpass_ms", 400.0)) * sample_rate_hz / 1000.0
+    )))
+    baseline = max(1, int(round(
+        float(data_config.get("posture_baseline_ms", 300.0)) * sample_rate_hz / 1000.0
+    )))
+    baseline = min(baseline, max(1, len(imu) // 4))
+
+    accelerometer = np.concatenate(
+        [imu[:, 6 * s : 6 * s + 3] for s in range(sensors)], axis=1
+    )
+    gravity = causal_mean(accelerometer, window)
+
+    units: list[np.ndarray] = []
+    for sensor in range(sensors):
+        vector = gravity[:, 3 * sensor : 3 * sensor + 3]
+        magnitude = np.linalg.norm(vector, axis=1, keepdims=True)
+        units.append(vector / np.maximum(magnitude, 1e-6))
+
+    features: list[np.ndarray] = []
+    for unit in units:
+        reference = unit[:baseline].mean(axis=0, keepdims=True)
+        reference = reference / max(float(np.linalg.norm(reference)), 1e-6)
+        cosine = np.clip((unit * reference).sum(axis=1), -1.0, 1.0)
+        features.append(unit - reference)
+        features.append(np.arccos(cosine)[:, None])
+    for first in range(sensors):
+        for second in range(first + 1, sensors):
+            cosine = np.clip((units[first] * units[second]).sum(axis=1), -1.0, 1.0)
+            angle = np.arccos(cosine)
+            features.append((angle - angle[:baseline].mean())[:, None])
+    return np.concatenate(features, axis=1).astype(np.float32)
+
+
 def movement_onset(speed: np.ndarray, fraction: float = 0.05) -> int:
     """First index where speed passes a fraction of the trial's peak.
 
@@ -209,6 +323,12 @@ def preprocess_tracked_trial(
 
     raw_rate = len(perf) / max(perf[-1] - perf[0], 1e-9)
     emg = emg_feature_bank(np.nan_to_num(emg_raw), raw_rate, data_config)
+    # Built at the raw rate, before decimation, so the gravity low-pass sees
+    # every sample it is averaging over.
+    if data_config.get("imu_posture_features", False):
+        imu = np.concatenate(
+            [imu, imu_posture_bank(np.nan_to_num(imu), raw_rate, data_config)], axis=1
+        )
 
     decimation = max(1, int(data_config.get("decimation", 10)))
     index = np.arange(0, len(perf), decimation)
@@ -372,6 +492,13 @@ class TrackedTrajectoryDataset(Dataset):
                     "decimation", "emg_envelope_ms", "emg_feature_windows_ms",
                     "emg_feature_kinds", "tracker_max_sync_error_ms", "sensors",
                     "emg_column_template", "tracker_id",
+                    # Posture features change the IMU channel count. Omitting
+                    # these would let a stale cache hand back arrays of the
+                    # old width against an encoder built for the new one -
+                    # the same class of silent staleness that already cost
+                    # this project a debugging session over a missing canvas.
+                    "imu_posture_features", "posture_lowpass_ms",
+                    "posture_baseline_ms",
                 }
             )
         )

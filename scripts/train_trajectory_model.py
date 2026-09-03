@@ -60,13 +60,16 @@ class TrajectoryEncoder(torch.nn.Module):
         super().__init__()
         data = config["data"]
         model = config["model"]
-        from emg_touch.data.tracked_dataset import emg_feature_count
+        from emg_touch.data.tracked_dataset import (
+            emg_feature_count,
+            imu_feature_count,
+        )
 
         width = int(model["d_model"])
         emg_channels = emg_feature_count(data)
         # Derived EMG features increase EMG width but do not create more IMU
         # channels; IMU remains six axes for each physical sensor.
-        imu_channels = 6 * len(data.get("sensors", ["S0", "S4", "S8", "S12"]))
+        imu_channels = imu_feature_count(data)
         self.separate_modalities = bool(model.get("separate_modality_encoders", False))
         self.imu_dropout = float(model.get("imu_modality_dropout", 0.0))
         if self.separate_modalities:
