@@ -140,7 +140,81 @@ class GridReachModel(nn.Module):
         )
         outputs = {**raw, **decoded}
         finalize_point_prediction(outputs)
+        # Exposed so an uncertainty head can read the same representation
+        # the point prediction came from without re-encoding - see
+        # UncertaintyHead below.
+        outputs["context"] = context
         return outputs
+
+
+class UncertaintyHead(nn.Module):
+    """Heteroscedastic (mu, sigma) on TOP of a proven point predictor.
+
+    This project already tried a real VAE on this task once
+    (PointingIntentVAE): an encoder producing mu/sigma of a SAMPLED LATENT,
+    decoded through the point head, trained with reconstruction + KL. It
+    reached 426 px, worse than this project's plain deterministic model at
+    406 px, and the diagnosed mechanism was specific: KL's own gradient
+    pushes sigma back toward the N(0,I) prior's 1.0 whenever reconstruction
+    does not fight hard enough to keep it small, and sigma drifted from a
+    0.135 init to 0.5-0.9 - injecting real, growing noise into the decoder
+    on every single training step. That VAE was removed at the point this
+    project's number was still 406 px; the number now, with the lead-window
+    fix, is 176 px. Reintroducing a sampled latent onto a working 176 px
+    model risks exactly that same failure mode, for the same mathematical
+    reason, regardless of what changed elsewhere - KL-to-a-fixed-prior does
+    not become safer because the rest of the pipeline improved.
+
+    What "mu and sigma at every instant" needs is uncertainty on the POINT
+    PREDICTION itself, which does not require sampling anything. This head
+    predicts (log sigma_x, log sigma_y) - NOT a resampled mu - from the same
+    context the proven model already computed, trained by Gaussian negative
+    log-likelihood against the FROZEN base model's own prediction.
+
+    A second, more specific precedent than the VAE one, from this project's
+    own SpatialPointHead (grid_point.py): it already carries an inert
+    log_sigma branch, added once, that reads the shared trunk's hidden state
+    detached (self.log_sigma(hidden.detach())) precisely because sigma
+    trained jointly leaked into mu anyway - detaching mu's VALUE inside the
+    NLL loss checked clean on direct.weight.grad in isolation, but a real
+    35-epoch run still measured a real regression (184 -> 204 px), one level
+    upstream of what that check looked at. The likely mechanism: a shared
+    optimizer step and a shared gradient-clip norm couple every trainable
+    parameter together even when one loss term's OWN gradient into a given
+    weight is exactly zero. Detaching a value or even a hidden tensor does
+    not close that door - only not being in the optimizer's parameter list
+    at all does. That is what freezing the whole base model here buys, and
+    it is why this is a separate module reading a value with no grad_fn
+    (base runs under torch.no_grad(), belt and suspenders) rather than a
+    branch bolted onto the live head: nothing about this head's training can
+    touch the 176 px model's weights, not through any pathway, because none
+    of its parameters are ever in this script's optimizer at all.
+    """
+
+    def __init__(self, context_dim: int, hidden: int = 64, minimum_sigma: float = 1e-3) -> None:
+        super().__init__()
+        self.minimum_sigma = minimum_sigma
+        self.net = nn.Sequential(
+            nn.LayerNorm(context_dim), nn.Linear(context_dim, hidden), nn.GELU(),
+            nn.Linear(hidden, 2),
+        )
+        # log_sigma starts near 0 (sigma~1, normalised-coordinate units) so
+        # early NLL gradients are stable rather than starting saturated.
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, context: torch.Tensor) -> torch.Tensor:
+        log_sigma = self.net(context)
+        return torch.nn.functional.softplus(log_sigma) + self.minimum_sigma
+
+
+def gaussian_nll_loss(
+    mu: torch.Tensor, sigma: torch.Tensor, target: torch.Tensor
+) -> torch.Tensor:
+    """Per-axis Gaussian NLL, mu detached - only sigma's parameters get gradient."""
+    mu = mu.detach()
+    variance = sigma.pow(2)
+    return (0.5 * ((target - mu).pow(2) / variance + variance.log())).sum(-1).mean()
 
 
 class PointingBottleneckModel(nn.Module):
