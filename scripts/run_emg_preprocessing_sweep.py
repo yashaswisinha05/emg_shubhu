@@ -190,7 +190,7 @@ def main() -> None:
     )
     summary = {
         "variants": collected,
-        "winner_by_student_px": winner,
+        "winner_by_validation_student_px": winner,
         "failures": failures,
     }
     with (root_output / "summary.json").open("w", encoding="utf-8") as handle:
