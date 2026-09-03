@@ -40,6 +40,7 @@ from .models.task_separated_complete_reach import (
 from .models.deterministic_complete_reach import (
     DeterministicCompleteReachModel,
 )
+from .models.asymmetric_intent_motion import AsymmetricIntentMotionModel
 from .models.latent_distillation import WearableLatentDistillationModel
 from .models.rolling_dual_head_distillation import (
     RollingDualHeadDistillationModel,
@@ -59,6 +60,11 @@ RAW_IMU_AXES_PER_SENSOR = 6
 
 def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     keys = tuple(state)
+    if any(
+        key.startswith("student.asymmetric_motion_heads.correction_adapter.")
+        for key in keys
+    ):
+        return "asymmetric_intent_motion"
     if any(
         key.startswith("student.deterministic_heads.correction_adapter.")
         for key in keys
@@ -109,7 +115,8 @@ def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     ):
         return "latent_distillation"
     raise ValueError(
-        "unsupported checkpoint architecture; expected a deterministic, task-separated, "
+        "unsupported checkpoint architecture; expected an asymmetric intent-motion, "
+        "deterministic, task-separated, "
         "monotonic, direction-aware complete-reach, complete-reach, "
         "rolling-dual-head, "
         "latent-distillation, "
@@ -313,7 +320,11 @@ class LiveDistillationModel:
         self.device = choose_device(device)
         emg_dim = emg_feature_count(self.config["data"])
         imu_dim = imu_feature_count(self.config["data"])
-        if self.kind == "deterministic_complete_reach":
+        if self.kind == "asymmetric_intent_motion":
+            self.model = AsymmetricIntentMotionModel(
+                self.config, emg_dim, imu_dim
+            )
+        elif self.kind == "deterministic_complete_reach":
             self.model = DeterministicCompleteReachModel(
                 self.config, emg_dim, imu_dim
             )
