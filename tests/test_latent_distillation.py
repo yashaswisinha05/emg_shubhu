@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -8,6 +9,7 @@ import torch
 from scripts.train_latent_distillation_model import (
     AdaptiveTrialDifficulty,
     make_distillation_window,
+    select_sessions,
     student_objective,
 )
 from emg_touch.models.latent_distillation import (
@@ -181,3 +183,23 @@ def test_adaptive_sampler_upweights_hard_trials_with_a_cap() -> None:
     weights = memory.weights_for(["easy.csv", "hard.csv"])
     assert weights[1] > weights[0]
     assert float(weights.max()) <= 4.0
+
+
+def test_session_selection_keeps_only_requested_dev_a_folders() -> None:
+    sessions = {
+        "dev_a1_vive__first": [Path("a1/trial_1.csv")],
+        "dev_a2_vive__second": [Path("a2/trial_1.csv")],
+        "dev_a3_vive__third": [Path("a3/trial_1.csv")],
+        "dev_a4_vive__fourth": [Path("a4/trial_1.csv")],
+        "dev_b1_vive__excluded": [Path("b1/trial_1.csv")],
+        "dev_mix1_vive__excluded": [Path("mix1/trial_1.csv")],
+    }
+    selected = select_sessions(
+        sessions, ["dev_a1", "dev_a2", "dev_a3", "dev_a4"]
+    )
+    assert set(selected) == {
+        "dev_a1_vive__first",
+        "dev_a2_vive__second",
+        "dev_a3_vive__third",
+        "dev_a4_vive__fourth",
+    }

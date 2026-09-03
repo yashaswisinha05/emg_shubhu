@@ -19,6 +19,10 @@ data:
   imu_posture_features: true
   posture_lowpass_ms: 400.0
   posture_baseline_ms: 300.0
+  # Only these four session folders enter preprocessing, normalization,
+  # splitting, training, validation, and testing. Each value is matched
+  # against the beginning of the folder name, before its hash/timestamp.
+  include_session_prefixes: ["dev_a1", "dev_a2", "dev_a3", "dev_a4"]
   # Match the current VAE-discriminator experiment for an architecture-only
   # comparison. Use split_by: session for the final cross-session claim.
   split_by: "trial"

@@ -46,9 +46,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from emg_touch.config import load_config  # noqa: E402
 from emg_touch.data.tracked_dataset import (  # noqa: E402
     CANVAS_COLUMNS,
-    build_tracked_loaders,
+    TrackedTrajectoryDataset,
+    collate_tracked,
+    discover_trials,
     emg_feature_count,
     imu_feature_count,
+    session_emg_scale,
+    session_imu_statistics,
+    split_sessions,
 )
 from emg_touch.grid_training import grid_point_loss  # noqa: E402
 from emg_touch.models.latent_distillation import (  # noqa: E402
@@ -86,6 +91,98 @@ def effective_rate(config: dict[str, Any]) -> float:
 
 def milliseconds_to_samples(milliseconds: float, rate: float) -> int:
     return max(1, int(round(float(milliseconds) * rate / 1000.0)))
+
+
+def select_sessions(
+    sessions: dict[str, list[Path]], prefixes: list[str] | tuple[str, ...]
+) -> dict[str, list[Path]]:
+    """Restrict this experiment to explicitly named session prefixes."""
+    cleaned = tuple(
+        str(prefix).strip().lower()
+        for prefix in prefixes
+        if str(prefix).strip()
+    )
+    if not cleaned:
+        return sessions
+    selected = {
+        name: trials
+        for name, trials in sessions.items()
+        if any(name.lower().startswith(prefix) for prefix in cleaned)
+    }
+    missing = [
+        prefix
+        for prefix in cleaned
+        if not any(name.lower().startswith(prefix) for name in sessions)
+    ]
+    if missing:
+        raise ValueError(
+            "session prefix(es) matched no dataset folder: " + ", ".join(missing)
+        )
+    if len(selected) < 3:
+        raise ValueError(
+            f"session selection retained only {len(selected)} session(s); "
+            "at least three are required for train/validation/test splits"
+        )
+    return selected
+
+
+def build_experiment_loaders(
+    config: dict[str, Any], root: str | Path, cache_dir: str | Path | None
+) -> tuple[DataLoader, DataLoader, DataLoader]:
+    """Build loaders after filtering, including normalization statistics.
+
+    This local loader keeps the selection isolated to the new experiment.
+    Excluded sessions are not used for splitting, EMG scaling, IMU
+    normalization, or sampling.
+    """
+    sessions = discover_trials(root)
+    if not sessions:
+        raise ValueError(f"no trial_*.csv found under {root}")
+    prefixes = list(config["data"].get("include_session_prefixes", []))
+    sessions = select_sessions(sessions, prefixes)
+    train, validation, test = split_sessions(sessions, config)
+    session_index = {name: index for index, name in enumerate(sorted(sessions))}
+
+    scales: dict[str, np.ndarray] = {}
+    if bool(config["data"].get("emg_session_normalise", True)):
+        for name, trials in sessions.items():
+            scale = session_emg_scale(trials, config["data"])
+            if scale is not None:
+                scales[name] = scale
+
+    imu_statistics: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    if bool(config["data"].get("imu_session_normalise", True)):
+        for name, trials in sessions.items():
+            found = session_imu_statistics(trials, config["data"])
+            if found is not None:
+                imu_statistics[name] = found
+
+    config.setdefault("virtual_leader", {})["session_count"] = len(session_index)
+    batch_size = int(config["training"].get("batch_size", 16))
+    workers = int(config["training"].get("num_workers", 0))
+
+    def loader(trials: list[Path], shuffle: bool) -> DataLoader:
+        dataset = TrackedTrajectoryDataset(
+            trials,
+            config["data"],
+            Path(cache_dir) if cache_dir else None,
+            session_index,
+        )
+        dataset.emg_scales = scales
+        dataset.imu_statistics = imu_statistics
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=workers,
+            collate_fn=collate_tracked,
+            drop_last=False,
+        )
+
+    print("selected dataset sessions:")
+    for name, trials in sorted(sessions.items()):
+        print(f"  {name}: {len(trials)} trials")
+    return loader(train, True), loader(validation, False), loader(test, False)
 
 
 def make_distillation_window(
@@ -814,6 +911,11 @@ def main() -> None:
     parser.add_argument(
         "--lead-window-ms", type=float, nargs=2, metavar=("MIN", "MAX")
     )
+    parser.add_argument(
+        "--session-prefixes",
+        nargs="+",
+        help="Override data.include_session_prefixes (for example dev_a1 dev_a2)",
+    )
     parser.add_argument("--no-adaptive-sampling", action="store_true")
     args = parser.parse_args()
 
@@ -828,11 +930,13 @@ def main() -> None:
         config["distillation"]["finetune_epochs"] = args.finetune_epochs
     if args.lead_window_ms is not None:
         config["distillation"]["lead_window_ms"] = list(args.lead_window_ms)
+    if args.session_prefixes is not None:
+        config["data"]["include_session_prefixes"] = args.session_prefixes
 
     seed = int(config.get("seed", 42))
     seed_everything(seed)
     device = choose_device(args.device)
-    train_loader, validation_loader, test_loader = build_tracked_loaders(
+    train_loader, validation_loader, test_loader = build_experiment_loaders(
         config, args.root, Path(args.cache_dir)
     )
     rate = effective_rate(config)
