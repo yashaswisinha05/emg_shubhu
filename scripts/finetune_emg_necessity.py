@@ -163,6 +163,15 @@ def main() -> None:
                         "selectivity regulariser on.")
     parser.add_argument("--channel-smoothness-weight", type=float, default=0.01)
     parser.add_argument("--no-adaptive-sampling", action="store_true")
+    parser.add_argument("--freeze-decoder", action="store_true",
+                        help="Keep the shared decoder exactly as the checkpoint left "
+                        "it, letting only the student encoder + channel gate adapt. "
+                        "The decoder was shaped by ~12 loss terms over 75 prior "
+                        "epochs; a first run with the decoder unfrozen (matching the "
+                        "original pipeline's own 'finetune' convention) made "
+                        "validation worse every epoch and was fully reverted by "
+                        "train_student_phase's own safeguard - try this flag first "
+                        "if that happens again.")
     args = parser.parse_args()
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
@@ -236,13 +245,17 @@ def main() -> None:
         max_ratio=float(adaptive_settings.get("max_ratio", 4.0)),
     )
 
+    if args.freeze_decoder:
+        print("decoder FROZEN for this run - only the student encoder + channel "
+              "gate adapt")
+
     # Exactly one call, exactly like the phases in the pipeline this builds
     # on - see module docstring for why per-epoch calls were rejected.
     history, _, _ = base.train_student_phase(
         "emg_necessity", model, train_loader, validation_loader, config,
         args.epochs, context_samples, int(model_config["patch_length"]), lead_window,
         evaluation_leads, canvas_tensor, mean_target, device, output,
-        difficulty, adaptive, unfreeze_decoder=True,
+        difficulty, adaptive, unfreeze_decoder=not args.freeze_decoder,
     )
 
     test = base.evaluate(
@@ -256,6 +269,32 @@ def main() -> None:
     if "student_px" in test and "without_emg_px" in test:
         gap = test["without_emg_px"] - test["student_px"]
         print(f"\n  remove EMG gap: {gap:+.1f} px (compare to +25.5 px before this run)")
+
+    # train_student_phase silently reverts to the incoming checkpoint if no
+    # epoch ever beat its baseline validation score - which happened on the
+    # first real run of this script and was easy to miss (the final numbers
+    # looked "unchanged" rather than "reverted"). Made explicit here instead
+    # of leaving it to be noticed by comparing numbers by hand.
+    starting_student_px = checkpoint.get("test", {}).get("student_px")
+    if starting_student_px is not None and "student_px" in test:
+        if abs(test["student_px"] - starting_student_px) < 0.05:
+            suggestion = (
+                "a lower --necessity-weight (this run already used --freeze-decoder)"
+                if args.freeze_decoder else
+                "--freeze-decoder and/or a lower --necessity-weight"
+            )
+            print(f"\n  NOTE: final student_px ({test['student_px']:.1f}px) matches "
+                  f"the loaded checkpoint's own ({starting_student_px:.1f}px) almost "
+                  "exactly. train_student_phase's built-in safeguard reverts to the "
+                  "incoming checkpoint whenever no epoch beats its baseline "
+                  "validation score - this run likely never improved on it and was "
+                  "fully discarded, not merely unchanged. Check the per-epoch "
+                  "'val student=' lines above: if every one is worse than "
+                  f"{starting_student_px:.1f}px, that confirms it. Try {suggestion}.")
+        else:
+            print(f"\n  student_px moved from {starting_student_px:.1f}px "
+                  f"(checkpoint) to {test['student_px']:.1f}px (this run) - the "
+                  "fine-tuning was NOT reverted.")
 
     save_json({"config": config, "history": history, "test": test}, output / "results.json")
     torch.save({"model_state": model.state_dict(), "config": config, "test": test},
