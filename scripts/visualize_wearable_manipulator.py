@@ -215,6 +215,7 @@ def run_viewer(
     manipulator: ThreeRManipulator,
     output_dir: Path,
     show: bool,
+    save_gif: bool,
 ) -> None:
     import matplotlib
 
@@ -285,7 +286,7 @@ def run_viewer(
     error_axis.set_title("trajectory and reachability errors")
     error_axis.legend(fontsize=8)
 
-    state = {"trial": 0, "frame": 0, "playing": False}
+    state = {"trial": 0, "frame": 0, "playing": bool(show)}
     trial_slider_axis = figure.add_axes((0.12, 0.09, 0.30, 0.028))
     frame_slider_axis = figure.add_axes((0.12, 0.045, 0.55, 0.028))
     play_axis = figure.add_axes((0.73, 0.075, 0.08, 0.05))
@@ -298,7 +299,7 @@ def run_viewer(
         frame_slider_axis, "IK step", 0,
         max(0, len(trials[0]["time_ms"]) - 1), valinit=0, valstep=1,
     )
-    play_button = Button(play_axis, "Play")
+    play_button = Button(play_axis, "Pause" if show else "Play")
     next_button = Button(next_axis, "Next trial")
 
     summary = figure.text(0.51, 0.965, "", ha="center", va="center", fontsize=9)
@@ -307,9 +308,11 @@ def run_viewer(
         trial = trials[state["trial"]]
         frame = min(state["frame"], len(trial["time_ms"]) - 1)
         followed = trial["followed"]
-        _set_line_3d(true_line, trial["true_path"])
-        _set_line_3d(prediction_line, trial["predicted_path"])
-        _set_line_3d(executed_line, followed["chain"][:, -1])
+        # Grow all three paths with time.  Drawing the complete paths before
+        # frame zero made the old view look static even while the arm moved.
+        _set_line_3d(true_line, trial["true_path"][: frame + 1])
+        _set_line_3d(prediction_line, trial["predicted_path"][: frame + 1])
+        _set_line_3d(executed_line, followed["chain"][: frame + 1, -1])
         _set_line_3d(arm_line, followed["chain"][frame])
         _set_line_3d(true_current, trial["true_path"][frame : frame + 1])
         _set_line_3d(
@@ -319,13 +322,17 @@ def run_viewer(
         time = trial["time_ms"]
         angles_deg = np.rad2deg(followed["angles"])
         for index, line in enumerate(joint_lines):
-            line.set_data(time, angles_deg[:, index])
+            line.set_data(time[: frame + 1], angles_deg[: frame + 1, index])
         joint_axis.relim()
         joint_axis.autoscale_view()
         joint_cursor.set_xdata([time[frame], time[frame]])
 
-        model_error_line.set_data(time, trial["model_error_cm"])
-        ik_error_line.set_data(time, trial["ik_error_cm"])
+        model_error_line.set_data(
+            time[: frame + 1], trial["model_error_cm"][: frame + 1]
+        )
+        ik_error_line.set_data(
+            time[: frame + 1], trial["ik_error_cm"][: frame + 1]
+        )
         error_axis.relim()
         error_axis.autoscale_view()
         error_cursor.set_xdata([time[frame], time[frame]])
@@ -364,6 +371,8 @@ def run_viewer(
 
     def next_trial(_: Any) -> None:
         trial_slider.set_val((state["trial"] + 1) % len(trials))
+        state["playing"] = True
+        play_button.label.set_text("Pause")
 
     def timer_step() -> None:
         if not state["playing"]:
@@ -394,9 +403,32 @@ def run_viewer(
             output_dir / f"manipulator_{index:02d}_{trial['label']}.png",
             dpi=130,
         )
+        if save_gif:
+            from matplotlib.animation import FuncAnimation, PillowWriter
+
+            def gif_frame(frame: int, trial_index: int = index) -> None:
+                state["trial"] = trial_index
+                state["frame"] = frame
+                redraw()
+
+            animation = FuncAnimation(
+                figure,
+                gif_frame,
+                frames=len(trial["time_ms"]),
+                interval=140,
+                repeat=True,
+                blit=False,
+            )
+            animation.save(
+                output_dir / f"manipulator_{index:02d}_{trial['label']}.gif",
+                writer=PillowWriter(fps=8),
+                dpi=100,
+            )
     state["trial"], state["frame"] = original_trial, original_frame
     redraw()
     print(f"wrote {len(trials)} manipulator snapshot(s) to {output_dir.resolve()}")
+    if save_gif:
+        print(f"wrote {len(trials)} model+IK animated GIF(s)")
     if show:
         plt.show()
     else:
@@ -430,6 +462,10 @@ def main() -> None:
         metavar=("SX", "SY", "SZ"),
     )
     parser.add_argument("--output-dir", default="runs/wearable_manipulator")
+    parser.add_argument(
+        "--save-gif", action="store_true",
+        help="Also export an animated GIF for every selected trial",
+    )
     parser.add_argument("--no-show", action="store_true")
     args = parser.parse_args()
     if args.num_trials < 1:
@@ -484,6 +520,7 @@ def main() -> None:
         manipulator,
         Path(args.output_dir),
         show=not args.no_show,
+        save_gif=args.save_gif,
     )
 
 
