@@ -558,6 +558,7 @@ def fit_training_emg_pca(
     trials: list[Path],
     data_config: dict[str, Any],
     session_scales: dict[str, np.ndarray],
+    trial_sessions: dict[str, str] | None = None,
 ) -> None:
     """Fit sensor-local PCA on normalized training trials and store it in config."""
     requested = data_config.get("emg_pca_components_per_sensor")
@@ -582,7 +583,11 @@ def fit_training_emg_pca(
         if data is None or "emg" not in data:
             continue
         block = data["emg"]
-        scale = session_scales.get(path.parent.name)
+        session = (
+            trial_sessions.get(str(path), path.parent.name)
+            if trial_sessions is not None else path.parent.name
+        )
+        scale = session_scales.get(session)
         if scale is not None:
             block = block / scale
         collected.append(block)
@@ -657,6 +662,7 @@ class TrackedTrajectoryDataset(Dataset):
         data_config: dict[str, Any],
         cache_dir: Path | None = None,
         session_index: dict[str, int] | None = None,
+        apply_emg_pca: bool = True,
     ) -> None:
         self.trials = list(trials)
         # Session identity, for the adversarial participant-invariance term.
@@ -664,6 +670,7 @@ class TrackedTrajectoryDataset(Dataset):
         # train and validation agree on what index a session has.
         self.session_index = session_index or {}
         self.data_config = data_config
+        self.apply_emg_pca = bool(apply_emg_pca)
         # Per-session EMG scales, filled by build_tracked_loaders. Each
         # session is normalised by its own amplitude, which is what makes the
         # channels comparable across participants.
@@ -729,7 +736,7 @@ class TrackedTrajectoryDataset(Dataset):
         scale = self.emg_scales.get(path.parent.name)
         if scale is not None and "emg" in result:
             result["emg"] = result["emg"] / torch.from_numpy(scale)
-        if "emg" in result:
+        if "emg" in result and self.apply_emg_pca:
             result["emg"] = torch.from_numpy(
                 apply_sensor_local_pca(result["emg"].numpy(), self.data_config)
             )

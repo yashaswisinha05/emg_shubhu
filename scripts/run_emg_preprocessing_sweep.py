@@ -95,7 +95,7 @@ def main() -> None:
         Path(__file__).resolve().parent
         / "train_semantic_residual_distillation_model.py"
     )
-    collected: dict[str, list[dict[str, float]]] = {}
+    collected: dict[str, list[dict[str, Any]]] = {}
     failures: list[str] = []
 
     for variant in args.variants:
@@ -137,39 +137,56 @@ def main() -> None:
                 failures.append(run_name)
                 continue
             with results_path.open("r", encoding="utf-8") as handle:
-                test = json.load(handle).get("test", {})
-            collected.setdefault(variant, []).append(test)
+                payload = json.load(handle)
+            test = payload.get("test", {})
+            validation_values = [
+                float(record["student_px"])
+                for record in payload.get("history", [])
+                if record.get("phase") in {"student", "finetune"}
+                and "student_px" in record
+            ]
+            if not validation_values:
+                failures.append(f"{run_name} (missing validation history)")
+                continue
+            collected.setdefault(variant, []).append({
+                "validation_student_px": min(validation_values),
+                "test": test,
+            })
 
     if not collected:
         raise SystemExit("no preprocessing run produced results")
-    print("\n=== held-out preprocessing comparison (mean±SD across seeds) ===")
+    print("\n=== preprocessing comparison (mean±SD across seeds) ===")
     print(
-        f"{'variant':19} {'student px':>13} {'EMG-only':>13} "
+        f"{'variant':19} {'val student':>13} {'test student':>13} "
+        f"{'EMG-only':>13} "
         f"{'remove EMG':>13} {'shuffle EMG':>13} {'residual':>11}"
     )
-    print("-" * 88)
+    print("-" * 104)
     rows = []
     for variant, runs in collected.items():
-        student = [float(run["student_px"]) for run in runs]
-        emg_only = [float(run["emg_only_px"]) for run in runs]
+        validation = [float(run["validation_student_px"]) for run in runs]
+        tests = [run["test"] for run in runs]
+        student = [float(run["student_px"]) for run in tests]
+        emg_only = [float(run["emg_only_px"]) for run in tests]
         remove = [
-            float(run["without_emg_px"] - run["student_px"]) for run in runs
+            float(run["without_emg_px"] - run["student_px"]) for run in tests
         ]
         shuffled = [
             float(run["shuffled_emg_px"] - run["student_px"])
-            for run in runs if "shuffled_emg_px" in run
+            for run in tests if "shuffled_emg_px" in run
         ]
-        residual = [float(run.get("residual_gain_px", 0.0)) for run in runs]
-        rows.append((statistics.mean(student), variant))
+        residual = [float(run.get("residual_gain_px", 0.0)) for run in tests]
+        rows.append((statistics.mean(validation), variant))
         print(
-            f"{variant:19} {_mean_std(student):>13} {_mean_std(emg_only):>13} "
+            f"{variant:19} {_mean_std(validation):>13} {_mean_std(student):>13} "
+            f"{_mean_std(emg_only):>13} "
             f"{_mean_std(remove):>13} {_mean_std(shuffled):>13} "
             f"{_mean_std(residual):>11}"
         )
     winner = min(rows)[1]
     print(
-        f"\nlowest mean student error: {winner}. Confirm it also has positive "
-        "remove/shuffle EMG contributions before adopting it."
+        f"\nlowest mean validation error: {winner}. Its test result is the "
+        "confirmation number; also require positive remove/shuffle EMG effects."
     )
     summary = {
         "variants": collected,

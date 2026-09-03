@@ -47,9 +47,11 @@ from emg_touch.config import load_config  # noqa: E402
 from emg_touch.data.tracked_dataset import (  # noqa: E402
     CANVAS_COLUMNS,
     TrackedTrajectoryDataset,
+    apply_sensor_local_pca,
     collate_tracked,
     discover_trials,
     emg_feature_count,
+    fit_training_emg_pca,
     imu_feature_count,
     session_emg_scale,
     session_imu_statistics,
@@ -169,7 +171,13 @@ class ExperimentTrackedTrajectoryDataset(TrackedTrajectoryDataset):
     ) -> None:
         # Leave the base normalization maps empty; __getitem__ applies the
         # correct ancestor-session maps after loading cached raw features.
-        super().__init__(trials, data_config, cache_dir, session_index={})
+        super().__init__(
+            trials,
+            data_config,
+            cache_dir,
+            session_index={},
+            apply_emg_pca=False,
+        )
         self.trial_sessions = trial_sessions
         self.experiment_session_index = session_index
         self.experiment_emg_scales = emg_scales
@@ -184,6 +192,9 @@ class ExperimentTrackedTrajectoryDataset(TrackedTrajectoryDataset):
         scale = self.experiment_emg_scales.get(session)
         if scale is not None:
             result["emg"] = result["emg"] / torch.from_numpy(scale)
+        result["emg"] = torch.from_numpy(
+            apply_sensor_local_pca(result["emg"].numpy(), self.data_config)
+        )
         statistics = self.experiment_imu_statistics.get(session)
         if statistics is not None:
             centre, spread = statistics
@@ -220,6 +231,9 @@ def build_experiment_loaders(
             scale = session_emg_scale(trials, config["data"])
             if scale is not None:
                 scales[name] = scale
+    fit_training_emg_pca(
+        train, config["data"], scales, trial_sessions=trial_sessions
+    )
 
     imu_statistics: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     if bool(config["data"].get("imu_session_normalise", True)):

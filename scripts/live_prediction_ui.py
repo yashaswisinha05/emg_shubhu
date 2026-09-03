@@ -35,6 +35,7 @@ import importlib.util
 import random
 import sys
 from pathlib import Path
+from typing import Any, Callable
 
 import torch
 
@@ -92,15 +93,32 @@ QPushButton:hover {
 class PredictionReplayWindow(QMainWindow):
     """Red target at the true touch point; cyan marker tracks the model live."""
 
-    def __init__(self, trials: list[Path], model, config, device) -> None:
+    def __init__(
+        self,
+        trials: list[Path],
+        model,
+        config,
+        device,
+        speed: float = 1.0,
+        trial_loader: Callable[[Path], dict[str, Any] | None] | None = None,
+        window_title: str = "Live Prediction Replay",
+        maximum_prefix: int | None = None,
+    ) -> None:
         super().__init__()
-        self.setWindowTitle("Live Prediction Replay")
+        self.setWindowTitle(window_title)
         self.setStyleSheet(DARK_STYLE)
         self.trials = trials
         self.trial_index = -1
         self.model = model
         self.config = config
         self.device = device
+        if speed <= 0.0:
+            raise ValueError("speed must be positive")
+        self.speed = float(speed)
+        self.trial_loader = trial_loader or (
+            lambda path: preprocess_tracked_trial(path, self.config["data"])
+        )
+        self.maximum_prefix = maximum_prefix
         self.btn_size = 80
         self.marker_size = 36
         self.records: list[dict] = []
@@ -218,7 +236,7 @@ class PredictionReplayWindow(QMainWindow):
         if self.trial_index < 0:
             self.trial_index = 0
         path = self.trials[self.trial_index]
-        data = preprocess_tracked_trial(path, self.config["data"])
+        data = self.trial_loader(path)
         if data is None or "screen_target" not in data or "canvas" not in data:
             self.trial_label.setText(f"Trial {self.trial_index + 1}: unusable, skipping")
             QTimer.singleShot(0, self.start_next_trial)
@@ -241,6 +259,7 @@ class PredictionReplayWindow(QMainWindow):
         self.records = replay_trial(
             self.model, None, emg, imu, onset, touch, minimum_prefix, patch_length,
             stride, canvas.to(self.device), target_px.to(self.device),
+            maximum_prefix=self.maximum_prefix,
         )
         if not self.records:
             self.trial_label.setText(f"Trial {self.trial_index + 1}: too short, skipping")
@@ -264,7 +283,7 @@ class PredictionReplayWindow(QMainWindow):
             f"({len(self.records)} predictions)"
         )
         self.playback_index = 0
-        self.playback_timer.start(int(stride_ms))
+        self.playback_timer.start(max(1, int(round(stride_ms / self.speed))))
 
     def _advance_playback(self) -> None:
         if self.playback_index >= len(self.records):
@@ -334,7 +353,9 @@ def main() -> None:
     print(f"loaded {args.checkpoint} | {len(trials)} trial(s) found | device={device}")
 
     app = QApplication(sys.argv)
-    window = PredictionReplayWindow(trials, model, config, device)
+    window = PredictionReplayWindow(
+        trials, model, config, device, speed=args.speed
+    )
     window.resize(1100, 720)
     window.show()
     window.start_next_trial()

@@ -5,7 +5,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch import nn
 
+from scripts.live_best_model_ui import StudentForwardAdapter, _session_owner
+from scripts.live_inference import replay_trial
 from scripts.run_live_distillation_ui import LiveApplication, parse_checkpoint
 from tests.test_channel_horizon_distillation import _enhanced_config
 from emg_touch.live_distillation import (
@@ -81,6 +84,55 @@ def test_semantic_residual_checkpoint_loads_in_live_runner() -> None:
         )
         runner = LiveDistillationModel("Semantic residual", checkpoint, "cpu")
         assert runner.kind == "semantic_residual"
+
+
+class _RecordingStudent(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+
+    def student_forward(
+        self, emg: torch.Tensor, imu: torch.Tensor, time_mask: torch.Tensor,
+        sample: bool = False,
+    ) -> dict[str, torch.Tensor]:
+        assert not sample
+        self.seen.append((emg.clone(), imu.clone(), time_mask.clone()))
+        return {"prediction": torch.full((emg.size(0), 2), 0.5)}
+
+
+def test_best_ui_adapter_uses_fixed_causal_training_context() -> None:
+    student = _RecordingStudent()
+    adapter = StudentForwardAdapter(student, context_samples=24)
+    records = replay_trial(
+        adapter,
+        None,
+        torch.randn(40, 4),
+        torch.randn(40, 6),
+        onset=0,
+        touch=39,
+        minimum_prefix=4,
+        patch_length=4,
+        stride=5,
+        canvas=torch.tensor([1000.0, 500.0]),
+        target_px=torch.tensor([500.0, 250.0]),
+        maximum_prefix=24,
+    )
+    assert records
+    assert all(emg.shape == (1, 24, 4) for emg, _, _ in student.seen)
+    first_emg, _, first_mask = student.seen[0]
+    assert torch.count_nonzero(first_emg[:, :-4]) == 0
+    assert first_mask.sum() == 4
+    assert student.seen[-1][2].sum() == 24
+
+
+def test_best_ui_regroups_nested_trials_by_selected_session() -> None:
+    path = Path(
+        "/dataset/dev_a2_vive__abc/nested/export/trial_001.csv"
+    )
+    assert _session_owner(path, ["dev_a1", "dev_a2"], "export") == (
+        "dev_a2_vive__abc"
+    )
+    assert _session_owner(path, ["dev_a1"], "export") is None
 
 
 def test_live_preprocessing_is_causal() -> None:

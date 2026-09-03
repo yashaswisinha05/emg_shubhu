@@ -77,7 +77,7 @@ def canvas_from_disk(root: str) -> tuple[float, float] | None:
 def replay_trial(
     base, head, emg: torch.Tensor, imu: torch.Tensor, onset: int, touch: int,
     minimum_prefix: int, patch_length: int, stride: int, canvas: torch.Tensor,
-    target_px: torch.Tensor,
+    target_px: torch.Tensor, maximum_prefix: int | None = None,
 ) -> list[dict]:
     """One causal forward pass per step. Buffer is emg[:cut]/imu[:cut] only."""
     records = []
@@ -85,7 +85,10 @@ def replay_trial(
     for cut in range(start, touch + 1, stride):
         # The causal invariant this whole function exists to hold: only
         # samples strictly before `cut` are visible at step `cut`.
-        prefix_length = max(patch_length, min(minimum_prefix * 4, cut))
+        history_limit = (
+            minimum_prefix * 4 if maximum_prefix is None else maximum_prefix
+        )
+        prefix_length = max(patch_length, min(history_limit, cut))
         window_emg = emg[cut - prefix_length : cut].unsqueeze(0)
         window_imu = imu[cut - prefix_length : cut].unsqueeze(0)
         mask = torch.ones(1, prefix_length, dtype=torch.bool, device=emg.device)
