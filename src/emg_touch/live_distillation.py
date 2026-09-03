@@ -28,6 +28,9 @@ from .models.channel_horizon_distillation import (
     ChannelHorizonLatentDistillationModel,
 )
 from .models.latent_distillation import WearableLatentDistillationModel
+from .models.rolling_dual_head_distillation import (
+    RollingDualHeadDistillationModel,
+)
 from .models.semantic_residual_distillation import (
     SemanticResidualDistillationModel,
 )
@@ -43,6 +46,14 @@ RAW_IMU_AXES_PER_SENSOR = 6
 
 def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     keys = tuple(state)
+    if any(
+        key.startswith("student.endpoint_decoder.screen_semantic.")
+        for key in keys
+    ) and any(
+        key.startswith("student.endpoint_decoder.motion_semantic.")
+        for key in keys
+    ):
+        return "rolling_dual_head"
     if any(key.startswith("student.teacher_latent_bridge.") for key in keys) and any(
         key.startswith("student.endpoint_decoder.") for key in keys
     ):
@@ -60,7 +71,8 @@ def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     ):
         return "latent_distillation"
     raise ValueError(
-        "unsupported checkpoint architecture; expected a latent-distillation, "
+        "unsupported checkpoint architecture; expected a rolling-dual-head, "
+        "latent-distillation, "
         "channel+horizon, semantic-residual, temporal-cross-attention, or "
         "teacher-bridge "
         "final.pt/best.pt"
@@ -261,7 +273,11 @@ class LiveDistillationModel:
         self.device = choose_device(device)
         emg_dim = emg_feature_count(self.config["data"])
         imu_dim = imu_feature_count(self.config["data"])
-        if self.kind == "teacher_bridge":
+        if self.kind == "rolling_dual_head":
+            self.model = RollingDualHeadDistillationModel(
+                self.config, emg_dim, imu_dim
+            )
+        elif self.kind == "teacher_bridge":
             self.model = TeacherBridgeDistillationModel(
                 self.config, emg_dim, imu_dim
             )
@@ -341,6 +357,11 @@ class LiveDistillationModel:
             "y_px": float(prediction[1] * canvas[1]),
             "inference_ms": inference_ms,
         }
+        trajectory = outputs.get("trajectory")
+        if trajectory is not None:
+            relative = trajectory[0].detach().cpu().numpy()
+            result["trajectory_relative_m"] = relative.tolist()
+            result["trajectory_endpoint_relative_m"] = relative[-1].tolist()
         guidance = outputs.get("guidance", {})
         if "horizon_expected_ms" in guidance:
             result["horizon_ms"] = float(
