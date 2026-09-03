@@ -1,0 +1,154 @@
+seed: 42
+experiment_name: "tracked_latent_distillation_virtual_leader"
+
+data:
+  emg_session_normalise: true
+  imu_session_normalise: true
+  sensors: ["S0", "S4", "S8", "S12"]
+  emg_column_template: "EMG 1_{sensor}"
+  acc_column_template: "ACC {axis}_{sensor}"
+  gyro_column_template: "GYRO {axis}_{sensor}"
+  tracker_column_prefix: "VIVE"
+  tracker_id: "T0"
+  sample_rate_hz: 1259.4
+  decimation: 10
+  emg_feature_windows_ms: [10.0, 25.0, 50.0]
+  emg_feature_kinds: ["rms", "waveform_length", "log_energy", "derivative"]
+  tracker_max_sync_error_ms: 20.0
+  imu_posture_features: true
+  posture_lowpass_ms: 400.0
+  posture_baseline_ms: 300.0
+  include_session_prefixes: ["dev_a1", "dev_a2", "dev_a3", "dev_a4"]
+  split_by: "trial"
+  validation_fraction: 0.2
+  test_fraction: 0.2
+
+model:
+  grid_size: [8, 5]
+  d_model: 128
+  num_layers: 3
+  num_heads: 4
+  ffn_dim: 384
+  dropout: 0.15
+  patch_length: 16
+  patch_stride: 8
+  tcn_kernel_sizes: [3, 7, 15]
+  context_ms: 2000.0
+  latent_dim: 32
+  teacher_layers: 2
+  decoder_width: 128
+  teacher_trajectory_steps: 16
+  trajectory_limit_m: 0.8
+  velocity_scale_mps: 1.0
+  imu_modality_dropout: 0.5
+  factor_latent:
+    enabled: true
+    intent_dim: 16
+    motion_dim: 8
+    head_width: 96
+    gradient_reversal_scale: 0.25
+
+virtual_leader:
+  minimum_prefix: 16
+
+loss:
+  gaussian_sigma_cells: 0.5
+  gaussian_soft_fraction: 0.15
+  edge_weight: 0.5
+  heatmap_weight: 1.0
+  offset_weight: 0.5
+  pixel_weight: 1.0
+  radial_weight: 0.5
+  transport_weight: 0.5
+  offset_huber_beta: 0.1
+  pixel_huber_beta: 0.25
+  pixel_normalizer_px: 80.0
+  charbonnier_epsilon_px: 1.0
+
+distillation:
+  teacher_epochs: 25
+  finetune_epochs: 0
+  lead_window_ms: [50.0, 400.0]
+  evaluation_leads_ms: [50.0, 100.0, 200.0, 300.0, 400.0]
+  selection_lead_ms: 200.0
+  trajectory_epsilon_m: 0.002
+
+  teacher_trajectory_weight: 2.0
+  teacher_kl_weight: 0.0001
+  teacher_kl_warmup_epochs: 5
+  teacher_sigma_floor: 0.05
+
+  student_trajectory_weight: 0.5
+  latent_distillation_weight: 0.25
+  prediction_distillation_weight: 1.0
+  trajectory_distillation_weight: 0.5
+  emg_only_weight: 0.5
+  emg_latent_weight: 0.25
+  imu_tracking_weight: 0.1
+  student_noise_scale: 0.5
+  decoder_finetune_lr_factor: 0.1
+
+  teacher_factor_target_weight: 0.5
+  teacher_factor_target_adversarial_weight: 0.05
+  teacher_factor_motion_weight: 0.5
+  teacher_factor_session_weight: 0.05
+  teacher_factor_session_adversarial_weight: 0.025
+
+  student_factor_target_weight: 0.5
+  student_factor_target_adversarial_weight: 0.05
+  student_factor_motion_weight: 0.25
+  student_factor_session_weight: 0.05
+  student_factor_session_adversarial_weight: 0.05
+
+  emg_factor_target_weight: 1.0
+  emg_factor_target_adversarial_weight: 0.1
+  emg_factor_motion_weight: 0.0
+  emg_factor_session_weight: 0.05
+  emg_factor_session_adversarial_weight: 0.1
+
+  adaptive_sampling:
+    enabled: true
+    ema_alpha: 0.5
+    uniform_mix: 0.7
+    power: 1.0
+    max_ratio: 4.0
+
+# This block is read only by train_virtual_leader_distillation_model.py.
+# Position/velocity/acceleration labels are never passed to student_forward.
+virtual_leader_regularization:
+  enabled: true
+  velocity_scale_mps: 1.0
+  acceleration_scale_mps2: 10.0
+  huber_beta: 0.1
+  normalized_residual_clip: 5.0
+  # Critically damped destination attraction: rho = 2 * sqrt(eta).
+  mean_reversion_per_s2: 25.0
+  drag_per_s: 10.0
+
+  teacher_velocity_weight: 0.10
+  teacher_acceleration_weight: 0.05
+  teacher_endpoint_weight: 0.50
+  teacher_dynamics_weight: 0.025
+
+  student_velocity_weight: 0.25
+  student_acceleration_weight: 0.10
+  student_endpoint_weight: 1.00
+  student_dynamics_weight: 0.05
+
+  imu_velocity_weight: 0.10
+  imu_acceleration_weight: 0.05
+  imu_endpoint_weight: 0.25
+  imu_dynamics_weight: 0.025
+
+training:
+  batch_size: 16
+  num_workers: 0
+  epochs: 50
+  cutoffs_per_trial: 3
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
+  scheduler_patience: 4
+  scheduler_factor: 0.5
+  minimum_learning_rate: 0.000001
+  early_stopping_patience: 10
