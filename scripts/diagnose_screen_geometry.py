@@ -148,16 +148,46 @@ def main() -> None:
         print(f"  -> A perfect 3-D endpoint lands at {ceiling_px:.0f} px, so 200 px is")
         print("     geometrically REACHABLE. The gap is prediction accuracy.")
     else:
-        print(f"  -> Even a PERFECT 3-D endpoint scores {ceiling_px:.0f} px, above the")
-        print("     200 px goal. No wearable model can beat this by locating the")
-        print("     hand; the limit is tracker/click calibration, not the model.")
+        print(f"  -> Pooled across sessions, even a PERFECT 3-D endpoint scores")
+        print(f"     {ceiling_px:.0f} px. Do NOT read this as a physical limit until")
+        print("     section 4: if the frame moved between sessions, this number is")
+        print("     mostly the frame moving, not the geometry being loose.")
+
+    # Every remaining fit is reported per session as well as globally. If the
+    # tracker-to-screen frame moved between sessions, a pooled fit is
+    # regressing pixels on coordinates that do not mean the same thing from
+    # one session to the next, and every pooled number below inherits that.
+    def per_session(build) -> tuple[float, float, list[np.ndarray]]:
+        errors, jacobians = [], []
+        for session in sorted(set(session_ids)):
+            rows = session_ids == session
+            if rows.sum() < 40:
+                continue
+            error, _, coefficient = fit_and_score(build(rows), targets_px[rows])
+            if np.isfinite(error):
+                errors.append(error)
+                jacobians.append(coefficient[:3, :] if len(coefficient) > 3 else None)
+        if not errors:
+            return float("nan"), float("nan"), []
+        return float(np.mean(errors)), float(np.std(errors)), jacobians
+
+    ceiling_within, ceiling_spread, jacobians = per_session(lambda r: touches[r])
 
     print()
     print("=" * 74)
     print("2. SCALE - centimetres to pixels")
     print("=" * 74)
-    jacobian = coefficients[:3, :]  # d(pixel) / d(metre)
-    singular = np.linalg.svd(jacobian, compute_uv=False)
+    # Taken from the per-session fits. A pooled Jacobian mixes frames and
+    # collapses: on the real data it returned per-axis gains of 27.8 and 1.7
+    # px/cm, a near-degenerate second axis that is an artefact of pooling
+    # rather than a property of any screen.
+    usable = [j for j in jacobians if j is not None]
+    if usable:
+        singular = np.mean(
+            [np.linalg.svd(j, compute_uv=False) for j in usable], axis=0
+        )
+    else:
+        singular = np.linalg.svd(coefficients[:3, :], compute_uv=False)
     px_per_cm = float(singular.mean() / 100.0)
     print(f"  {px_per_cm:.1f} px per cm  (per-axis gains {singular / 100.0} px/cm)")
     print(f"  200 px  =  {200.0 / max(px_per_cm, 1e-9):5.2f} cm of 3-D endpoint accuracy")
@@ -177,19 +207,28 @@ def main() -> None:
     both_px, both_r2, _ = fit_and_score(
         np.hstack([displacement, starts]), targets_px
     )
-    print(f"  {'predictor':22}{'held-out px':>13}{'R^2':>9}")
-    print("  " + "-" * 44)
-    for label, error, r2 in (
-        ("displacement only", displacement_px, displacement_r2),
-        ("start position only", start_px, start_r2),
-        ("displacement + start", both_px, both_r2),
-        ("touch position (ceiling)", ceiling_px, ceiling_r2),
+    displacement_within, _, _ = per_session(lambda r: displacement[r])
+    start_within, _, _ = per_session(lambda r: starts[r])
+    both_within, _, _ = per_session(
+        lambda r: np.hstack([displacement[r], starts[r]])
+    )
+    print(f"  {'predictor':22}{'pooled px':>12}{'R^2':>8}{'within-session px':>20}")
+    print("  " + "-" * 60)
+    for label, error, r2, within in (
+        ("displacement only", displacement_px, displacement_r2, displacement_within),
+        ("start position only", start_px, start_r2, start_within),
+        ("displacement + start", both_px, both_r2, both_within),
+        ("touch position (ceiling)", ceiling_px, ceiling_r2, ceiling_within),
     ):
-        print(f"  {label:22}{error:>13.1f}{r2:>9.4f}")
+        print(f"  {label:22}{error:>12.1f}{r2:>8.4f}{within:>20.1f}")
+    print()
+    print("  The right-hand column is the one to read if the frame moved "
+          "between\n  sessions - see section 4.")
     print()
     gap = displacement_px - both_px
     print(f"  Knowing where the reach STARTED is worth {gap:.0f} px "
-          f"({displacement_px:.0f} -> {both_px:.0f}).")
+          f"({displacement_px:.0f} -> {both_px:.0f}) pooled, and "
+          f"{displacement_within - both_within:.0f} px within session.")
     if displacement_px < 200:
         print("  -> Displacement alone already determines the target well enough.")
         print("     A wearable CAN in principle reach 200 px; the ceiling we keep")
@@ -207,19 +246,11 @@ def main() -> None:
     print("=" * 74)
     print("4. PER-SESSION vs GLOBAL - does the screen move between sessions?")
     print("=" * 74)
-    per_session = []
-    for session in sorted(set(session_ids)):
-        rows = session_ids == session
-        if rows.sum() < 40:
-            continue
-        error, r2, _ = fit_and_score(touches[rows], targets_px[rows])
-        if np.isfinite(error):
-            per_session.append(error)
-    if per_session:
-        within = float(np.mean(per_session))
+    if np.isfinite(ceiling_within):
+        within = ceiling_within
         print(f"  global fit (one frame for all sessions) : {ceiling_px:7.1f} px")
         print(f"  per-session fits, averaged              : {within:7.1f} px")
-        print(f"  spread across sessions                  : {np.std(per_session):7.1f} px")
+        print(f"  spread across sessions                  : {ceiling_spread:7.1f} px")
         print()
         if ceiling_px > within * 1.5:
             print("  -> Per-session fits are much tighter, so the tracker-to-screen")
