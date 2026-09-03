@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Animate a 3R manipulator over a complete measured reach.
+"""Drive a 3R manipulator with an actual wearable-model 3D prediction.
 
-The base and shoulder point P1 are the same origin.  The orange manipulator
-follows the complete recorded VIVE path from movement onset to touch.  A
-causal EMG+IMU model forecast is overlaid only at its real cutoff and for its
-trained forecast horizon.  This avoids visually stretching a 200 ms forecast
-over an entire reach while still showing the full measured arm motion.
+The base and shoulder point P1 are the same origin.  By default, the causal
+EMG+IMU student is queried at movement onset for its complete onset-to-touch
+trajectory.  The orange manipulator follows that prediction through analytical
+inverse kinematics; VIVE is drawn only as a black held-out comparison path.
+
+The model was trained on 50--400 ms horizons.  A full reach longer than that is
+a genuine wearable-model output, but it is an out-of-training-range
+extrapolation and is labelled as such in the viewer.  Use
+``--trajectory-window fixed-horizon --lead-ms 200`` to remain inside the
+trained horizon.
 
 Without ``--base-world``, the relative reach is anchored to a configurable
 synthetic initial arm pose.  This is sufficient to inspect motion shape.  For
@@ -80,7 +85,7 @@ def collect_trials(
     base_world: np.ndarray | None,
     axis_order: str,
     axis_signs: tuple[float, float, float],
-    maximum_frames: int,
+    trajectory_window: str,
 ) -> list[dict[str, Any]]:
     config = runner.config
     model = runner.model
@@ -89,6 +94,10 @@ def collect_trials(
     trajectory_limit = float(config["model"].get("trajectory_limit_m", 0.8))
     velocity_scale = float(config["model"].get("velocity_scale_mps", 1.0))
     rate = training.effective_rate(config)
+    trained_window_ms = config.get("distillation", {}).get(
+        "lead_window_ms", [50.0, 400.0]
+    )
+    trained_max_ms = float(max(trained_window_ms))
     generator = np.random.default_rng(0)
     trials: list[dict[str, Any]] = []
 
@@ -102,7 +111,15 @@ def collect_trials(
         for row in range(len(batch["lengths"])):
             length = int(batch["lengths"][row])
             touch = length - 1
-            cut = touch - int(lead_samples)
+            if touch <= 1:
+                continue
+            onset = int(np.clip(int(batch["onset"][row]), 1, touch - 1))
+            selected_lead = (
+                touch - onset
+                if trajectory_window == "full-reach"
+                else int(lead_samples)
+            )
+            cut = touch - selected_lead
             if cut <= 0:
                 continue
             single = one_row(batch, row)
@@ -115,7 +132,7 @@ def collect_trials(
                 trajectory_limit,
                 velocity_scale,
                 fallback_canvas=None,
-                fixed_lead=lead_samples,
+                fixed_lead=selected_lead,
             )
             if window is None:
                 continue
@@ -135,34 +152,14 @@ def collect_trials(
                 axis_order,
                 axis_signs,
             )
-            onset = int(batch["onset"][row])
-            onset = int(np.clip(onset, 0, touch - 1))
-            full_indices = np.arange(onset, touch + 1, dtype=np.int64)
-            if len(full_indices) > maximum_frames:
-                selected = np.unique(
-                    np.rint(
-                        np.linspace(0, len(full_indices) - 1, maximum_frames)
-                    ).astype(int)
-                )
-                full_indices = full_indices[selected]
             vive_world = batch["position"][row].detach().cpu().numpy()
-            full_relative = transform_axes(
-                vive_world[full_indices] - vive_world[onset],
-                axis_order,
-                axis_signs,
-            )
-            forecast_anchor = transform_axes(
-                vive_world[cut - 1] - vive_world[onset],
-                axis_order,
-                axis_signs,
-            )
             if base_world is None:
                 start_hand = manipulator.forward(initial_angles)[-1]
                 calibration = "synthetic initial pose"
                 starting_angles = initial_angles
                 initial_was_projected = False
             else:
-                tracker_origin = vive_world[onset]
+                tracker_origin = vive_world[cut - 1]
                 start_hand = transform_axes(
                     tracker_origin - base_world, axis_order, axis_signs
                 )
@@ -174,34 +171,35 @@ def collect_trials(
                 calibration = "measured shoulder/base"
                 initial_was_projected = initial_solution.was_projected
 
-            vive_path = start_hand[None, :] + full_relative
-            forecast_origin = start_hand + forecast_anchor
-            predicted_path = forecast_origin[None, :] + predicted_relative
-            forecast_true_path = forecast_origin[None, :] + true_relative
-            full_time_ms = 1000.0 * (full_indices - onset) / rate
-            forecast_start_ms = 1000.0 * (cut - 1 - onset) / rate
-            forecast_time_ms = forecast_start_ms + np.linspace(
-                1000.0 / rate,
-                1000.0 * lead_samples / rate,
-                teacher_steps,
+            # Prepend the common origin so the animation begins at the actual
+            # cutoff pose.  Every subsequent orange-arm target comes from the
+            # wearable student's trajectory head.
+            predicted_path = np.concatenate(
+                [start_hand[None, :], start_hand[None, :] + predicted_relative],
+                axis=0,
             )
-            # The arm is deliberately VIVE-driven in this full-reach view.
-            # The model remains an overlaid forecast, never a hidden tracker
-            # input to the wearable student.
-            followed = manipulator.follow(vive_path, initial_angles=starting_angles)
-            forecast_start_frame = int(
-                np.argmin(np.abs(full_time_ms - forecast_start_ms))
+            vive_path = np.concatenate(
+                [start_hand[None, :], start_hand[None, :] + true_relative],
+                axis=0,
             )
-            model_followed = manipulator.follow(
-                predicted_path,
-                initial_angles=followed["angles"][forecast_start_frame],
+            followed = manipulator.follow(
+                predicted_path, initial_angles=starting_angles
             )
-            model_error_cm = 100.0 * np.linalg.norm(
-                predicted_path - forecast_true_path, axis=-1
+            point_error_cm = 100.0 * np.linalg.norm(
+                predicted_path - vive_path, axis=-1
             )
             ik_error_cm = 100.0 * np.linalg.norm(
-                followed["chain"][:, -1] - vive_path, axis=-1
+                followed["chain"][:, -1] - predicted_path, axis=-1
             )
+            horizon_ms = 1000.0 * selected_lead / rate
+            time_ms = np.concatenate((
+                [0.0],
+                np.linspace(
+                    1000.0 / rate,
+                    1000.0 * (selected_lead + 1) / rate,
+                    teacher_steps,
+                ),
+            ))
             source = window["source_paths"][0]
             trials.append({
                 "path": source,
@@ -210,15 +208,19 @@ def collect_trials(
                 "initial_was_projected": initial_was_projected,
                 "vive_path": vive_path,
                 "predicted_path": predicted_path,
-                "forecast_true_path": forecast_true_path,
+                "forecast_true_path": vive_path,
                 "followed": followed,
-                "model_followed": model_followed,
-                "model_error_cm": model_error_cm,
+                "model_followed": followed,
+                "model_error_cm": point_error_cm,
                 "ik_error_cm": ik_error_cm,
-                "time_ms": full_time_ms,
-                "forecast_time_ms": forecast_time_ms,
-                "forecast_start_ms": forecast_start_ms,
-                "lead_ms": 1000.0 * lead_samples / rate,
+                "time_ms": time_ms,
+                "forecast_time_ms": time_ms,
+                "forecast_start_ms": 0.0,
+                "lead_ms": horizon_ms,
+                "trained_max_ms": trained_max_ms,
+                "out_of_range": horizon_ms > trained_max_ms + 1e-6,
+                "trajectory_window": trajectory_window,
+                "cut_samples_past_onset": cut - onset,
             })
             if len(trials) >= count:
                 return trials
@@ -283,7 +285,7 @@ def run_viewer(
     arm_axis.text(0.0, 0.0, 0.0, "  base = P1")
     (true_line,) = arm_axis.plot(
         [], [], [], color="#222222", linewidth=2.2,
-        label="complete VIVE reach"
+        label="VIVE ground truth (comparison only)"
     )
     (prediction_line,) = arm_axis.plot(
         [], [], [], "--", color="#17A6B6", linewidth=2.2,
@@ -291,11 +293,11 @@ def run_viewer(
     )
     (executed_line,) = arm_axis.plot(
         [], [], [], ":", color="#2E8B57", linewidth=2.2,
-        label="IK/FK following VIVE",
+        label="IK/FK following model",
     )
     (arm_line,) = arm_axis.plot(
         [], [], [], "-o", color="#D47A20", linewidth=5, markersize=7,
-        label="3R manipulator (VIVE-driven)",
+        label="3R manipulator (EMG+IMU-driven)",
     )
     (true_current,) = arm_axis.plot(
         [], [], [], marker="x", color="#222222", markersize=10, linestyle="None"
@@ -311,18 +313,18 @@ def run_viewer(
     ]
     joint_cursor = joint_axis.axvline(0.0, color="0.25", linewidth=1)
     joint_axis.set_ylabel("joint angle (degrees)")
-    joint_axis.set_xlabel("time from movement onset (ms)")
-    joint_axis.set_title("full-reach inverse-kinematics joint trajectory")
+    joint_axis.set_xlabel("time from model cutoff (ms)")
+    joint_axis.set_title("model-driven inverse-kinematics joint trajectory")
     joint_axis.legend(fontsize=8)
 
     (model_error_line,) = error_axis.plot(
         [], [], color="#17A6B6", label="model forecast vs VIVE"
     )
     (ik_error_line,) = error_axis.plot(
-        [], [], color="#2E8B57", label="IK/FK vs VIVE request"
+        [], [], color="#2E8B57", label="IK/FK vs model request"
     )
     error_cursor = error_axis.axvline(0.0, color="0.25", linewidth=1)
-    error_axis.set_xlabel("time from movement onset (ms)")
+    error_axis.set_xlabel("time from model cutoff (ms)")
     error_axis.set_ylabel("3D Euclidean error (cm)")
     error_axis.set_title("trajectory and reachability errors")
     error_axis.legend(fontsize=8)
@@ -349,22 +351,16 @@ def run_viewer(
         trial = trials[state["trial"]]
         frame = min(state["frame"], len(trial["time_ms"]) - 1)
         followed = trial["followed"]
-        current_time = trial["time_ms"][frame]
-        # The VIVE/IK path spans the whole reach.  The cyan model segment only
-        # appears when the animation reaches the model's causal cutoff.
+        # VIVE and model paths share a timeline, but only the cyan model path
+        # supplies targets to the orange manipulator.
         _set_line_3d(true_line, trial["vive_path"][: frame + 1])
+        _set_line_3d(prediction_line, trial["predicted_path"][: frame + 1])
         _set_line_3d(executed_line, followed["chain"][: frame + 1, -1])
         _set_line_3d(arm_line, followed["chain"][frame])
         _set_line_3d(true_current, trial["vive_path"][frame : frame + 1])
-
-        forecast_visible = trial["forecast_time_ms"] <= current_time
-        if forecast_visible.any():
-            visible_prediction = trial["predicted_path"][forecast_visible]
-            _set_line_3d(prediction_line, visible_prediction)
-            _set_line_3d(predicted_current, visible_prediction[-1:])
-        else:
-            _set_line_3d(prediction_line, np.empty((0, 3)))
-            _set_line_3d(predicted_current, np.empty((0, 3)))
+        _set_line_3d(
+            predicted_current, trial["predicted_path"][frame : frame + 1]
+        )
 
         time = trial["time_ms"]
         angles_deg = np.rad2deg(followed["angles"])
@@ -378,8 +374,7 @@ def run_viewer(
         joint_cursor.set_xdata([time[frame], time[frame]])
 
         model_error_line.set_data(
-            trial["forecast_time_ms"][forecast_visible],
-            trial["model_error_cm"][forecast_visible],
+            time[: frame + 1], trial["model_error_cm"][: frame + 1],
         )
         ik_error_line.set_data(
             time[: frame + 1], trial["ik_error_cm"][: frame + 1]
@@ -393,21 +388,19 @@ def run_viewer(
         error_axis.set_ylim(0.0, 1.08 * error_high)
         error_cursor.set_xdata([time[frame], time[frame]])
         projected = int(followed["was_projected"].sum())
-        model_projected = int(trial["model_followed"]["was_projected"].sum())
+        range_label = (
+            f"EXTRAPOLATED beyond {trial['trained_max_ms']:.0f} ms training max"
+            if trial["out_of_range"] else "inside trained lead window"
+        )
         arm_axis.set_title(
-            f"{trial['label']} — complete VIVE reach {frame + 1}/{len(time)} — "
+            f"{trial['label']} — model-driven trajectory {frame + 1}/{len(time)} — "
             f"{trial['calibration']}"
         )
-        current_model_error = (
-            f"{trial['model_error_cm'][np.flatnonzero(forecast_visible)[-1]]:.2f} cm"
-            if forecast_visible.any() else "waiting for cutoff"
-        )
         summary.set_text(
-            f"VIVE-driven IK  |  model mean forecast error "
-            f"{trial['model_error_cm'].mean():.2f} cm  |  "
-            f"visible model error={current_model_error}  |  "
-            f"workspace projections VIVE={projected}/{len(time)}, "
-            f"model={model_projected}/{len(trial['predicted_path'])}  |  "
+            f"EMG+IMU MODEL-DRIVEN IK  |  {range_label}  |  mean model↔VIVE "
+            f"{trial['model_error_cm'][1:].mean():.2f} cm  |  "
+            f"current={trial['model_error_cm'][frame]:.2f} cm  |  "
+            f"model workspace projections={projected}/{len(time)}  |  "
             f"q=[{angles_deg[frame, 0]:.1f}°, {angles_deg[frame, 1]:.1f}°, "
             f"{angles_deg[frame, 2]:.1f}°]"
         )
@@ -505,10 +498,19 @@ def main() -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--split", choices=("train", "validation", "test"), default="test")
     parser.add_argument("--lead-ms", type=float, default=200.0)
+    parser.add_argument(
+        "--trajectory-window",
+        choices=("full-reach", "fixed-horizon"),
+        default="full-reach",
+        help=(
+            "full-reach queries the model at movement onset; fixed-horizon "
+            "uses --lead-ms before touch"
+        ),
+    )
     parser.add_argument("--num-trials", type=int, default=4)
     parser.add_argument(
         "--max-frames", type=int, default=180,
-        help="Maximum displayed samples across the complete onset-to-touch reach",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--fps", type=float, default=20.0)
     parser.add_argument("--link-lengths", type=float, nargs=2, default=(0.50, 0.60))
@@ -567,26 +569,27 @@ def main() -> None:
         base_world,
         args.axis_order.lower(),
         tuple(args.axis_signs),
-        args.max_frames,
+        args.trajectory_window,
     )
     if not trials:
         raise SystemExit("no usable trials were long enough for the selected lead")
 
     print(
         f"loaded {runner.kind} | {len(trials)} {args.split} trial(s) | "
-        f"lead={1000.0 * lead_samples / rate:.1f} ms"
+        f"trajectory-window={args.trajectory_window}"
     )
     print("deployment check: model trajectory receives causal EMG+IMU only")
     print(
-        "visualisation check: orange arm follows the complete recorded VIVE "
-        "path; cyan is the wearable model forecast overlay"
+        "visualisation check: orange arm follows the cyan EMG+IMU model path; "
+        "black VIVE is comparison only"
     )
     print("base=P1=[0,0,0] in manipulator coordinates")
     for index, trial in enumerate(trials):
         followed = trial["followed"]
         print(
-            f"  {index}: {trial['label']} | model↔VIVE="
-            f"{trial['model_error_cm'].mean():.2f} cm | IK projection="
+            f"  {index}: {trial['label']} | horizon={trial['lead_ms']:.1f} ms"
+            f"{' OUT-OF-RANGE' if trial['out_of_range'] else ''} | model↔VIVE="
+            f"{trial['model_error_cm'][1:].mean():.2f} cm | IK projection="
             f"{int(followed['was_projected'].sum())}/{len(followed['was_projected'])} "
             f"| initial projection={trial['initial_was_projected']} "
             f"| IK/FK residual={trial['ik_error_cm'].mean():.4f} cm"
