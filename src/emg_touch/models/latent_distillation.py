@@ -74,6 +74,107 @@ def diagonal_gaussian_kl(
     ).mean()
 
 
+class _GradientReversal(torch.autograd.Function):
+    """Identity in the forward pass and sign reversal in backpropagation."""
+
+    @staticmethod
+    def forward(ctx, values: torch.Tensor, scale: float) -> torch.Tensor:
+        ctx.scale = float(scale)
+        return values.view_as(values)
+
+    @staticmethod
+    def backward(ctx, gradient: torch.Tensor) -> tuple[torch.Tensor, None]:
+        return -ctx.scale * gradient, None
+
+
+def gradient_reverse(values: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+    return _GradientReversal.apply(values, float(scale))
+
+
+class FactorGuidanceHeads(nn.Module):
+    """Paper-inspired factor guidance for target, motion, and nuisance.
+
+    The target predictor makes the first latent block explicitly useful for
+    pointing. A target discriminator reads all non-intent dimensions through
+    gradient reversal, preventing destination information from spreading
+    throughout the latent. Session prediction is assigned to the residual
+    block and adversarially removed from the intent block. The middle block is
+    directly supervised to represent the future motion chunk.
+    """
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        model = config["model"]
+        settings = model["factor_latent"]
+        latent_dim = int(model["latent_dim"])
+        self.intent_dim = int(settings["intent_dim"])
+        self.motion_dim = int(settings["motion_dim"])
+        self.residual_dim = latent_dim - self.intent_dim - self.motion_dim
+        if min(self.intent_dim, self.motion_dim, self.residual_dim) <= 0:
+            raise ValueError(
+                "factor_latent intent_dim and motion_dim must leave a positive "
+                "residual subspace"
+            )
+        self.grl_scale = float(settings.get("gradient_reversal_scale", 1.0))
+        hidden = int(settings.get("head_width", 64))
+        grid_width, grid_height = map(int, model.get("grid_size", [8, 5]))
+        target_classes = grid_width * grid_height
+        session_classes = int(config.get("virtual_leader", {}).get("session_count", 0))
+        trajectory_steps = int(model["teacher_trajectory_steps"])
+        trajectory_limit = float(model.get("trajectory_limit_m", 0.8))
+        self.trajectory_steps = trajectory_steps
+        self.trajectory_limit = trajectory_limit
+
+        def classifier(input_dim: int, output_dim: int) -> nn.Sequential:
+            return nn.Sequential(
+                nn.LayerNorm(input_dim), nn.Linear(input_dim, hidden), nn.GELU(),
+                nn.Linear(hidden, output_dim),
+            )
+
+        self.target_from_intent = classifier(self.intent_dim, target_classes)
+        self.target_from_other = classifier(
+            self.motion_dim + self.residual_dim, target_classes
+        )
+        self.motion_from_motion = nn.Sequential(
+            nn.LayerNorm(self.motion_dim),
+            nn.Linear(self.motion_dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, trajectory_steps * 3),
+        )
+        self.session_from_residual = (
+            classifier(self.residual_dim, session_classes)
+            if session_classes > 1 else None
+        )
+        self.session_from_intent = (
+            classifier(self.intent_dim, session_classes)
+            if session_classes > 1 else None
+        )
+
+    def forward(self, latent_mean: torch.Tensor) -> dict[str, torch.Tensor]:
+        intent = latent_mean[:, : self.intent_dim]
+        motion_end = self.intent_dim + self.motion_dim
+        motion = latent_mean[:, self.intent_dim : motion_end]
+        residual = latent_mean[:, motion_end:]
+        other = latent_mean[:, self.intent_dim :]
+        outputs = {
+            "target_intent_logits": self.target_from_intent(intent),
+            "target_other_logits": self.target_from_other(
+                gradient_reverse(other, self.grl_scale)
+            ),
+            "motion_trajectory": self.trajectory_limit * torch.tanh(
+                self.motion_from_motion(motion).reshape(
+                    -1, self.trajectory_steps, 3
+                )
+            ),
+        }
+        if self.session_from_residual is not None:
+            outputs["session_residual_logits"] = self.session_from_residual(residual)
+            outputs["session_intent_logits"] = self.session_from_intent(
+                gradient_reverse(intent, self.grl_scale)
+            )
+        return outputs
+
+
 class PrivilegedTrajectoryEncoder(nn.Module):
     """Bidirectional encoder for the complete training-only future trajectory."""
 
@@ -242,6 +343,11 @@ class WearableLatentDistillationModel(nn.Module):
             config, emg_channels, imu_channels, trajectory_steps=steps
         )
         self.decoder = SharedIntentDecoder(config)
+        factor_settings = model.get("factor_latent", {})
+        self.guidance = (
+            FactorGuidanceHeads(config)
+            if bool(factor_settings.get("enabled", False)) else None
+        )
 
     def teacher_forward(
         self,
@@ -251,12 +357,15 @@ class WearableLatentDistillationModel(nn.Module):
     ) -> dict[str, torch.Tensor]:
         mu, log_variance = self.teacher(trajectory_features)
         latent = reparameterize(mu, log_variance, sample, noise_scale)
-        return {
+        outputs = {
             **self.decoder(latent),
             "latent": latent,
             "mu": mu,
             "log_variance": log_variance,
         }
+        if self.guidance is not None:
+            outputs["guidance"] = self.guidance(mu)
+        return outputs
 
     def student_forward(
         self,
@@ -281,6 +390,8 @@ class WearableLatentDistillationModel(nn.Module):
             "log_variance": encoded["log_variance"],
             "imu_trajectory": encoded["imu_trajectory"],
         }
+        if self.guidance is not None:
+            outputs["guidance"] = self.guidance(encoded["mu"])
         if include_emg_only:
             emg_latent = reparameterize(
                 encoded["emg_mu"], encoded["emg_log_variance"],
@@ -292,4 +403,8 @@ class WearableLatentDistillationModel(nn.Module):
                 "mu": encoded["emg_mu"],
                 "log_variance": encoded["emg_log_variance"],
             }
+            if self.guidance is not None:
+                outputs["emg_only"]["guidance"] = self.guidance(
+                    encoded["emg_mu"]
+                )
         return outputs

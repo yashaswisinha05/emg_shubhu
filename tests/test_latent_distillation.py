@@ -8,6 +8,7 @@ import torch
 
 from scripts.train_latent_distillation_model import (
     AdaptiveTrialDifficulty,
+    factor_guidance_losses,
     make_distillation_window,
     select_sessions,
     student_objective,
@@ -15,11 +16,12 @@ from scripts.train_latent_distillation_model import (
 from emg_touch.models.latent_distillation import (
     WearableLatentDistillationModel,
     diagonal_gaussian_kl,
+    gradient_reverse,
 )
 
 
-def _config(*, imu_dropout: float = 0.0) -> dict:
-    return {
+def _config(*, imu_dropout: float = 0.0, factor_guidance: bool = False) -> dict:
+    config = {
         "model": {
             "grid_size": [2, 2],
             "d_model": 8,
@@ -64,6 +66,16 @@ def _config(*, imu_dropout: float = 0.0) -> dict:
             "imu_tracking_weight": 0.25,
         },
     }
+    if factor_guidance:
+        config["model"]["factor_latent"] = {
+            "enabled": True,
+            "intent_dim": 2,
+            "motion_dim": 1,
+            "head_width": 8,
+            "gradient_reversal_scale": 0.25,
+        }
+        config["virtual_leader"] = {"session_count": 2}
+    return config
 
 
 def _batch() -> dict[str, object]:
@@ -79,6 +91,7 @@ def _batch() -> dict[str, object]:
         "onset": torch.tensor([10, 15]),
         "screen_target": torch.tensor([[0.2, 0.3], [0.7, 0.8]]),
         "canvas": torch.tensor([[1000.0, 500.0], [1000.0, 500.0]]),
+        "session": torch.tensor([0, 1]),
         "paths": ["easy.csv", "hard.csv"],
     }
 
@@ -173,6 +186,39 @@ def test_gaussian_distillation_is_zero_for_identical_distributions() -> None:
     log_variance = torch.randn(3, 4).clamp(-4.0, 1.0)
     loss = diagonal_gaussian_kl(mu, log_variance, mu, log_variance)
     torch.testing.assert_close(loss, torch.tensor(0.0), atol=1e-6, rtol=0.0)
+
+
+def test_gradient_reversal_changes_only_the_backward_direction() -> None:
+    values = torch.tensor([1.0, 2.0], requires_grad=True)
+    reversed_values = gradient_reverse(values, scale=0.25)
+    torch.testing.assert_close(reversed_values, values)
+    reversed_values.sum().backward()
+    torch.testing.assert_close(values.grad, torch.full_like(values, -0.25))
+
+
+def test_emg_intent_subspace_gets_explicit_target_gradient() -> None:
+    torch.manual_seed(7)
+    config = _config(factor_guidance=True)
+    model = WearableLatentDistillationModel(config, 4, 6).train()
+    window = _window()
+    outputs = model.student_forward(
+        window["emg"], window["imu"], window["time_mask"],
+        sample=False, include_emg_only=True,
+    )
+    guidance = outputs["emg_only"]["guidance"]
+    assert guidance["target_intent_logits"].shape == (2, 4)
+    assert guidance["motion_trajectory"].shape == (2, 4, 3)
+    losses = factor_guidance_losses(outputs["emg_only"], window, config)
+    losses["factor_target"].backward()
+    encoder_gradients = [
+        parameter.grad for parameter in model.student.emg_encoder.parameters()
+        if parameter.grad is not None
+    ]
+    assert encoder_gradients
+    assert sum(float(gradient.norm()) for gradient in encoder_gradients) > 0.0
+    head_gradient = model.guidance.target_from_intent[-1].weight.grad
+    assert head_gradient is not None
+    assert float(head_gradient.norm()) > 0.0
 
 
 def test_adaptive_sampler_upweights_hard_trials_with_a_cap() -> None:

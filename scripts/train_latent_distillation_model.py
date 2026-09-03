@@ -351,6 +351,8 @@ def make_distillation_window(
         ),
         "source_paths": source_paths,
     }
+    if "session" in batch:
+        window["session"] = batch["session"].index_select(0, rows)
     if "canvas" in batch:
         window["canvas_size"] = batch["canvas"].index_select(0, rows)
     elif fallback_canvas is not None:
@@ -370,6 +372,72 @@ def trajectory_errors(
     ).mean(dim=-1)
 
 
+def target_cell_labels(
+    target: torch.Tensor, grid_width: int, grid_height: int
+) -> torch.Tensor:
+    """Convert normalized screen coordinates to the supervised grid factor."""
+    x = torch.floor(target[:, 0] * grid_width).long().clamp(0, grid_width - 1)
+    y = torch.floor(target[:, 1] * grid_height).long().clamp(0, grid_height - 1)
+    return y * grid_width + x
+
+
+def factor_guidance_losses(
+    outputs: dict[str, Any],
+    window: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, torch.Tensor]:
+    """Losses for one target/motion/residual partitioned latent."""
+    guidance = outputs.get("guidance")
+    if guidance is None:
+        return {}
+    grid_width, grid_height = map(int, config["model"].get("grid_size", [8, 5]))
+    target_class = target_cell_labels(window["target"], grid_width, grid_height)
+    losses = {
+        "factor_target": F.cross_entropy(
+            guidance["target_intent_logits"], target_class
+        ),
+        # This is minimized normally by the discriminator parameters, while
+        # gradient reversal maximizes it with respect to non-intent latents.
+        "factor_target_adversarial": F.cross_entropy(
+            guidance["target_other_logits"], target_class
+        ),
+        "factor_motion": trajectory_errors(
+            guidance["motion_trajectory"],
+            window["trajectory_target"],
+            float(config["distillation"].get("trajectory_epsilon_m", 0.002)),
+        ).mean(),
+    }
+    if "session_residual_logits" in guidance and "session" in window:
+        losses["factor_session"] = F.cross_entropy(
+            guidance["session_residual_logits"], window["session"]
+        )
+        losses["factor_session_adversarial"] = F.cross_entropy(
+            guidance["session_intent_logits"], window["session"]
+        )
+    return losses
+
+
+def weighted_factor_guidance(
+    losses: dict[str, torch.Tensor],
+    settings: dict[str, Any],
+    prefix: str,
+) -> torch.Tensor | float:
+    if not losses:
+        return 0.0
+    weights = {
+        "factor_target": float(settings.get(f"{prefix}_factor_target_weight", 0.0)),
+        "factor_target_adversarial": float(
+            settings.get(f"{prefix}_factor_target_adversarial_weight", 0.0)
+        ),
+        "factor_motion": float(settings.get(f"{prefix}_factor_motion_weight", 0.0)),
+        "factor_session": float(settings.get(f"{prefix}_factor_session_weight", 0.0)),
+        "factor_session_adversarial": float(
+            settings.get(f"{prefix}_factor_session_adversarial_weight", 0.0)
+        ),
+    }
+    return sum(weights[name] * value for name, value in losses.items())
+
+
 def teacher_objective(
     outputs: dict[str, torch.Tensor],
     window: dict[str, Any],
@@ -384,10 +452,12 @@ def teacher_objective(
     )
     trajectory = per_sample_trajectory.mean()
     kl = standard_normal_kl(outputs["mu"], outputs["log_variance"])
+    factor_losses = factor_guidance_losses(outputs, window, config)
     total = (
         point["loss"]
         + float(settings.get("teacher_trajectory_weight", 2.0)) * trajectory
         + float(kl_weight) * kl
+        + weighted_factor_guidance(factor_losses, settings, "teacher")
     )
     return {
         "loss": total,
@@ -395,6 +465,7 @@ def teacher_objective(
         "trajectory": trajectory.detach(),
         "kl": kl.detach(),
         "per_sample_trajectory": per_sample_trajectory.detach(),
+        **{name: value.detach() for name, value in factor_losses.items()},
     }
 
 
@@ -435,6 +506,13 @@ def student_objective(
     imu_tracking = trajectory_errors(
         outputs["imu_trajectory"], window["trajectory_target"], epsilon
     ).mean()
+    factor_losses = factor_guidance_losses(outputs, window, config)
+    emg_factor_losses = {
+        f"emg_{name}": value
+        for name, value in factor_guidance_losses(
+            emg_outputs, window, config
+        ).items()
+    }
 
     total = (
         point["loss"]
@@ -451,6 +529,15 @@ def student_objective(
         )
         + float(settings.get("emg_latent_weight", 0.5)) * emg_latent
         + float(settings.get("imu_tracking_weight", 0.25)) * imu_tracking
+        + weighted_factor_guidance(factor_losses, settings, "student")
+        + weighted_factor_guidance(
+            {
+                name.removeprefix("emg_"): value
+                for name, value in emg_factor_losses.items()
+            },
+            settings,
+            "emg",
+        )
     )
     return {
         "loss": total,
@@ -463,6 +550,8 @@ def student_objective(
         "emg_trajectory": emg_trajectory.detach(),
         "emg_latent": emg_latent.detach(),
         "imu_tracking": imu_tracking.detach(),
+        **{name: value.detach() for name, value in factor_losses.items()},
+        **{name: value.detach() for name, value in emg_factor_losses.items()},
     }
 
 
@@ -608,6 +697,49 @@ def evaluate(
                 (student["mu"] - teacher["mu"]).square().mean(dim=-1)
             )
             _append(totals, "latent_rmse", latent_rmse)
+            if "guidance" in student:
+                grid_width, grid_height = map(
+                    int, config["model"].get("grid_size", [8, 5])
+                )
+                target_class = target_cell_labels(
+                    window["target"], grid_width, grid_height
+                )
+                student_guidance = student["guidance"]
+                emg_guidance = student["emg_only"]["guidance"]
+                _append(
+                    totals,
+                    "intent_target_accuracy",
+                    (student_guidance["target_intent_logits"].argmax(-1)
+                     == target_class).float(),
+                )
+                _append(
+                    totals,
+                    "emg_intent_target_accuracy",
+                    (emg_guidance["target_intent_logits"].argmax(-1)
+                     == target_class).float(),
+                )
+                _append(
+                    totals,
+                    "other_target_leakage_accuracy",
+                    (student_guidance["target_other_logits"].argmax(-1)
+                     == target_class).float(),
+                )
+                if (
+                    "session_residual_logits" in student_guidance
+                    and "session" in window
+                ):
+                    _append(
+                        totals,
+                        "residual_session_accuracy",
+                        (student_guidance["session_residual_logits"].argmax(-1)
+                         == window["session"]).float(),
+                    )
+                    _append(
+                        totals,
+                        "intent_session_leakage_accuracy",
+                        (student_guidance["session_intent_logits"].argmax(-1)
+                         == window["session"]).float(),
+                    )
             _append(
                 totals,
                 "imu_tracking_trajectory_cm",
@@ -699,8 +831,15 @@ def train_teacher(
     set_trainable(model.teacher, True)
     set_trainable(model.decoder, True)
     set_trainable(model.student, False)
+    if model.guidance is not None:
+        set_trainable(model.guidance, True)
+    teacher_parameters = list(model.teacher.parameters()) + list(
+        model.decoder.parameters()
+    )
+    if model.guidance is not None:
+        teacher_parameters += list(model.guidance.parameters())
     optimizer = torch.optim.AdamW(
-        list(model.teacher.parameters()) + list(model.decoder.parameters()),
+        teacher_parameters,
         lr=float(config["training"]["learning_rate"]),
         weight_decay=float(config["training"]["weight_decay"]),
     )
@@ -724,9 +863,7 @@ def train_teacher(
         ) if adaptive else train_loader
         progress = min(1.0, epoch / warmup)
         kl_weight = maximum_kl * progress
-        running: dict[str, list[float]] = {
-            "loss": [], "point": [], "trajectory": [], "kl": []
-        }
+        running: dict[str, list[float]] = {}
         for batch in tqdm(loader, desc=f"teacher {epoch}"):
             if batch is None:
                 continue
@@ -747,17 +884,16 @@ def train_teacher(
             losses = teacher_objective(outputs, window, config, kl_weight)
             optimizer.zero_grad(set_to_none=True)
             losses["loss"].backward()
-            torch.nn.utils.clip_grad_norm_(
-                list(model.teacher.parameters()) + list(model.decoder.parameters()), clip
-            )
+            torch.nn.utils.clip_grad_norm_(teacher_parameters, clip)
             optimizer.step()
             pixel = (
                 (outputs["prediction"].detach() - window["target"])
                 * window["canvas_size"]
             ).norm(dim=-1)
             difficulty.update(window["source_paths"], pixel)
-            for name in running:
-                running[name].append(float(losses[name].detach()))
+            for name, value in losses.items():
+                if name != "per_sample_trajectory":
+                    running.setdefault(name, []).append(float(value.detach()))
 
         validation = evaluate_teacher(
             model, validation_loader, config, context_samples, patch_length,
@@ -783,6 +919,8 @@ def train_teacher(
                 "teacher": clone_state(model.teacher),
                 "decoder": clone_state(model.decoder),
             }
+            if model.guidance is not None:
+                best_state["guidance"] = clone_state(model.guidance)
             torch.save(
                 {**best_state, "config": config, "validation": validation},
                 output / "teacher_best.pt",
@@ -791,6 +929,8 @@ def train_teacher(
         raise RuntimeError("teacher training produced no valid validation windows")
     model.teacher.load_state_dict(best_state["teacher"])
     model.decoder.load_state_dict(best_state["decoder"])
+    if model.guidance is not None:
+        model.guidance.load_state_dict(best_state["guidance"])
     return history
 
 
@@ -816,10 +956,15 @@ def train_student_phase(
     set_trainable(model.teacher, False)
     set_trainable(model.student, True)
     set_trainable(model.decoder, unfreeze_decoder)
+    if model.guidance is not None:
+        set_trainable(model.guidance, True)
     learning_rate = float(config["training"]["learning_rate"])
+    student_parameters = list(model.student.parameters())
+    if model.guidance is not None:
+        student_parameters += list(model.guidance.parameters())
     if unfreeze_decoder:
         parameters: Any = [
-            {"params": model.student.parameters(), "lr": learning_rate},
+            {"params": student_parameters, "lr": learning_rate},
             {
                 "params": model.decoder.parameters(),
                 "lr": learning_rate * float(
@@ -828,7 +973,7 @@ def train_student_phase(
             },
         ]
     else:
-        parameters = model.student.parameters()
+        parameters = student_parameters
     optimizer = torch.optim.AdamW(
         parameters,
         lr=learning_rate,
@@ -872,13 +1017,7 @@ def train_student_phase(
             train_loader, difficulty,
             int(config.get("seed", 42)) + 10000 + epoch,
         ) if adaptive else train_loader
-        running: dict[str, list[float]] = {
-            key: [] for key in (
-                "loss", "point", "trajectory", "latent",
-                "prediction_distillation", "trajectory_distillation",
-                "emg_point", "emg_trajectory", "emg_latent", "imu_tracking",
-            )
-        }
+        running: dict[str, list[float]] = {}
         for batch in tqdm(loader, desc=f"{phase} {epoch}"):
             if batch is None:
                 continue
@@ -914,8 +1053,8 @@ def train_student_phase(
                 * window["canvas_size"]
             ).norm(dim=-1)
             difficulty.update(window["source_paths"], pixel)
-            for name in running:
-                running[name].append(float(losses[name].detach()))
+            for name, value in losses.items():
+                running.setdefault(name, []).append(float(value.detach()))
 
         validation = evaluate(
             model, validation_loader, config, context_samples, patch_length,
@@ -1064,6 +1203,14 @@ def main() -> None:
         f"latent {model_config['latent_dim']}D, "
         f"teacher chunk {model_config['teacher_trajectory_steps']} steps"
     )
+    if model.guidance is not None:
+        print(
+            "factor-guided latent: "
+            f"intent={model.guidance.intent_dim}, "
+            f"motion={model.guidance.motion_dim}, "
+            f"residual={model.guidance.residual_dim}; "
+            "EMG intent receives explicit target supervision"
+        )
     print(f"parameters: {sum(parameter.numel() for parameter in model.parameters()):,}")
 
     output = Path(args.output_dir)
@@ -1136,6 +1283,30 @@ def main() -> None:
         f"{test.get('imu_tracking_trajectory_cm', float('nan')):.2f} cm"
         f" | latent RMSE: {test.get('latent_rmse', float('nan')):.4f}"
     )
+    if "intent_target_accuracy" in test:
+        print("\n  factor-guided latent probes")
+        print(
+            f"    fused intent -> target : "
+            f"{100.0 * test['intent_target_accuracy']:6.2f}%"
+        )
+        print(
+            f"    EMG intent -> target   : "
+            f"{100.0 * test['emg_intent_target_accuracy']:6.2f}%"
+        )
+        print(
+            f"    other -> target leak   : "
+            f"{100.0 * test['other_target_leakage_accuracy']:6.2f}% (lower is better)"
+        )
+        if "residual_session_accuracy" in test:
+            print(
+                f"    residual -> session    : "
+                f"{100.0 * test['residual_session_accuracy']:6.2f}%"
+            )
+            print(
+                f"    intent -> session leak : "
+                f"{100.0 * test['intent_session_leakage_accuracy']:6.2f}% "
+                "(lower is better)"
+            )
 
     save_json({"config": config, "history": history, "test": test}, output / "results.json")
     torch.save(
