@@ -1,4 +1,9 @@
-"""Deterministic wearable heads with no VAE in the prediction pathway."""
+"""Deterministic wearable heads with no VAE sampling in deployment.
+
+The proven deterministic bridge is retained for screen coordinates; it is a
+fixed feed-forward adapter, not a stochastic VAE. The 3D path continues to use
+the direct IMU base and bounded EMG correction that improved tracking.
+"""
 from __future__ import annotations
 
 import math
@@ -8,11 +13,6 @@ import torch
 from torch import nn
 
 from .complete_reach_distillation import CompleteReachDistillationModel
-from .grid_point import (
-    SpatialPointHead,
-    decode_grid_outputs,
-    finalize_point_prediction,
-)
 
 
 def _gate_logit(value: float) -> float:
@@ -21,7 +21,7 @@ def _gate_logit(value: float) -> float:
 
 
 class DeterministicReachHeads(nn.Module):
-    """Direct EMG screen head and IMU-base 3D correction head."""
+    """Direct IMU-base 3D correction head conditioned on EMG intent."""
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__()
@@ -30,20 +30,8 @@ class DeterministicReachHeads(nn.Module):
         width = int(model["d_model"])
         hidden = int(settings.get("hidden", width))
         dropout = float(settings.get("dropout", model["dropout"]))
-        grid_width, grid_height = map(int, model.get("grid_size", [8, 5]))
-        self.grid_width = grid_width
-        self.grid_height = grid_height
         self.steps = int(model["teacher_trajectory_steps"])
         self.correction_limit_m = float(settings.get("correction_limit_m", 0.20))
-
-        self.screen_adapter = nn.Sequential(
-            nn.LayerNorm(width), nn.Linear(width, hidden), nn.GELU(),
-            nn.Dropout(dropout),
-        )
-        self.point_head = SpatialPointHead(
-            hidden, grid_width, grid_height, dropout,
-            direct_prediction=True, zero_initialize=False,
-        )
         self.correction_adapter = nn.Sequential(
             nn.LayerNorm(2 * width), nn.Linear(2 * width, hidden), nn.GELU(),
             nn.Dropout(dropout),
@@ -75,13 +63,6 @@ class DeterministicReachHeads(nn.Module):
         motion_context: torch.Tensor,
         imu_base: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        screen = self.point_head(self.screen_adapter(intent_context))
-        screen.update(decode_grid_outputs(
-            screen["heatmap_logits"], screen["offset_logits"],
-            self.grid_width, self.grid_height,
-        ))
-        finalize_point_prediction(screen)
-
         correction_context = self.correction_adapter(torch.cat([
             motion_context, intent_context.detach()
         ], dim=-1))
@@ -101,7 +82,6 @@ class DeterministicReachHeads(nn.Module):
             endpoint[:, None, :] - provisional[:, -1:]
         )
         return {
-            **screen,
             "trajectory": trajectory,
             "complete_trajectory": trajectory,
             "endpoint_3d": endpoint,
@@ -112,16 +92,6 @@ class DeterministicReachHeads(nn.Module):
             "endpoint_correction_gate": endpoint_gate.expand(intent_context.size(0)),
             "deterministic_intent_context": intent_context,
             "deterministic_motion_context": motion_context,
-            # Compatibility/reporting fields from the predecessor. Zero is
-            # literal here: neither direct head uses teacher-decoder context.
-            "screen_shared_gate": torch.zeros(
-                intent_context.size(0), device=intent_context.device,
-                dtype=intent_context.dtype,
-            ),
-            "motion_shared_gate": torch.zeros(
-                intent_context.size(0), device=intent_context.device,
-                dtype=intent_context.dtype,
-            ),
         }
 
 
@@ -158,21 +128,26 @@ class DeterministicCompleteReachModel(CompleteReachDistillationModel):
             encoded["fused_imu_trajectory"],
         )
         factor_latent = encoded["mu"]
+        decoder_latent = self.student.teacher_latent_bridge(factor_latent)
+        screen_decoded, guidance = self._student_decode(
+            factor_latent, decoder_latent
+        )
         outputs: dict[str, Any] = {
+            **screen_decoded,
             **decoded,
-            # Compatibility fields for auxiliary factor probes only. They do
-            # not drive either prediction head and are never sampled.
+            # These deterministic factors are never sampled. The bridge only
+            # adapts coordinates for the established screen decoder.
             "latent": factor_latent,
             "mu": factor_latent,
             "factor_latent": factor_latent,
-            "decoder_latent": factor_latent,
+            "decoder_latent": decoder_latent,
             "log_variance": torch.zeros_like(factor_latent),
             "imu_trajectory": encoded["imu_trajectory"],
             "channel_attention": encoded["channel_attention"],
             "lag_attention": encoded["lag_attention"],
             "emg_from_imu_attention": encoded["emg_from_imu_attention"],
             "imu_from_emg_attention": encoded["imu_from_emg_attention"],
-            "guidance": self.guidance(factor_latent),
+            "guidance": guidance,
         }
         if include_emg_only:
             zero_motion = torch.zeros_like(encoded["motion_context"])
@@ -181,13 +156,20 @@ class DeterministicCompleteReachModel(CompleteReachDistillationModel):
                 encoded["intent_context"], zero_motion, zero_base
             )
             emg_latent = encoded["emg_mu"]
+            emg_decoder_latent = self.student.emg_teacher_latent_bridge(
+                emg_latent
+            )
+            emg_screen, emg_guidance = self._student_decode(
+                emg_latent, emg_decoder_latent
+            )
             outputs["emg_only"] = {
+                **emg_screen,
                 **emg_decoded,
                 "latent": emg_latent,
                 "mu": emg_latent,
                 "factor_latent": emg_latent,
-                "decoder_latent": emg_latent,
+                "decoder_latent": emg_decoder_latent,
                 "log_variance": torch.zeros_like(emg_latent),
-                "guidance": self.guidance(emg_latent),
+                "guidance": emg_guidance,
             }
         return outputs

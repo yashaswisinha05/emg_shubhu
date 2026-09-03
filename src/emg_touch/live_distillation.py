@@ -60,7 +60,7 @@ RAW_IMU_AXES_PER_SENSOR = 6
 def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     keys = tuple(state)
     if any(
-        key.startswith("student.deterministic_heads.screen_adapter.")
+        key.startswith("student.deterministic_heads.correction_adapter.")
         for key in keys
     ):
         return "deterministic_complete_reach"

@@ -2,8 +2,8 @@
 """Train direct deterministic EMG-screen and IMU-3D wearable heads.
 
 The privileged teacher remains training-only for output distillation. Student
-predictions bypass Gaussian sampling, KL matching, and the teacher-latent
-bridge entirely.
+predictions bypass Gaussian sampling and KL matching. The proven deterministic
+screen-coordinate adapter is retained; the direct IMU+EMG 3D route bypasses it.
 """
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def main() -> None:
     channel.__doc__ = __doc__
     print(
         "deterministic student: raw EMG intent -> screen | raw IMU motion -> "
-        "3D base + bounded EMG correction; no VAE or teacher bridge in "
+        "3D base + bounded EMG correction; no VAE sampling or KL in "
         "student prediction path"
     )
     channel.main()

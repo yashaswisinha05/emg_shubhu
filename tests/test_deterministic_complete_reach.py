@@ -21,7 +21,7 @@ def _model(config: dict) -> DeterministicCompleteReachModel:
     )
 
 
-def test_student_predictions_are_deterministic_and_bypass_teacher_bridge() -> None:
+def test_student_predictions_are_deterministic_without_sampling() -> None:
     config = _config()
     model = _model(config).eval()
     window = _window(config)
@@ -30,10 +30,6 @@ def test_student_predictions_are_deterministic_and_bypass_teacher_bridge() -> No
             window["emg"], window["imu"], window["time_mask"],
             sample=False, noise_scale=0.0,
         )
-        for parameter in model.student.teacher_latent_bridge.parameters():
-            parameter.add_(100.0 * torch.randn_like(parameter))
-        for parameter in model.student.endpoint_decoder.parameters():
-            parameter.add_(100.0 * torch.randn_like(parameter))
         second = model.student_forward(
             window["emg"], window["imu"], window["time_mask"],
             sample=True, noise_scale=100.0,
@@ -54,7 +50,7 @@ def test_direct_heads_receive_screen_and_3d_gradients() -> None:
     losses = student_objective(outputs, teacher, window, config)
     losses["loss"].backward()
     heads = model.student.deterministic_heads
-    assert heads.point_head.direct.weight.grad is not None
+    assert model.student.endpoint_decoder.point_head.direct.weight.grad is not None
     assert heads.path_correction_head.weight.grad is not None
     assert heads.endpoint_correction_head.weight.grad is not None
     assert model.student.imu_motion_head[-1].weight.grad is not None
