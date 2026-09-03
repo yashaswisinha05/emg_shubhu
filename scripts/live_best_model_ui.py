@@ -8,15 +8,21 @@ training normalization/filter/PCA pipeline, and calls only
 the red ground-truth target and calculate the displayed pixel error.
 
     python scripts/live_best_model_ui.py \
-      --trial-root "/media/.../emg_imu_vive" \
-      --checkpoint runs/semantic_residual_distillation/best.pt \
-      --config configs/tracked_semantic_residual_distillation.yaml \
+      --trial-root "/media/.../any_compatible_tracked_dataset" \
+      --sweep-dir runs/emg_preprocessing_sweep \
       --device cuda --speed 1.0 --prediction-delay-ms 600
+
+``--sweep-dir`` selects the preprocessing variant by mean validation error
+across completed seeds and then loads that variant's best-validation seed.  It
+never inspects test error for model selection.  By default all recursively
+discovered trial folders under ``--trial-root`` are available in the UI.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import random
+import statistics
 import sys
 from pathlib import Path
 from typing import Any
@@ -43,6 +49,66 @@ from emg_touch.live_distillation import (  # noqa: E402
 )
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
+
+
+def select_best_sweep_checkpoint(
+    sweep_directory: str | Path,
+) -> tuple[Path, dict[str, Any]]:
+    """Choose a complete variant by mean validation, then its best-val seed."""
+    root = Path(sweep_directory)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for results_path in sorted(root.glob("*__seed*/results.json")):
+        run_name = results_path.parent.name
+        if "__seed" not in run_name:
+            continue
+        variant, raw_seed = run_name.rsplit("__seed", 1)
+        try:
+            seed = int(raw_seed)
+            with results_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (ValueError, OSError, json.JSONDecodeError):
+            continue
+        validation = [
+            float(record["student_px"])
+            for record in payload.get("history", [])
+            if record.get("phase") in {"student", "finetune"}
+            and "student_px" in record
+        ]
+        checkpoint = results_path.parent / "best.pt"
+        if not validation or not checkpoint.is_file():
+            continue
+        grouped.setdefault(variant, []).append({
+            "seed": seed,
+            "validation_px": min(validation),
+            "checkpoint": checkpoint,
+        })
+    if not grouped:
+        raise FileNotFoundError(
+            f"no completed *__seed*/results.json + best.pt runs under {root}"
+        )
+    maximum_runs = max(len(runs) for runs in grouped.values())
+    complete = {
+        variant: runs
+        for variant, runs in grouped.items()
+        if len(runs) == maximum_runs
+    }
+    variant_scores = {
+        variant: statistics.mean(run["validation_px"] for run in runs)
+        for variant, runs in complete.items()
+    }
+    winner = min(variant_scores, key=variant_scores.get)
+    selected = min(
+        complete[winner], key=lambda run: (run["validation_px"], run["seed"])
+    )
+    details = {
+        "variant": winner,
+        "seed": selected["seed"],
+        "run_validation_px": selected["validation_px"],
+        "variant_mean_validation_px": variant_scores[winner],
+        "runs_per_complete_variant": maximum_runs,
+        "variant_scores": variant_scores,
+    }
+    return Path(selected["checkpoint"]), details
 
 
 def _session_owner(
@@ -134,7 +200,12 @@ class NormalizedReplayTrialLoader:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trial-root", required=True)
-    parser.add_argument("--checkpoint", required=True)
+    model_source = parser.add_mutually_exclusive_group(required=True)
+    model_source.add_argument("--checkpoint")
+    model_source.add_argument(
+        "--sweep-dir",
+        help="Automatically select the validation-best completed sweep model",
+    )
     parser.add_argument(
         "--config",
         help="Optional compatibility check; checkpoint config remains authoritative",
@@ -148,9 +219,24 @@ def main() -> None:
         help="Wait this long after movement onset before the first prediction",
     )
     parser.add_argument("--shuffle", action="store_true")
+    parser.add_argument(
+        "--session-prefixes",
+        nargs="+",
+        help="Optional inference-dataset folder filter; default uses all sessions",
+    )
     args = parser.parse_args()
 
-    runner = LiveDistillationModel("Best wearable model", args.checkpoint, args.device)
+    checkpoint = Path(args.checkpoint) if args.checkpoint else None
+    selection = None
+    if args.sweep_dir:
+        checkpoint, selection = select_best_sweep_checkpoint(args.sweep_dir)
+        print(
+            f"validation-selected sweep model: {selection['variant']} seed "
+            f"{selection['seed']} | run={selection['run_validation_px']:.1f}px | "
+            f"variant mean={selection['variant_mean_validation_px']:.1f}px"
+        )
+    assert checkpoint is not None
+    runner = LiveDistillationModel("Best wearable model", checkpoint, args.device)
     config = runner.config
     if args.config:
         external = load_config(args.config)
@@ -162,7 +248,7 @@ def main() -> None:
             )
 
     discovered = discover_trials(args.trial_root)
-    prefixes = list(config["data"].get("include_session_prefixes", []))
+    prefixes = list(args.session_prefixes or [])
     session_trials: dict[str, list[Path]] = {}
     trial_sessions: dict[str, str] = {}
     for name, paths in discovered.items():
@@ -186,7 +272,7 @@ def main() -> None:
         runner.model, runner.context_samples
     ).to(runner.device).eval()
     print(
-        f"loaded {args.checkpoint} ({runner.kind}) | {len(trials)} trial(s) | "
+        f"loaded {checkpoint} ({runner.kind}) | {len(trials)} trial(s) | "
         f"device={runner.device}"
     )
     print(

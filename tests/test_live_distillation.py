@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -7,7 +8,11 @@ import numpy as np
 import torch
 from torch import nn
 
-from scripts.live_best_model_ui import StudentForwardAdapter, _session_owner
+from scripts.live_best_model_ui import (
+    StudentForwardAdapter,
+    _session_owner,
+    select_best_sweep_checkpoint,
+)
 from scripts.live_inference import replay_trial
 from scripts.run_live_distillation_ui import LiveApplication, parse_checkpoint
 from tests.test_channel_horizon_distillation import _enhanced_config
@@ -155,6 +160,32 @@ def test_best_ui_regroups_nested_trials_by_selected_session() -> None:
         "dev_a2_vive__abc"
     )
     assert _session_owner(path, ["dev_a1"], "export") is None
+
+
+def test_best_ui_selects_variant_mean_then_seed_using_validation_only() -> None:
+    with tempfile.TemporaryDirectory() as raw_directory:
+        root = Path(raw_directory)
+        values = {
+            "baseline__seed1": (190.0, 500.0),
+            "baseline__seed2": (210.0, 100.0),
+            "filtered__seed1": (201.0, 50.0),
+            "filtered__seed2": (202.0, 40.0),
+        }
+        for run_name, (validation, test) in values.items():
+            output = root / run_name
+            output.mkdir()
+            (output / "best.pt").touch()
+            with (output / "results.json").open("w", encoding="utf-8") as handle:
+                json.dump({
+                    "history": [{
+                        "phase": "student", "student_px": validation,
+                    }],
+                    "test": {"student_px": test},
+                }, handle)
+        checkpoint, details = select_best_sweep_checkpoint(root)
+        assert details["variant"] == "baseline"
+        assert details["seed"] == 1
+        assert checkpoint == root / "baseline__seed1" / "best.pt"
 
 
 def test_live_preprocessing_is_causal() -> None:
