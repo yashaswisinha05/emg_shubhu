@@ -31,6 +31,9 @@ from .models.latent_distillation import WearableLatentDistillationModel
 from .models.semantic_residual_distillation import (
     SemanticResidualDistillationModel,
 )
+from .models.temporal_cross_attention_distillation import (
+    TemporalCrossAttentionDistillationModel,
+)
 from .utils import choose_device
 
 
@@ -39,6 +42,10 @@ RAW_IMU_AXES_PER_SENSOR = 6
 
 def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     keys = tuple(state)
+    if any(key.startswith("student.lag_attention.") for key in keys) and any(
+        key.startswith("student.emg_from_imu.") for key in keys
+    ):
+        return "temporal_cross_attention"
     if any(key.startswith("student.fused_endpoint_residual.") for key in keys):
         return "semantic_residual"
     if any(key.startswith("student.channel_gate.") for key in keys):
@@ -48,8 +55,9 @@ def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     ):
         return "latent_distillation"
     raise ValueError(
-        "unsupported checkpoint architecture; expected a latent-distillation "
-        "or channel+horizon final.pt/best.pt"
+        "unsupported checkpoint architecture; expected a latent-distillation, "
+        "channel+horizon, semantic-residual, or temporal-cross-attention "
+        "final.pt/best.pt"
     )
 
 
@@ -247,7 +255,11 @@ class LiveDistillationModel:
         self.device = choose_device(device)
         emg_dim = emg_feature_count(self.config["data"])
         imu_dim = imu_feature_count(self.config["data"])
-        if self.kind == "semantic_residual":
+        if self.kind == "temporal_cross_attention":
+            self.model = TemporalCrossAttentionDistillationModel(
+                self.config, emg_dim, imu_dim
+            )
+        elif self.kind == "semantic_residual":
             self.model = SemanticResidualDistillationModel(
                 self.config, emg_dim, imu_dim
             )
