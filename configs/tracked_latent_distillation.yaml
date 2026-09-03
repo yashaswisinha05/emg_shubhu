@@ -1,0 +1,111 @@
+seed: 42
+experiment_name: "tracked_latent_distillation"
+
+data:
+  emg_session_normalise: true
+  imu_session_normalise: true
+  sensors: ["S0", "S4", "S8", "S12"]
+  emg_column_template: "EMG 1_{sensor}"
+  acc_column_template: "ACC {axis}_{sensor}"
+  gyro_column_template: "GYRO {axis}_{sensor}"
+  tracker_column_prefix: "VIVE"
+  tracker_id: "T0"
+  sample_rate_hz: 1259.4
+  decimation: 10
+  # Preserve causal raw-EMG structure before moving to the ~126 Hz model clock.
+  emg_feature_windows_ms: [10.0, 25.0, 50.0]
+  emg_feature_kinds: ["rms", "waveform_length", "log_energy", "derivative"]
+  tracker_max_sync_error_ms: 20.0
+  imu_posture_features: true
+  posture_lowpass_ms: 400.0
+  posture_baseline_ms: 300.0
+  # Match the current VAE-discriminator experiment for an architecture-only
+  # comparison. Use split_by: session for the final cross-session claim.
+  split_by: "trial"
+  validation_fraction: 0.2
+  test_fraction: 0.2
+
+model:
+  grid_size: [8, 5]
+  d_model: 128
+  num_layers: 3
+  num_heads: 4
+  ffn_dim: 384
+  dropout: 0.15
+  patch_length: 16
+  patch_stride: 8
+  tcn_kernel_sizes: [3, 7, 15]
+  context_ms: 2000.0
+  # MUSIC uses 32 dimensions. Here the latent must encode one destination and
+  # a dense future motion chunk, so 32 is a sensible starting capacity.
+  latent_dim: 32
+  teacher_layers: 2
+  decoder_width: 128
+  teacher_trajectory_steps: 16
+  trajectory_limit_m: 0.8
+  velocity_scale_mps: 1.0
+  # Entire IMU branch is removed for this fraction of student training trials.
+  imu_modality_dropout: 0.5
+
+virtual_leader:
+  minimum_prefix: 16
+
+loss:
+  gaussian_sigma_cells: 0.5
+  gaussian_soft_fraction: 0.15
+  edge_weight: 0.5
+  heatmap_weight: 1.0
+  offset_weight: 0.5
+  pixel_weight: 1.0
+  radial_weight: 0.5
+  transport_weight: 0.5
+  offset_huber_beta: 0.1
+  pixel_huber_beta: 0.25
+  pixel_normalizer_px: 80.0
+  charbonnier_epsilon_px: 1.0
+
+distillation:
+  teacher_epochs: 10
+  finetune_epochs: 5
+  lead_window_ms: [50.0, 400.0]
+  evaluation_leads_ms: [50.0, 100.0, 200.0, 300.0, 400.0]
+  selection_lead_ms: 200.0
+  trajectory_epsilon_m: 0.002
+
+  teacher_trajectory_weight: 2.0
+  teacher_kl_weight: 0.0001
+  teacher_kl_warmup_epochs: 5
+  teacher_sigma_floor: 0.05
+
+  student_trajectory_weight: 2.0
+  latent_distillation_weight: 1.0
+  prediction_distillation_weight: 0.25
+  trajectory_distillation_weight: 1.0
+  # Force an independently useful muscle pathway.
+  emg_only_weight: 0.5
+  emg_latent_weight: 0.5
+  # Explicitly supervise IMU as the kinematic/motion branch.
+  imu_tracking_weight: 0.25
+  student_noise_scale: 0.5
+  decoder_finetune_lr_factor: 0.1
+
+  adaptive_sampling:
+    enabled: true
+    ema_alpha: 0.5
+    uniform_mix: 0.7
+    power: 1.0
+    # Prevent noisy or mistracked trials from monopolising training.
+    max_ratio: 4.0
+
+training:
+  batch_size: 16
+  num_workers: 0
+  epochs: 20
+  cutoffs_per_trial: 3
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
+  scheduler_patience: 3
+  scheduler_factor: 0.5
+  minimum_learning_rate: 0.000001
+  early_stopping_patience: 7
