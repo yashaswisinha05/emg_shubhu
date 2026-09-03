@@ -203,3 +203,25 @@ def test_session_selection_keeps_only_requested_dev_a_folders() -> None:
         "dev_a3_vive__third",
         "dev_a4_vive__fourth",
     }
+
+
+def test_session_selection_finds_nested_export_ancestor_and_regroups() -> None:
+    sessions = {
+        "recordings": [
+            Path("dataset/dev_a1_vive__first/recordings/trial_1.csv"),
+            Path("dataset/dev_a2_vive__second/recordings/trial_2.csv"),
+            Path("dataset/dev_a3_vive__third/recordings/trial_3.csv"),
+            Path("dataset/dev_a4_vive__fourth/recordings/trial_4.csv"),
+            Path("dataset/dev_b1_vive__excluded/recordings/trial_5.csv"),
+        ]
+    }
+    selected = select_sessions(
+        sessions, ["dev_a1", "dev_a2", "dev_a3", "dev_a4"]
+    )
+    assert set(selected) == {
+        "dev_a1_vive__first",
+        "dev_a2_vive__second",
+        "dev_a3_vive__third",
+        "dev_a4_vive__fourth",
+    }
+    assert sum(map(len, selected.values())) == 4

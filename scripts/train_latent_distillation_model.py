@@ -96,7 +96,14 @@ def milliseconds_to_samples(milliseconds: float, rate: float) -> int:
 def select_sessions(
     sessions: dict[str, list[Path]], prefixes: list[str] | tuple[str, ...]
 ) -> dict[str, list[Path]]:
-    """Restrict this experiment to explicitly named session prefixes."""
+    """Restrict trials by a matching session key or ancestor folder.
+
+    Some exported datasets put ``trial_*.csv`` one or more directories below
+    the ``dev_a1_vive__...`` folder. The generic loader groups trials by their
+    immediate parent, so checking only its dictionary key misses those
+    exports. Regrouping by the matched ancestor also keeps normalization
+    separate for each recording session.
+    """
     cleaned = tuple(
         str(prefix).strip().lower()
         for prefix in prefixes
@@ -104,19 +111,40 @@ def select_sessions(
     )
     if not cleaned:
         return sessions
-    selected = {
-        name: trials
-        for name, trials in sessions.items()
-        if any(name.lower().startswith(prefix) for prefix in cleaned)
-    }
-    missing = [
-        prefix
-        for prefix in cleaned
-        if not any(name.lower().startswith(prefix) for name in sessions)
-    ]
+
+    def matches(label: str, prefix: str) -> bool:
+        lowered = label.lower()
+        return (
+            lowered == prefix
+            or lowered.startswith(prefix + "_")
+            or lowered.startswith(prefix + "-")
+        )
+
+    selected: dict[str, list[Path]] = {}
+    found: set[str] = set()
+    for name, trials in sessions.items():
+        for path in trials:
+            owner: str | None = None
+            for prefix in cleaned:
+                if matches(name, prefix):
+                    owner = name
+                    found.add(prefix)
+                    break
+            if owner is None:
+                for part in reversed(path.parts):
+                    matching = [prefix for prefix in cleaned if matches(part, prefix)]
+                    if matching:
+                        owner = part
+                        found.update(matching)
+                        break
+            if owner is not None:
+                selected.setdefault(owner, []).append(path)
+
+    missing = [prefix for prefix in cleaned if prefix not in found]
     if missing:
         raise ValueError(
-            "session prefix(es) matched no dataset folder: " + ", ".join(missing)
+            "session prefix(es) matched no dataset folder or trial ancestor: "
+            + ", ".join(missing)
         )
     if len(selected) < 3:
         raise ValueError(
@@ -124,6 +152,46 @@ def select_sessions(
             "at least three are required for train/validation/test splits"
         )
     return selected
+
+
+class ExperimentTrackedTrajectoryDataset(TrackedTrajectoryDataset):
+    """Tracked dataset normalized by the selected ancestor session."""
+
+    def __init__(
+        self,
+        trials: list[Path],
+        data_config: dict[str, Any],
+        cache_dir: Path | None,
+        trial_sessions: dict[str, str],
+        session_index: dict[str, int],
+        emg_scales: dict[str, np.ndarray],
+        imu_statistics: dict[str, tuple[np.ndarray, np.ndarray]],
+    ) -> None:
+        # Leave the base normalization maps empty; __getitem__ applies the
+        # correct ancestor-session maps after loading cached raw features.
+        super().__init__(trials, data_config, cache_dir, session_index={})
+        self.trial_sessions = trial_sessions
+        self.experiment_session_index = session_index
+        self.experiment_emg_scales = emg_scales
+        self.experiment_imu_statistics = imu_statistics
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        result = super().__getitem__(index)
+        if result.get("unusable"):
+            return result
+        path = self.trials[index]
+        session = self.trial_sessions[str(path)]
+        scale = self.experiment_emg_scales.get(session)
+        if scale is not None:
+            result["emg"] = result["emg"] / torch.from_numpy(scale)
+        statistics = self.experiment_imu_statistics.get(session)
+        if statistics is not None:
+            centre, spread = statistics
+            result["imu"] = (
+                result["imu"] - torch.from_numpy(centre)
+            ) / torch.from_numpy(spread)
+        result["session"] = int(self.experiment_session_index[session])
+        return result
 
 
 def build_experiment_loaders(
@@ -142,6 +210,9 @@ def build_experiment_loaders(
     sessions = select_sessions(sessions, prefixes)
     train, validation, test = split_sessions(sessions, config)
     session_index = {name: index for index, name in enumerate(sorted(sessions))}
+    trial_sessions = {
+        str(path): name for name, trials in sessions.items() for path in trials
+    }
 
     scales: dict[str, np.ndarray] = {}
     if bool(config["data"].get("emg_session_normalise", True)):
@@ -162,14 +233,15 @@ def build_experiment_loaders(
     workers = int(config["training"].get("num_workers", 0))
 
     def loader(trials: list[Path], shuffle: bool) -> DataLoader:
-        dataset = TrackedTrajectoryDataset(
+        dataset = ExperimentTrackedTrajectoryDataset(
             trials,
             config["data"],
             Path(cache_dir) if cache_dir else None,
+            trial_sessions,
             session_index,
+            scales,
+            imu_statistics,
         )
-        dataset.emg_scales = scales
-        dataset.imu_statistics = imu_statistics
         return DataLoader(
             dataset,
             batch_size=batch_size,
