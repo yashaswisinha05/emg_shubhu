@@ -1,0 +1,171 @@
+seed: 42
+experiment_name: "tracked_channel_horizon_distillation"
+
+data:
+  emg_session_normalise: true
+  imu_session_normalise: true
+  sensors: ["S0", "S4", "S8", "S12"]
+  emg_column_template: "EMG 1_{sensor}"
+  acc_column_template: "ACC {axis}_{sensor}"
+  gyro_column_template: "GYRO {axis}_{sensor}"
+  tracker_column_prefix: "VIVE"
+  tracker_id: "T0"
+  sample_rate_hz: 1259.4
+  decimation: 10
+  emg_feature_windows_ms: [10.0, 25.0, 50.0]
+  emg_feature_kinds: ["rms", "waveform_length", "log_energy", "derivative"]
+  tracker_max_sync_error_ms: 20.0
+  imu_posture_features: true
+  posture_lowpass_ms: 400.0
+  posture_baseline_ms: 300.0
+  include_session_prefixes: ["dev_a1", "dev_a2", "dev_a3", "dev_a4"]
+  # Hyperparameter selection is on held-out trials from these four sessions.
+  # Repeat the final chosen setup with split_by: "session" for a claim about
+  # transfer to a recording session the model never saw.
+  split_by: "trial"
+  validation_fraction: 0.2
+  test_fraction: 0.2
+
+model:
+  grid_size: [8, 5]
+  d_model: 128
+  num_layers: 3
+  num_heads: 4
+  ffn_dim: 384
+  dropout: 0.15
+  patch_length: 16
+  patch_stride: 8
+  tcn_kernel_sizes: [3, 7, 15]
+  context_ms: 2000.0
+  latent_dim: 32
+  teacher_layers: 2
+  decoder_width: 128
+  teacher_trajectory_steps: 16
+  trajectory_limit_m: 0.8
+  velocity_scale_mps: 1.0
+  imu_modality_dropout: 0.5
+
+  # The physical sensors are gated at every timestep before the existing EMG
+  # encoder. Uniform gates are the exact identity at initialization.
+  channel_time_attention:
+    hidden: 32
+    temperature: 0.75
+    sensor_dropout_probability: 0.15
+    entropy_weight: 0.0025
+    smoothness_weight: 0.05
+    report_lag_edges_ms: [0, 100, 250, 500, 1000, 2000]
+
+  # Keep the proven target-guided block. Motion is widened to 12 dimensions;
+  # z[24:28] inside that block is explicitly reserved for time-to-touch, and
+  # the final four dimensions remain session/nuisance residuals.
+  factor_latent:
+    enabled: true
+    intent_dim: 16
+    motion_dim: 12
+    head_width: 96
+    gradient_reversal_scale: 0.25
+
+  horizon_latent:
+    start: 24
+    dim: 4
+    bins_ms: [50, 100, 200, 300, 400]
+    head_width: 64
+    gradient_reversal_scale: 0.25
+    target_sigma_ms: 45.0
+    regression_huber_beta: 0.1
+
+    # The teacher establishes the semantic axis. The fused and EMG-only
+    # students must recover it from causal wearables; adversarial terms make
+    # the remaining latent coordinates uninformative about time-to-touch.
+    teacher_classification_weight: 0.25
+    teacher_regression_weight: 0.25
+    teacher_adversarial_weight: 0.025
+    student_classification_weight: 0.50
+    student_regression_weight: 0.50
+    student_adversarial_weight: 0.05
+    emg_classification_weight: 0.75
+    emg_regression_weight: 0.75
+    emg_adversarial_weight: 0.05
+
+# Retained legacy name used only for minimum valid history and the number of
+# selected sessions. There is no virtual_leader_regularization block and the
+# dedicated virtual-leader objective is never imported by this experiment.
+virtual_leader:
+  minimum_prefix: 16
+
+loss:
+  gaussian_sigma_cells: 0.5
+  gaussian_soft_fraction: 0.15
+  edge_weight: 0.5
+  heatmap_weight: 1.0
+  offset_weight: 0.5
+  pixel_weight: 1.0
+  radial_weight: 0.5
+  transport_weight: 0.5
+  offset_huber_beta: 0.1
+  pixel_huber_beta: 0.25
+  pixel_normalizer_px: 80.0
+  charbonnier_epsilon_px: 1.0
+
+distillation:
+  teacher_epochs: 25
+  finetune_epochs: 0
+  lead_window_ms: [50.0, 400.0]
+  evaluation_leads_ms: [50.0, 100.0, 200.0, 300.0, 400.0]
+  selection_lead_ms: 200.0
+  trajectory_epsilon_m: 0.002
+
+  teacher_trajectory_weight: 2.0
+  teacher_kl_weight: 0.0001
+  teacher_kl_warmup_epochs: 5
+  teacher_sigma_floor: 0.05
+
+  # Start from the 228.6 px factor-guided experiment, not the worse
+  # virtual-leader run.
+  student_trajectory_weight: 0.5
+  latent_distillation_weight: 0.25
+  prediction_distillation_weight: 1.0
+  trajectory_distillation_weight: 0.5
+  emg_only_weight: 0.5
+  emg_latent_weight: 0.25
+  imu_tracking_weight: 0.1
+  student_noise_scale: 0.5
+  decoder_finetune_lr_factor: 0.1
+
+  teacher_factor_target_weight: 0.5
+  teacher_factor_target_adversarial_weight: 0.05
+  teacher_factor_motion_weight: 0.5
+  teacher_factor_session_weight: 0.05
+  teacher_factor_session_adversarial_weight: 0.025
+
+  student_factor_target_weight: 0.5
+  student_factor_target_adversarial_weight: 0.05
+  student_factor_motion_weight: 0.25
+  student_factor_session_weight: 0.05
+  student_factor_session_adversarial_weight: 0.05
+
+  emg_factor_target_weight: 1.0
+  emg_factor_target_adversarial_weight: 0.1
+  emg_factor_motion_weight: 0.0
+  emg_factor_session_weight: 0.05
+  emg_factor_session_adversarial_weight: 0.1
+
+  adaptive_sampling:
+    enabled: true
+    ema_alpha: 0.5
+    uniform_mix: 0.7
+    power: 1.0
+    max_ratio: 4.0
+
+training:
+  batch_size: 16
+  num_workers: 0
+  epochs: 50
+  cutoffs_per_trial: 3
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
+  scheduler_patience: 4
+  scheduler_factor: 0.5
+  minimum_learning_rate: 0.000001
+  early_stopping_patience: 10
