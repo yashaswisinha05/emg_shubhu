@@ -58,6 +58,7 @@ def collect_complete_reach_trials(
         "direction_aware_complete_reach",
         "monotonic_complete_reach",
         "task_separated_complete_reach",
+        "deterministic_complete_reach",
     }
     if runner.kind not in supported_kinds:
         raise ValueError(
@@ -284,6 +285,7 @@ def main() -> None:
         "direction_aware_complete_reach",
         "monotonic_complete_reach",
         "task_separated_complete_reach",
+        "deterministic_complete_reach",
     }:
         raise SystemExit(
             "checkpoint must come from a complete-reach trainer; "

@@ -99,6 +99,14 @@ model:
     endpoint_score_weight: 0.5
     joint_3d_px_per_cm: 5.0
 
+  # Used only by train_deterministic_complete_reach.py. The original
+  # task-separated experiment ignores this section.
+  deterministic_complete_reach:
+    hidden: 128
+    dropout: 0.10
+    correction_limit_m: 0.20
+    correction_gate_initial: 0.15
+
   factor_latent:
     enabled: true
     intent_dim: 16

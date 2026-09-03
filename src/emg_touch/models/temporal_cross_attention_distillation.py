@@ -273,6 +273,14 @@ class TemporalCrossAttentionStudentEncoder(nn.Module):
             "imu_trajectory": self.imu_motion_head(imu_pool).reshape(
                 -1, self.trajectory_steps, 3
             ),
+            # Direct deterministic task heads can consume these contexts
+            # without passing through a Gaussian latent or teacher bridge.
+            "intent_context": intent_context,
+            "motion_context": motion_context,
+            "interaction_context": interaction,
+            "fused_imu_trajectory": self.imu_motion_head(
+                fused_imu_pool
+            ).reshape(-1, self.trajectory_steps, 3),
             "channel_attention": channel_attention,
             "lag_attention": lag_attention,
             "emg_from_imu_attention": emg_cross_weights,

@@ -37,6 +37,9 @@ from .models.monotonic_complete_reach import MonotonicCompleteReachModel
 from .models.task_separated_complete_reach import (
     TaskSeparatedCompleteReachModel,
 )
+from .models.deterministic_complete_reach import (
+    DeterministicCompleteReachModel,
+)
 from .models.latent_distillation import WearableLatentDistillationModel
 from .models.rolling_dual_head_distillation import (
     RollingDualHeadDistillationModel,
@@ -56,6 +59,11 @@ RAW_IMU_AXES_PER_SENSOR = 6
 
 def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     keys = tuple(state)
+    if any(
+        key.startswith("student.deterministic_heads.screen_adapter.")
+        for key in keys
+    ):
+        return "deterministic_complete_reach"
     if any(
         key.startswith("student.endpoint_decoder.path_correction_head.")
         for key in keys
@@ -101,7 +109,7 @@ def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     ):
         return "latent_distillation"
     raise ValueError(
-        "unsupported checkpoint architecture; expected a task-separated, "
+        "unsupported checkpoint architecture; expected a deterministic, task-separated, "
         "monotonic, direction-aware complete-reach, complete-reach, "
         "rolling-dual-head, "
         "latent-distillation, "
@@ -305,7 +313,11 @@ class LiveDistillationModel:
         self.device = choose_device(device)
         emg_dim = emg_feature_count(self.config["data"])
         imu_dim = imu_feature_count(self.config["data"])
-        if self.kind == "task_separated_complete_reach":
+        if self.kind == "deterministic_complete_reach":
+            self.model = DeterministicCompleteReachModel(
+                self.config, emg_dim, imu_dim
+            )
+        elif self.kind == "task_separated_complete_reach":
             self.model = TaskSeparatedCompleteReachModel(
                 self.config, emg_dim, imu_dim
             )
