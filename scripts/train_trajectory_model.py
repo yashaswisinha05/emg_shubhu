@@ -502,6 +502,16 @@ def main() -> None:
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--seed", type=int)
     parser.add_argument(
+        "--horizon-ms", type=float,
+        help="Override virtual_leader.horizon (default 254 ms / 32 samples). "
+        "The tracked dataset has no post-touch buffer - touch is defined as "
+        "the trial's last recorded sample - so a horizon this long needs "
+        "cutoffs sitting that far before the RECORDING ends, not just "
+        "before the hand stops. Run diagnose_horizon_feasibility.py first "
+        "for anything beyond ~500 ms to see what fraction of trials can "
+        "even produce a valid cutoff at the requested horizon.",
+    )
+    parser.add_argument(
         "--task",
         choices=("forecast", "wearable"),
         default="forecast",
@@ -609,10 +619,16 @@ def main() -> None:
               "target is displacement from the cutoff")
     if ablate:
         print(f"ABLATION: zeroing {list(ablate)}")
-    horizon = int(config["virtual_leader"]["horizon"])
     minimum_prefix = int(config["virtual_leader"].get("minimum_prefix", 16))
     rate = float(config["data"]["sample_rate_hz"]) / int(config["data"]["decimation"])
     dt = 1.0 / rate
+    if args.horizon_ms:
+        horizon = max(1, int(round(args.horizon_ms * rate / 1000.0)))
+        print(f"horizon overridden to {args.horizon_ms:.0f} ms ({horizon} samples "
+              f"at {rate:.1f} Hz) - was {int(config['virtual_leader']['horizon'])} "
+              f"samples ({int(config['virtual_leader']['horizon']) / rate * 1000:.0f} ms)")
+    else:
+        horizon = int(config["virtual_leader"]["horizon"])
     cutoff_offsets = tuple(dict.fromkeys(
         int(round(value / 1000.0 / dt)) for value in (args.cutoff_offset_ms or [])
     ))
