@@ -17,15 +17,20 @@ import torch
 
 from .data.schema import sensor_names
 from .data.tracked_dataset import (
+    apply_sensor_local_pca,
     emg_feature_bank,
     emg_feature_count,
     imu_feature_count,
     imu_posture_bank,
+    raw_emg_feature_count,
 )
 from .models.channel_horizon_distillation import (
     ChannelHorizonLatentDistillationModel,
 )
 from .models.latent_distillation import WearableLatentDistillationModel
+from .models.semantic_residual_distillation import (
+    SemanticResidualDistillationModel,
+)
 from .utils import choose_device
 
 
@@ -34,6 +39,8 @@ RAW_IMU_AXES_PER_SENSOR = 6
 
 def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     keys = tuple(state)
+    if any(key.startswith("student.fused_endpoint_residual.") for key in keys):
+        return "semantic_residual"
     if any(key.startswith("student.channel_gate.") for key in keys):
         return "channel_horizon"
     if any(key.startswith("teacher.") for key in keys) and any(
@@ -68,6 +75,11 @@ def preprocessing_signature(config: dict[str, Any]) -> tuple[Any, ...]:
         "emg_feature_windows_ms",
         "emg_feature_kinds",
         "emg_envelope_ms",
+        "emg_bandpass_hz",
+        "emg_filter_order",
+        "emg_notch_hz",
+        "emg_notch_quality",
+        "emg_pca_components_per_sensor",
         "imu_posture_features",
         "posture_lowpass_ms",
         "posture_baseline_ms",
@@ -93,6 +105,7 @@ class LiveFeaturePipeline:
         self.raw_emg_dim = len(self.sensors)
         self.raw_imu_dim = RAW_IMU_AXES_PER_SENSOR * len(self.sensors)
         self.emg_dim = emg_feature_count(self.data_config)
+        self.raw_emg_feature_dim = raw_emg_feature_count(self.data_config)
         self.imu_dim = imu_feature_count(self.data_config)
         self.decimation = max(1, int(self.data_config.get("decimation", 10)))
         self.maximum_buffer_s = float(maximum_buffer_s)
@@ -104,7 +117,7 @@ class LiveFeaturePipeline:
             self.imu_center = calibration["imu_center"].astype(np.float32)
             self.imu_scale = calibration["imu_scale"].astype(np.float32)
         expected = {
-            "emg_scale": (self.emg_dim,),
+            "emg_scale": (self.raw_emg_feature_dim,),
             "imu_center": (self.imu_dim,),
             "imu_scale": (self.imu_dim,),
         }
@@ -210,6 +223,7 @@ class LiveFeaturePipeline:
             )
         indices = np.arange(0, len(times), self.decimation)
         emg = emg[indices] / self.emg_scale
+        emg = apply_sensor_local_pca(emg, self.data_config)
         imu = (imu[indices] - self.imu_center) / self.imu_scale
         effective_rate = raw_rate / self.decimation
         return emg.astype(np.float32), imu.astype(np.float32), effective_rate
@@ -233,7 +247,11 @@ class LiveDistillationModel:
         self.device = choose_device(device)
         emg_dim = emg_feature_count(self.config["data"])
         imu_dim = imu_feature_count(self.config["data"])
-        if self.kind == "channel_horizon":
+        if self.kind == "semantic_residual":
+            self.model = SemanticResidualDistillationModel(
+                self.config, emg_dim, imu_dim
+            )
+        elif self.kind == "channel_horizon":
             self.model = ChannelHorizonLatentDistillationModel(
                 self.config, emg_dim, imu_dim
             )

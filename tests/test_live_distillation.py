@@ -16,6 +16,9 @@ from emg_touch.live_distillation import (
 from emg_touch.models.channel_horizon_distillation import (
     ChannelHorizonLatentDistillationModel,
 )
+from emg_touch.models.semantic_residual_distillation import (
+    SemanticResidualDistillationModel,
+)
 
 
 def _write_live_files(directory: Path) -> tuple[Path, Path, dict]:
@@ -60,6 +63,24 @@ def test_checkpoint_detection_and_named_argument() -> None:
     name, path = parse_checkpoint("Best model=/tmp/final.pt")
     assert name == "Best model"
     assert path == Path("/tmp/final.pt")
+    semantic = {
+        **state,
+        "student.fused_endpoint_residual.network.0.weight": torch.zeros(1),
+    }
+    assert checkpoint_kind(semantic) == "semantic_residual"
+
+
+def test_semantic_residual_checkpoint_loads_in_live_runner() -> None:
+    with tempfile.TemporaryDirectory() as raw_directory:
+        directory = Path(raw_directory)
+        _, _, config = _write_live_files(directory)
+        model = SemanticResidualDistillationModel(config, 4, 24)
+        checkpoint = directory / "semantic.pt"
+        torch.save(
+            {"model_state": model.state_dict(), "config": config}, checkpoint
+        )
+        runner = LiveDistillationModel("Semantic residual", checkpoint, "cpu")
+        assert runner.kind == "semantic_residual"
 
 
 def test_live_preprocessing_is_causal() -> None:

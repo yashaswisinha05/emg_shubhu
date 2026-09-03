@@ -55,6 +55,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
+from scipy.signal import butter, iirnotch, sosfilt, sosfilt_zi, tf2sos
 from torch.utils.data import DataLoader, Dataset
 
 from .schema import emg_columns, imu_columns
@@ -88,14 +89,149 @@ def causal_envelope(values: np.ndarray, window: int) -> np.ndarray:
     )
 
 
-def emg_feature_count(data_config: dict[str, Any]) -> int:
-    """Number of EMG features emitted per timestep for this configuration."""
+def emg_filter_sos(
+    sample_rate_hz: float, data_config: dict[str, Any]
+) -> np.ndarray | None:
+    """Design the optional causal EMG filter as stable SOS sections.
+
+    An absent ``emg_bandpass_hz`` preserves the historical pipeline exactly.
+    The optional notch is deliberately narrow and is only enabled explicitly;
+    real muscle activity near mains frequency should not be removed by default.
+    """
+    band = data_config.get("emg_bandpass_hz")
+    notch_hz = data_config.get("emg_notch_hz")
+    if not band and notch_hz is None:
+        return None
+    rate = float(sample_rate_hz)
+    nyquist = 0.5 * rate
+    sections: list[np.ndarray] = []
+    if band:
+        if len(band) != 2:
+            raise ValueError("data.emg_bandpass_hz must contain [low, high]")
+        low, high = map(float, band)
+        if not 0.0 < low < high < nyquist:
+            raise ValueError(
+                f"invalid EMG band-pass {low:g}-{high:g} Hz for "
+                f"sample rate {rate:g} Hz"
+            )
+        order = int(data_config.get("emg_filter_order", 4))
+        if order < 1:
+            raise ValueError("data.emg_filter_order must be positive")
+        sections.append(
+            butter(order, [low, high], btype="bandpass", fs=rate, output="sos")
+        )
+    if notch_hz is not None:
+        notch = float(notch_hz)
+        if not 0.0 < notch < nyquist:
+            raise ValueError(
+                f"invalid EMG notch {notch:g} Hz for sample rate {rate:g} Hz"
+            )
+        quality = float(data_config.get("emg_notch_quality", 30.0))
+        if quality <= 0.0:
+            raise ValueError("data.emg_notch_quality must be positive")
+        numerator, denominator = iirnotch(notch, quality, fs=rate)
+        sections.append(tf2sos(numerator, denominator))
+    return np.concatenate(sections, axis=0)
+
+
+def causal_emg_filter(
+    values: np.ndarray, sample_rate_hz: float, data_config: dict[str, Any]
+) -> np.ndarray:
+    """Filter raw EMG without reading samples after the current timestep."""
+    samples = np.asarray(values, dtype=np.float32)
+    sections = emg_filter_sos(sample_rate_hz, data_config)
+    if sections is None or not len(samples):
+        return samples.copy()
+    initial = sosfilt_zi(sections)[:, :, None] * samples[0][None, None, :]
+    filtered, _ = sosfilt(sections, samples, axis=0, zi=initial)
+    return filtered.astype(np.float32)
+
+
+def raw_emg_feature_count(data_config: dict[str, Any]) -> int:
+    """Feature-bank width before an optional sensor-local PCA transform."""
     sensors = len(data_config.get("sensors", ["S0", "S4", "S8", "S12"]))
     windows = data_config.get("emg_feature_windows_ms")
     kinds = data_config.get("emg_feature_kinds")
     if not windows or not kinds:
         return sensors
     return sensors * len(windows) * len(kinds)
+
+
+def emg_feature_count(data_config: dict[str, Any]) -> int:
+    """Number of EMG features emitted per timestep for this configuration."""
+    sensors = len(data_config.get("sensors", ["S0", "S4", "S8", "S12"]))
+    components = data_config.get("emg_pca_components_per_sensor")
+    if components is not None:
+        return sensors * int(components)
+    return raw_emg_feature_count(data_config)
+
+
+def fit_sensor_local_pca(
+    values: np.ndarray,
+    sensor_count: int,
+    components_per_sensor: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fit independent PCAs, retaining physical sensor identity.
+
+    Input features use the existing ``[feature-view, sensor]`` layout.  The
+    returned arrays have shapes ``[sensor, feature]``,
+    ``[sensor, component, feature]``, and ``[sensor, component]``.
+    """
+    samples = np.asarray(values, dtype=np.float64)
+    if samples.ndim != 2 or samples.shape[1] % sensor_count:
+        raise ValueError("PCA input width must be divisible by sensor count")
+    features_per_sensor = samples.shape[1] // sensor_count
+    components = int(components_per_sensor)
+    if not 1 <= components <= features_per_sensor:
+        raise ValueError(
+            "emg_pca_components_per_sensor must be between 1 and "
+            f"{features_per_sensor}"
+        )
+    means, bases, ratios = [], [], []
+    for sensor_index in range(sensor_count):
+        block = samples[:, sensor_index::sensor_count]
+        mean = block.mean(axis=0)
+        centered = block - mean
+        _, singular_values, right = np.linalg.svd(centered, full_matrices=False)
+        basis = right[:components]
+        total_variance = np.square(singular_values).sum()
+        explained = np.square(singular_values[:components]) / max(
+            total_variance, 1e-12
+        )
+        means.append(mean)
+        bases.append(basis)
+        ratios.append(explained)
+    return (
+        np.asarray(means, dtype=np.float32),
+        np.asarray(bases, dtype=np.float32),
+        np.asarray(ratios, dtype=np.float32),
+    )
+
+
+def apply_sensor_local_pca(
+    values: np.ndarray, data_config: dict[str, Any]
+) -> np.ndarray:
+    """Apply a fitted sensor-local PCA and keep component/sensor interleaving."""
+    requested = data_config.get("emg_pca_components_per_sensor")
+    if requested is None:
+        return np.asarray(values, dtype=np.float32)
+    try:
+        means = np.asarray(data_config["emg_pca_means"], dtype=np.float32)
+        bases = np.asarray(data_config["emg_pca_components"], dtype=np.float32)
+    except KeyError as error:
+        raise RuntimeError(
+            "sensor-local PCA was requested but has not been fitted; build the "
+            "training loaders before constructing the model"
+        ) from error
+    samples = np.asarray(values, dtype=np.float32)
+    sensor_count = means.shape[0]
+    projected = []
+    for sensor_index in range(sensor_count):
+        block = samples[:, sensor_index::sensor_count]
+        projected.append((block - means[sensor_index]) @ bases[sensor_index].T)
+    # [time, component, sensor] flattens back into the layout expected by the
+    # physical-sensor gate: every sensor is adjacent within one component.
+    return np.stack(projected, axis=-1).reshape(len(samples), -1).astype(np.float32)
 
 
 def emg_feature_bank(
@@ -108,6 +244,7 @@ def emg_feature_bank(
     complementary views of the raw waveform.  Every operation is trailing or
     backward-looking, so no sample after the prediction cutoff is consulted.
     """
+    values = causal_emg_filter(values, sample_rate_hz, data_config)
     windows_ms = data_config.get("emg_feature_windows_ms")
     kinds = data_config.get("emg_feature_kinds")
     if not windows_ms or not kinds:
@@ -417,6 +554,60 @@ def session_emg_scale(
     return np.maximum(scale, 1e-8)
 
 
+def fit_training_emg_pca(
+    trials: list[Path],
+    data_config: dict[str, Any],
+    session_scales: dict[str, np.ndarray],
+) -> None:
+    """Fit sensor-local PCA on normalized training trials and store it in config."""
+    requested = data_config.get("emg_pca_components_per_sensor")
+    if requested is None:
+        for key in (
+            "emg_pca_means", "emg_pca_components",
+            "emg_pca_explained_variance_ratio",
+        ):
+            data_config.pop(key, None)
+        return
+    maximum_trials = max(1, int(data_config.get("emg_pca_fit_trials", 64)))
+    if len(trials) > maximum_trials:
+        chosen_indices = np.linspace(
+            0, len(trials) - 1, maximum_trials, dtype=np.int64
+        )
+        chosen = [trials[int(index)] for index in chosen_indices]
+    else:
+        chosen = trials
+    collected: list[np.ndarray] = []
+    for path in chosen:
+        data = preprocess_tracked_trial(path, data_config)
+        if data is None or "emg" not in data:
+            continue
+        block = data["emg"]
+        scale = session_scales.get(path.parent.name)
+        if scale is not None:
+            block = block / scale
+        collected.append(block)
+    if not collected:
+        raise RuntimeError("no usable training EMG was available to fit PCA")
+    samples = np.concatenate(collected, axis=0)
+    maximum_samples = max(
+        1000, int(data_config.get("emg_pca_fit_max_samples", 100000))
+    )
+    if len(samples) > maximum_samples:
+        indices = np.linspace(
+            0, len(samples) - 1, maximum_samples, dtype=np.int64
+        )
+        samples = samples[indices]
+    sensor_count = len(data_config.get("sensors", ["S0", "S4", "S8", "S12"]))
+    means, components, ratios = fit_sensor_local_pca(
+        samples, sensor_count, int(requested)
+    )
+    # Lists remain serializable in results.json and final.pt.  Live inference
+    # can therefore apply the exact training transform without a second file.
+    data_config["emg_pca_means"] = means.tolist()
+    data_config["emg_pca_components"] = components.tolist()
+    data_config["emg_pca_explained_variance_ratio"] = ratios.tolist()
+
+
 def session_imu_statistics(
     trials: list[Path], data_config: dict[str, Any], sample: int = 12
 ) -> tuple[np.ndarray, np.ndarray] | None:
@@ -492,6 +683,8 @@ class TrackedTrajectoryDataset(Dataset):
                     "decimation", "emg_envelope_ms", "emg_feature_windows_ms",
                     "emg_feature_kinds", "tracker_max_sync_error_ms", "sensors",
                     "emg_column_template", "tracker_id",
+                    "emg_bandpass_hz", "emg_filter_order", "emg_notch_hz",
+                    "emg_notch_quality",
                     # Posture features change the IMU channel count. Omitting
                     # these would let a stale cache hand back arrays of the
                     # old width against an encoder built for the new one -
@@ -536,6 +729,10 @@ class TrackedTrajectoryDataset(Dataset):
         scale = self.emg_scales.get(path.parent.name)
         if scale is not None and "emg" in result:
             result["emg"] = result["emg"] / torch.from_numpy(scale)
+        if "emg" in result:
+            result["emg"] = torch.from_numpy(
+                apply_sensor_local_pca(result["emg"].numpy(), self.data_config)
+            )
         statistics = self.imu_statistics.get(path.parent.name)
         if statistics is not None and "imu" in result:
             centre, spread = statistics
@@ -685,6 +882,7 @@ def build_tracked_loaders(
             scale = session_emg_scale(trials, config["data"])
             if scale is not None:
                 scales[name] = scale
+    fit_training_emg_pca(train, config["data"], scales)
     imu_statistics: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     if bool(config["data"].get("imu_session_normalise", True)):
         for name, trials in sessions.items():

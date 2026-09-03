@@ -4,7 +4,14 @@ import numpy as np
 import torch
 
 from scripts.train_trajectory_model import TrajectoryModel, make_window
-from emg_touch.data.tracked_dataset import emg_feature_bank, emg_feature_count
+from emg_touch.data.tracked_dataset import (
+    apply_sensor_local_pca,
+    causal_emg_filter,
+    emg_feature_bank,
+    emg_feature_count,
+    fit_sensor_local_pca,
+    raw_emg_feature_count,
+)
 from emg_touch.models.trajectory_intent_vae import trajectory_loss
 
 
@@ -82,6 +89,104 @@ def test_high_rate_emg_features_are_causal_and_have_expected_width() -> None:
     assert emg_feature_count(config) == 48
     np.testing.assert_allclose(original[:80], changed[:80], rtol=0.0, atol=0.0)
     assert np.isfinite(original).all()
+
+
+def _tone_amplitude(values: np.ndarray, frequency: float, rate: float) -> float:
+    time = np.arange(len(values), dtype=np.float64) / rate
+    sine = np.sin(2.0 * np.pi * frequency * time)
+    cosine = np.cos(2.0 * np.pi * frequency * time)
+    sine_projection = np.sum(values.astype(np.float64) * sine)
+    cosine_projection = np.sum(values.astype(np.float64) * cosine)
+    return float(2.0 * np.hypot(sine_projection, cosine_projection) / len(values))
+
+
+def test_causal_bandpass_rejects_motion_and_high_frequency_noise() -> None:
+    rate = 1259.4
+    time = np.arange(int(4 * rate)) / rate
+    raw = (
+        np.sin(2 * np.pi * 5 * time)
+        + np.sin(2 * np.pi * 100 * time)
+        + np.sin(2 * np.pi * 550 * time)
+    ).astype(np.float32)[:, None]
+    filtered = causal_emg_filter(
+        raw, rate, {"emg_bandpass_hz": [20.0, 450.0], "emg_filter_order": 4}
+    )
+    settled = filtered[int(rate):, 0]
+    assert _tone_amplitude(settled, 100.0, rate) > 0.8
+    assert _tone_amplitude(settled, 5.0, rate) < 0.05
+    assert _tone_amplitude(settled, 550.0, rate) < 0.05
+
+
+def test_filtered_feature_bank_never_reads_changed_future() -> None:
+    config = {
+        "sensors": ["S0", "S4", "S8", "S12"],
+        "emg_bandpass_hz": [20.0, 450.0],
+        "emg_filter_order": 4,
+        "emg_notch_hz": 50.0,
+        "emg_feature_windows_ms": [10.0, 25.0, 50.0],
+        "emg_feature_kinds": ["rms", "waveform_length"],
+    }
+    raw = np.random.default_rng(8).normal(size=(1000, 4)).astype(np.float32)
+    changed = raw.copy()
+    changed[750:] *= 100.0
+    first = emg_feature_bank(raw, 1259.4, config)
+    second = emg_feature_bank(changed, 1259.4, config)
+    np.testing.assert_allclose(first[:750], second[:750], rtol=0.0, atol=0.0)
+
+
+def test_optional_notch_removes_50hz_without_removing_100hz() -> None:
+    rate = 1259.4
+    time = np.arange(int(4 * rate)) / rate
+    raw = (
+        np.sin(2 * np.pi * 50 * time) + np.sin(2 * np.pi * 100 * time)
+    ).astype(np.float32)[:, None]
+    filtered = causal_emg_filter(
+        raw,
+        rate,
+        {
+            "emg_bandpass_hz": [20.0, 450.0],
+            "emg_filter_order": 4,
+            "emg_notch_hz": 50.0,
+            "emg_notch_quality": 30.0,
+        },
+    )
+    settled = filtered[int(rate):, 0]
+    assert _tone_amplitude(settled, 50.0, rate) < 0.1
+    assert _tone_amplitude(settled, 100.0, rate) > 0.8
+
+
+def test_sensor_local_pca_reduces_width_without_mixing_sensors() -> None:
+    generator = np.random.default_rng(9)
+    latent = generator.normal(size=(500, 2))
+    blocks = []
+    for sensor in range(4):
+        mixing = generator.normal(size=(2, 12))
+        block = np.einsum("ni,ij->nj", latent, mixing)
+        blocks.append(block + 0.01 * generator.normal(size=(500, 12)))
+    interleaved = np.stack(blocks, axis=-1).reshape(500, 48).astype(np.float32)
+    means, components, ratio = fit_sensor_local_pca(interleaved, 4, 3)
+    config = {
+        "sensors": ["S0", "S4", "S8", "S12"],
+        "emg_feature_windows_ms": [10.0, 25.0, 50.0],
+        "emg_feature_kinds": [
+            "rms", "waveform_length", "log_energy", "derivative"
+        ],
+        "emg_pca_components_per_sensor": 3,
+        "emg_pca_means": means.tolist(),
+        "emg_pca_components": components.tolist(),
+    }
+    projected = apply_sensor_local_pca(interleaved, config)
+    changed = interleaved.copy()
+    changed[:, 0::4] += 10.0
+    projected_changed = apply_sensor_local_pca(changed, config)
+    assert projected.shape == (500, 12)
+    assert emg_feature_count(config) == 12
+    assert raw_emg_feature_count(config) == 48
+    assert np.all(ratio.sum(axis=-1) > 0.99)
+    assert not np.allclose(projected[:, 0::4], projected_changed[:, 0::4])
+    np.testing.assert_allclose(
+        projected[:, 1::4], projected_changed[:, 1::4], rtol=0.0, atol=0.0
+    )
 
 
 def test_wearable_prediction_is_invariant_to_tracker_values() -> None:
