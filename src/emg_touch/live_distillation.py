@@ -33,6 +33,7 @@ from .models.complete_reach_distillation import (
 from .models.direction_aware_complete_reach import (
     DirectionAwareCompleteReachModel,
 )
+from .models.monotonic_complete_reach import MonotonicCompleteReachModel
 from .models.latent_distillation import WearableLatentDistillationModel
 from .models.rolling_dual_head_distillation import (
     RollingDualHeadDistillationModel,
@@ -52,6 +53,11 @@ RAW_IMU_AXES_PER_SENSOR = 6
 
 def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     keys = tuple(state)
+    if any(
+        key.startswith("student.endpoint_decoder.progress_increment_head.")
+        for key in keys
+    ):
+        return "monotonic_complete_reach"
     if any(
         key.startswith("student.endpoint_decoder.axis_direction_head.")
         for key in keys
@@ -87,8 +93,8 @@ def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     ):
         return "latent_distillation"
     raise ValueError(
-        "unsupported checkpoint architecture; expected a direction-aware "
-        "complete-reach, complete-reach, "
+        "unsupported checkpoint architecture; expected a monotonic, "
+        "direction-aware complete-reach, complete-reach, "
         "rolling-dual-head, "
         "latent-distillation, "
         "channel+horizon, semantic-residual, temporal-cross-attention, or "
@@ -291,7 +297,11 @@ class LiveDistillationModel:
         self.device = choose_device(device)
         emg_dim = emg_feature_count(self.config["data"])
         imu_dim = imu_feature_count(self.config["data"])
-        if self.kind == "direction_aware_complete_reach":
+        if self.kind == "monotonic_complete_reach":
+            self.model = MonotonicCompleteReachModel(
+                self.config, emg_dim, imu_dim
+            )
+        elif self.kind == "direction_aware_complete_reach":
             self.model = DirectionAwareCompleteReachModel(
                 self.config, emg_dim, imu_dim
             )

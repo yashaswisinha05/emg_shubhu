@@ -53,11 +53,15 @@ def collect_complete_reach_trials(
     axis_signs: tuple[float, float, float],
 ) -> list[dict[str, Any]]:
     """Run the wearable model and turn its complete path into IK requests."""
-    supported_kinds = {"complete_reach", "direction_aware_complete_reach"}
+    supported_kinds = {
+        "complete_reach",
+        "direction_aware_complete_reach",
+        "monotonic_complete_reach",
+    }
     if runner.kind not in supported_kinds:
         raise ValueError(
-            "this viewer requires a complete-reach or direction-aware "
-            "complete-reach best.pt/final.pt checkpoint; "
+            "this viewer requires a complete-reach, direction-aware, or hard "
+            "monotonic complete-reach best.pt/final.pt checkpoint; "
             f"received {runner.kind}"
         )
     config = runner.config
@@ -274,7 +278,11 @@ def main() -> None:
     runner = LiveDistillationModel(
         "complete-reach manipulator", args.checkpoint, args.device
     )
-    if runner.kind not in {"complete_reach", "direction_aware_complete_reach"}:
+    if runner.kind not in {
+        "complete_reach",
+        "direction_aware_complete_reach",
+        "monotonic_complete_reach",
+    }:
         raise SystemExit(
             "checkpoint must come from a complete-reach trainer; "
             f"detected {runner.kind}"
