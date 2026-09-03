@@ -1041,6 +1041,33 @@ def train_student_phase(
     history, best_state = [], clone_state(model)
     best_validation = baseline
     selection_metric, best = student_validation_selection(baseline, config)
+    auxiliary_metrics = config.get("distillation", {}).get(
+        "auxiliary_selection_metrics", {}
+    )
+    if not isinstance(auxiliary_metrics, dict):
+        raise TypeError("auxiliary_selection_metrics must be a mapping")
+    auxiliary_best: dict[str, float] = {}
+    for label, metric_name in auxiliary_metrics.items():
+        metric_name = str(metric_name)
+        if metric_name not in baseline:
+            raise KeyError(
+                f"auxiliary selection metric {metric_name!r} is absent from validation"
+            )
+        safe_label = "".join(
+            character if character.isalnum() or character in "-_" else "_"
+            for character in str(label)
+        )
+        auxiliary_best[safe_label] = float(baseline[metric_name])
+        torch.save(
+            {
+                "model_state": clone_state(model),
+                "config": config,
+                "validation": baseline,
+                "phase": phase,
+                "selection_metric": metric_name,
+            },
+            output / f"best_{safe_label}.pt",
+        )
     stale = 0
 
     for epoch in range(1, epochs + 1):
@@ -1106,6 +1133,24 @@ def train_student_phase(
             **validation,
         }
         history.append(record)
+        for label, metric_name in auxiliary_metrics.items():
+            safe_label = "".join(
+                character if character.isalnum() or character in "-_" else "_"
+                for character in str(label)
+            )
+            value = float(validation[str(metric_name)])
+            if value < auxiliary_best[safe_label]:
+                auxiliary_best[safe_label] = value
+                torch.save(
+                    {
+                        "model_state": clone_state(model),
+                        "config": config,
+                        "validation": validation,
+                        "phase": phase,
+                        "selection_metric": str(metric_name),
+                    },
+                    output / f"best_{safe_label}.pt",
+                )
         validation_pixel = validation.get("student_px", float("nan"))
         selection_text = (
             ""

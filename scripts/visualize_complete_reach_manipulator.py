@@ -57,11 +57,12 @@ def collect_complete_reach_trials(
         "complete_reach",
         "direction_aware_complete_reach",
         "monotonic_complete_reach",
+        "task_separated_complete_reach",
     }
     if runner.kind not in supported_kinds:
         raise ValueError(
-            "this viewer requires a complete-reach, direction-aware, or hard "
-            "monotonic complete-reach best.pt/final.pt checkpoint; "
+            "this viewer requires a complete-reach, direction-aware, hard "
+            "monotonic, or task-separated best.pt/final.pt checkpoint; "
             f"received {runner.kind}"
         )
     config = runner.config
@@ -282,6 +283,7 @@ def main() -> None:
         "complete_reach",
         "direction_aware_complete_reach",
         "monotonic_complete_reach",
+        "task_separated_complete_reach",
     }:
         raise SystemExit(
             "checkpoint must come from a complete-reach trainer; "
