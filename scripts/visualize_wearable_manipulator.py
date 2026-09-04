@@ -260,6 +260,7 @@ def run_viewer(
     show: bool,
     save_gif: bool,
     fps: float,
+    auto_advance: bool = False,
 ) -> None:
     import matplotlib
 
@@ -453,8 +454,13 @@ def run_viewer(
             return
         maximum = len(trials[state["trial"]]["time_ms"]) - 1
         if state["frame"] >= maximum:
-            state["playing"] = False
-            play_button.label.set_text("Play")
+            if auto_advance and len(trials) > 1:
+                trial_slider.set_val((state["trial"] + 1) % len(trials))
+                state["playing"] = True
+                play_button.label.set_text("Pause")
+            else:
+                state["playing"] = False
+                play_button.label.set_text("Play")
             return
         frame_slider.set_val(state["frame"] + 1)
 

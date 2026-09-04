@@ -42,6 +42,7 @@ from emg_touch.data.tracked_dataset import (  # noqa: E402
     preprocess_tracked_trial,
     session_emg_scale,
     session_imu_statistics,
+    split_sessions,
 )
 from emg_touch.live_distillation import (  # noqa: E402
     LiveDistillationModel,
@@ -220,6 +221,24 @@ def main() -> None:
     )
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument(
+        "--random-trials",
+        action="store_true",
+        help="Shuffle test trials once, then play each without repetition",
+    )
+    parser.add_argument("--random-seed", type=int, default=42)
+    parser.add_argument(
+        "--split",
+        choices=("train", "validation", "test"),
+        default="test",
+        help="Dataset split to visualize; defaults to held-out test trials",
+    )
+    parser.add_argument(
+        "--auto-next-ms",
+        type=float,
+        default=None,
+        help="Automatically advance after touch; for example 1200",
+    )
+    parser.add_argument(
         "--session-prefixes",
         nargs="+",
         help="Optional inference-dataset folder filter; default uses all sessions",
@@ -257,13 +276,20 @@ def main() -> None:
             if owner is not None:
                 session_trials.setdefault(owner, []).append(path)
                 trial_sessions[str(path)] = owner
-    trials = [path for paths in session_trials.values() for path in paths]
+    train_trials, validation_trials, test_trials = split_sessions(
+        session_trials, config
+    )
+    trials = {
+        "train": train_trials,
+        "validation": validation_trials,
+        "test": test_trials,
+    }[args.split]
     if not trials:
         raise SystemExit(
             f"no matching trial_*.csv found under {args.trial_root}"
         )
-    if args.shuffle:
-        random.shuffle(trials)
+    if args.shuffle or args.random_trials:
+        random.Random(args.random_seed).shuffle(trials)
 
     trial_loader = NormalizedReplayTrialLoader(
         config, session_trials, trial_sessions
@@ -272,7 +298,8 @@ def main() -> None:
         runner.model, runner.context_samples
     ).to(runner.device).eval()
     print(
-        f"loaded {checkpoint} ({runner.kind}) | {len(trials)} trial(s) | "
+        f"loaded {checkpoint} ({runner.kind}) | {len(trials)} {args.split} "
+        "trial(s) | "
         f"device={runner.device}"
     )
     print(
@@ -295,6 +322,7 @@ def main() -> None:
         window_title="Best Wearable Model — Live Prediction Replay",
         maximum_prefix=runner.context_samples,
         prediction_delay_ms=args.prediction_delay_ms,
+        auto_advance_ms=args.auto_next_ms,
     )
     window.resize(1100, 720)
     window.show()

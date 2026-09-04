@@ -271,6 +271,17 @@ def main() -> None:
     parser.add_argument("--output-dir", default="runs/complete_reach_manipulator")
     parser.add_argument("--save-gif", action="store_true")
     parser.add_argument("--no-show", action="store_true")
+    parser.add_argument(
+        "--random-trials",
+        action="store_true",
+        help="Sample test trials without replacement before visualization",
+    )
+    parser.add_argument("--random-seed", type=int, default=42)
+    parser.add_argument(
+        "--auto-next",
+        action="store_true",
+        help="Automatically continue to the next selected trial",
+    )
     args = parser.parse_args()
 
     if args.num_trials < 1:
@@ -313,11 +324,14 @@ def main() -> None:
         if args.base_world is None
         else np.asarray(args.base_world, dtype=np.float64)
     )
+    collection_count = (
+        len(loader.dataset) if args.random_trials else args.num_trials
+    )
     trials = collect_complete_reach_trials(
         runner,
         loader,
         manipulator,
-        args.num_trials,
+        collection_count,
         lead_samples,
         initial_angles,
         base_world,
@@ -326,6 +340,12 @@ def main() -> None:
     )
     if not trials:
         raise SystemExit("no usable trials were long enough for this observation lead")
+    if args.random_trials:
+        generator = np.random.default_rng(args.random_seed)
+        selected = generator.choice(
+            len(trials), size=min(args.num_trials, len(trials)), replace=False
+        )
+        trials = [trials[int(index)] for index in selected]
 
     print(
         f"loaded {runner.kind} | {len(trials)} {args.split} trial(s) | "
@@ -354,6 +374,7 @@ def main() -> None:
         show=not args.no_show,
         save_gif=args.save_gif,
         fps=args.fps,
+        auto_advance=args.auto_next,
     )
 
 

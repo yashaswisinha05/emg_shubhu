@@ -104,6 +104,7 @@ class PredictionReplayWindow(QMainWindow):
         window_title: str = "Live Prediction Replay",
         maximum_prefix: int | None = None,
         prediction_delay_ms: float = 0.0,
+        auto_advance_ms: float | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle(window_title)
@@ -123,6 +124,11 @@ class PredictionReplayWindow(QMainWindow):
         if prediction_delay_ms < 0.0:
             raise ValueError("prediction_delay_ms cannot be negative")
         self.prediction_delay_ms = float(prediction_delay_ms)
+        if auto_advance_ms is not None and auto_advance_ms < 0.0:
+            raise ValueError("auto_advance_ms cannot be negative")
+        self.auto_advance_ms = (
+            None if auto_advance_ms is None else float(auto_advance_ms)
+        )
         self.btn_size = 80
         self.marker_size = 36
         self.records: list[dict] = []
@@ -186,6 +192,9 @@ class PredictionReplayWindow(QMainWindow):
 
         self.playback_timer = QTimer(self)
         self.playback_timer.timeout.connect(self._advance_playback)
+        self.auto_advance_timer = QTimer(self)
+        self.auto_advance_timer.setSingleShot(True)
+        self.auto_advance_timer.timeout.connect(self.start_next_trial)
 
         self.ripple = QVariantAnimation(self)
         self.ripple.setDuration(150)
@@ -237,6 +246,7 @@ class PredictionReplayWindow(QMainWindow):
 
     def start_current_trial(self) -> None:
         self.playback_timer.stop()
+        self.auto_advance_timer.stop()
         if self.trial_index < 0:
             self.trial_index = 0
         path = self.trials[self.trial_index]
@@ -333,6 +343,11 @@ class PredictionReplayWindow(QMainWindow):
         self.ripple.setStartValue(1.0)
         self.ripple.setEndValue(0.0)
         self.ripple.start()
+        if self.auto_advance_ms is not None and len(self.trials) > 1:
+            self.time_label.setText(
+                f"touch — random next trial in {self.auto_advance_ms / 1000.0:.1f}s"
+            )
+            self.auto_advance_timer.start(int(round(self.auto_advance_ms)))
 
     def _animate_ripple(self, value: float) -> None:
         scale = int(self.btn_size * (0.6 + 0.4 * value))
