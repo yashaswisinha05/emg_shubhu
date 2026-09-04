@@ -1,6 +1,8 @@
 # EMG/IMU Touch-Location Prediction
 
-This project implements a causal, participant-safe research pipeline for predicting normalized screen-touch coordinates from EMG and IMU recordings in `../MERGED DATA`.
+This project contains two causal EMG/IMU research pipelines: the current
+tracked EMG+IMU+VIVE experiments documented below, and the earlier
+participant-safe screen-touch pipeline for recordings in `../MERGED DATA`.
 
 For the current **complete-trajectory, configuration-level** experiment, start with
 [`FULL_TRAJECTORY.md`](FULL_TRAJECTORY.md). It uses every valid trajectory at its natural
@@ -29,7 +31,230 @@ For multi-scale patching plus patch-level cross-variate attention over the four
 EMG electrodes and four IMU sensors, adapted from MCV-PatchTST, see
 [`CROSS_VARIATE.md`](CROSS_VARIATE.md).
 
-The default final model is:
+## Current tracked-dataset model: soft-routed complete reach
+
+The current tracked-data experiment is implemented by
+[`scripts/train_soft_routed_complete_reach.py`](scripts/train_soft_routed_complete_reach.py),
+[`src/emg_touch/models/soft_routed_complete_reach.py`](src/emg_touch/models/soft_routed_complete_reach.py),
+and
+[`configs/tracked_soft_routed_complete_reach.yaml`](configs/tracked_soft_routed_complete_reach.yaml).
+It is intentionally separate from the older models so every earlier result
+remains reproducible.
+
+### Question and inference boundary
+
+The model asks whether a causal wearable history can predict both:
+
+1. the final touchscreen coordinate; and
+2. the complete movement-onset-to-touch 3D hand path.
+
+The deployable student accepts only:
+
+```text
+incoming EMG + incoming IMU + causal padding mask
+```
+
+VIVE position, velocity, screen target, future trajectory, and true time to
+touch are never student inputs. VIVE is used in two training-only roles:
+
+- as privileged input to the teacher; and
+- as the label for screen and 3D losses.
+
+At test time the teacher is not called. The red screen point and black 3D path
+in the visualizers are display-only ground truth.
+
+### Why this model was introduced
+
+The architecture followed directly from two conflicting experiments:
+
+| Model | Screen error | Complete 3D path error | What it showed |
+| --- | ---: | ---: | --- |
+| Task-separated | 207.5 px | 7.67 cm | Shared learning retained screen accuracy, but 3D tracking remained weak. |
+| Hard asymmetric | 251.0 px | **5.55 cm** | Hard stop-gradients protected motion, but removing cross-task adaptation damaged the screen head. |
+| **Soft-routed** | **203.4 px** | 5.89 cm | Small cross-task gradients retained screen accuracy while preserving most of the 3D improvement. |
+
+These are exploratory one-seed results from the same development sequence, not
+the final multi-seed paper estimate. They motivated replacing hard
+`detach()` boundaries with soft gradient routing rather than adding another
+independent head or restoring a stochastic student VAE.
+
+### Architecture and logic
+
+```text
+EMG history -> channel/time attention -> EMG intent context -----+
+                                                               |
+IMU history -> motion encoder ----------> motion context -------+-> fused factors
+                                                               |
+                              privileged VIVE teacher ----------+  training only
+
+fused factors -> teacher-coordinate bridge -> screen head -> pixel x,y
+
+IMU motion base + bounded EMG-intent correction
+    -> complete 3D path head
+    -> explicit 3D endpoint head
+    -> signed x/y/z direction head
+```
+
+The screen head receives the EMG-owned intent factors with their full gradient.
+It can also read motion and residual factors, but their screen gradients are
+scaled to `0.10`. The 3D head receives the IMU motion route at full strength
+and the EMG intent route with a `0.10` gradient scale. The operation is:
+
+```python
+def scale_gradient(x, scale):
+    return x.detach() + scale * (x - x.detach())
+```
+
+The forward value is exactly `x`; only its backward gradient changes. Therefore
+`scale=0` reproduces hard task isolation and `scale=1` reproduces unrestricted
+joint training. The configured `0.10` is the compromise tested here.
+
+The 3D prediction starts from the IMU-derived relative path and learns a
+bounded EMG-conditioned correction. A smooth progress constraint makes the
+predicted path start at movement onset, and the final path sample is forced to
+agree with the explicit 3D endpoint head. Auxiliary direction losses penalize
+mirrored up/down or left/right reaches.
+
+### What remains from the VAE
+
+The privileged teacher retains its VAE representation and is trained with VIVE
+available. The wearable student is deterministic:
+
+- student sampling noise is `0.0`;
+- student latent-distillation weight is `0.0`;
+- the student reports zero log-variance; and
+- deployment uses a single deterministic forward pass.
+
+The useful retained component is the teacher-aligned coordinate bridge and
+hierarchical output guidance, not stochastic sampling in the deployed model.
+Consequently, this experiment supports a claim about privileged teacher
+guidance, but does not by itself prove that a student VAE is better than a
+deterministic student.
+
+### Objective
+
+The student objective combines:
+
+```text
+screen coordinate and hierarchical screen losses
++ selective privileged-teacher output guidance
++ complete 3D Cartesian path loss
++ explicit 3D endpoint loss
++ path/endpoint consistency
++ endpoint, path, and velocity direction losses
++ signed x/y/z direction classification
++ EMG-only screen and direction auxiliaries
++ IMU-base preservation and correction regularization
+```
+
+IMU modality dropout and physical-sensor dropout remain active during training.
+The EMG-only auxiliary prevents the fused model from discarding its EMG route.
+
+### Current one-seed result
+
+The run in `runs/soft_routed_complete_reach` produced:
+
+| Measurement | Result |
+| --- | ---: |
+| Wearable student screen error, all evaluated leads | **203.4 px** |
+| Late-window screen score, 0/48/103 ms to touch | **176.9 px** |
+| Complete 3D path error | **5.89 cm** |
+| Mean-target screen baseline | 440.8 px |
+| Training-only privileged teacher | 61.4 px |
+| Remove EMG | +51.5 px |
+| Shuffle EMG across trials | +120.7 px |
+| Remove IMU | +138.1 px |
+| Wrong-way 3D reach fraction | 5.9% |
+| Endpoint direction angle | 28.2 degrees |
+
+Per-axis endpoint results were:
+
+| Axis | Sign accuracy | MAE | Correlation |
+| --- | ---: | ---: | ---: |
+| x | 83.9% | 5.00 cm | +0.923 |
+| y | 67.8% | 3.62 cm | +0.806 |
+| z | 69.0% | 2.57 cm | +0.939 |
+
+The modality interventions are the strongest evidence that the wearable model
+uses both inputs. Shuffling EMG is substantially worse than removing it,
+consistent with the network using trial-specific EMG timing rather than only a
+global amplitude prior.
+
+Two limitations must remain explicit:
+
+- the learned 3D correction improves the IMU path by only `0.09 cm`, so IMU is
+  still responsible for most continuous 3D tracking while EMG contributes
+  more strongly to destination inference; and
+- time-to-touch prediction remains weak (`116.6 ms` MAE and `20.6%` bin
+  accuracy) and should not be used as a primary claim.
+
+The `61.4 px` teacher is not a deployable baseline because it receives
+privileged VIVE information. The honest result is the wearable-only student
+versus wearable ablations and the mean-target baseline.
+
+### Train the model
+
+```bash
+python scripts/train_soft_routed_complete_reach.py \
+  --root "/media/nahar3/Extreme SSD/emg2pose_dataset/emg_imu_vive" \
+  --config configs/tracked_soft_routed_complete_reach.yaml \
+  --cache-dir artifacts/tracked_cache_posture \
+  --session-prefixes dev_a1 dev_a2 dev_a3 dev_a4 \
+  --device cuda \
+  --teacher-epochs 25 \
+  --epochs 50 \
+  --finetune-epochs 0 \
+  --lead-window-ms 0 400 \
+  --output-dir runs/soft_routed_complete_reach
+```
+
+The run writes:
+
+- `best_screen.pt`: best validation screen checkpoint;
+- `best_3d.pt`: best validation 3D checkpoint;
+- `best.pt`: best joint screen-plus-3D checkpoint; and
+- `final.pt`: joint-selected model plus final test metrics.
+
+Use `final.pt` for reporting both tasks from one unified model. Using
+`best_screen.pt` for pixels and `best_3d.pt` for motion produces two separately
+selected systems and must be reported as such.
+
+### Random held-out-test visualizations
+
+Pixel prediction from a growing EMG+IMU history, automatically advancing
+through shuffled test trials without replacement:
+
+```bash
+python scripts/live_best_model_ui.py \
+  --trial-root "/media/nahar3/Extreme SSD/emg2pose_dataset/emg_imu_vive" \
+  --checkpoint runs/soft_routed_complete_reach/final.pt \
+  --device cuda --split test --random-trials --random-seed 7 \
+  --auto-next-ms 1200 --speed 1.0 --prediction-delay-ms 600 \
+  --session-prefixes dev_a1 dev_a2 dev_a3 dev_a4
+```
+
+Complete predicted 3D path and model-driven inverse kinematics on randomly
+sampled test trials:
+
+```bash
+python scripts/visualize_complete_reach_manipulator.py \
+  --root "/media/nahar3/Extreme SSD/emg2pose_dataset/emg_imu_vive" \
+  --checkpoint runs/soft_routed_complete_reach/final.pt \
+  --cache-dir artifacts/tracked_cache_posture \
+  --device cuda --split test --observation-lead-ms 0 \
+  --num-trials 10 --random-trials --random-seed 7 --auto-next \
+  --fps 20 --output-dir runs/soft_routed_manipulator_random
+```
+
+Before treating the one-seed values as paper results, repeat at minimum seeds
+`1`, `2`, and `3` and report the mean, spread, and paired trial-level
+confidence intervals. A gradient-routing ablation should compare scales
+`0`, `0.05`, `0.10`, `0.25`, and `1.0` while holding the split, losses, and
+checkpoint criterion fixed.
+
+## Legacy `MERGED DATA` model
+
+The older `MERGED DATA` final model is:
 
 - a multi-scale causal EMG encoder;
 - a sensor-grouped IMU encoder;
@@ -42,7 +267,7 @@ The default final model is:
 
 The project also contains TCN and Hugging Face PatchTST baselines and an optional CVAE coordinate head.
 
-## Important dataset assumptions
+## Legacy `MERGED DATA` dataset assumptions
 
 - The available EMG channels are RMS envelopes, not raw high-frequency EMG.
 - The effective rate is approximately `148.148 Hz`.
