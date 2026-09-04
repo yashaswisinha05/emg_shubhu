@@ -339,6 +339,56 @@ confidence intervals. A gradient-routing ablation should compare scales
 `0`, `0.05`, `0.10`, `0.25`, and `1.0` while holding the split, losses, and
 checkpoint criterion fixed.
 
+### Experimental successor: EMG acceleration dynamics
+
+The shared-goal experiment did not earn its added complexity on the first
+run: its bridge changed screen error by only `+0.2 px` and complete-path error
+by `+0.00 cm`; the final `5.95 cm` path and `7.65 cm` endpoint were also worse
+than the earlier temporal-EMG-residual checkpoint (`5.81 cm`, `7.42 cm`). Keep
+that run as a negative ablation, not as the base for the next model.
+
+[`scripts/train_emg_acceleration_complete_reach.py`](scripts/train_emg_acceleration_complete_reach.py)
+therefore starts from `runs/emg_residual_complete_reach/final.pt`. Its new
+branch predicts a temporally resolved acceleration residual from causal EMG,
+then uses differentiable trapezoidal integration to turn acceleration into a
+velocity residual and a complete-path correction:
+
+```text
+causal EMG tokens -> acceleration residual a_EMG(t)
+                  -> integrate -> velocity residual
+                  -> integrate -> 3D path correction
+
+previous EMG+IMU path + integrated correction -> final complete reach
+```
+
+VIVE position and velocity construct supervision labels only. Neither VIVE
+velocity, acceleration, position, nor target enters `student_forward`. The
+true acceleration label is computed by smoothing the resampled VIVE velocity
+and differentiating it; the model must infer that acceleration from EMG+IMU.
+The new acceleration output is zero-initialized, so the supplied checkpoint is
+reproduced exactly before training. A 10-epoch dynamics-only warm-up is
+followed by low-rate joint fine-tuning, and each phase retains its incoming
+checkpoint unless validation actually improves.
+
+```bash
+python scripts/train_emg_acceleration_complete_reach.py \
+  --root "/media/nahar3/Extreme SSD/emg2pose_dataset/emg_imu_vive" \
+  --initial-checkpoint runs/emg_residual_complete_reach/final.pt \
+  --config configs/tracked_emg_acceleration_complete_reach.yaml \
+  --cache-dir artifacts/tracked_cache_posture \
+  --session-prefixes dev_a1 dev_a2 dev_a3 dev_a4 \
+  --device cuda --epochs 30 --finetune-epochs 0 \
+  --lead-window-ms 0 400 \
+  --output-dir runs/emg_acceleration_complete_reach
+```
+
+The final diagnostics print before/after dynamics path and endpoint errors,
+acceleration RMSE, duration MAE, integrated correction magnitude, gate value,
+and paired zeroed/shuffled-EMG costs. Retain this model only if it beats both
+`5.81 cm` path and `7.42 cm` endpoint while keeping screen error at or below
+about `201 px` and preserving positive EMG intervention costs. A smaller
+training loss alone is not evidence that acceleration helped.
+
 ## Legacy `MERGED DATA` model
 
 The older `MERGED DATA` final model is:

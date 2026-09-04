@@ -232,6 +232,11 @@ class EMGResidualCompleteReachModel(SoftRoutedCompleteReachModel):
             "emg_from_imu_attention": encoded["emg_from_imu_attention"],
             "imu_from_emg_attention": encoded["imu_from_emg_attention"],
             "guidance": guidance,
+            # Private forward-state keys let isolated successor heads reuse
+            # the causal encoding without running the full student twice.
+            "_emg_tokens": encoded["emg_tokens"],
+            "_emg_token_mask": encoded["emg_token_mask"],
+            "_motion_context": encoded["motion_context"],
         }
         if include_emg_only:
             emg_factor = encoded["emg_mu"]

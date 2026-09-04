@@ -1,0 +1,27 @@
+# Isolated overlay on the established EMG-residual experiment. The inherited
+# model/data/loss settings remain identical unless explicitly changed below.
+base_config: tracked_emg_residual_complete_reach.yaml
+
+experiment_name: "tracked_emg_acceleration_complete_reach"
+
+model:
+  emg_acceleration_dynamics:
+    num_heads: 4
+    dropout: 0.10
+    acceleration_limit_mps2: 4.0
+    correction_limit_m: 0.12
+    correction_gate_initial: 0.20
+    minimum_duration_s: 0.45
+    maximum_duration_s: 1.60
+    acceleration_loss_scale_mps2: 2.0
+    jerk_loss_scale_mps3: 10.0
+    huber_beta: 0.05
+    acceleration_weight: 0.20
+    velocity_weight: 0.10
+    residual_fit_weight: 0.35
+    jerk_weight: 0.025
+    duration_weight: 0.05
+    emg_only_acceleration_weight: 0.10
+    regularization_weight: 0.0005
+    warmup_epochs: 10
+    joint_learning_rate_factor: 0.05

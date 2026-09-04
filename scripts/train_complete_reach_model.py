@@ -92,9 +92,11 @@ def make_complete_reach_window(
     masks: list[torch.Tensor] = []
     teacher_features: list[torch.Tensor] = []
     trajectory_targets: list[torch.Tensor] = []
+    velocity_targets: list[torch.Tensor] = []
     endpoint_targets: list[torch.Tensor] = []
     current_position_targets: list[torch.Tensor] = []
     observed_fractions: list[float] = []
+    movement_samples: list[int] = []
     source_paths: list[str] = []
 
     for row, cut, touch, _ in chosen:
@@ -125,6 +127,7 @@ def make_complete_reach_window(
         )
         full_velocity = batch["velocity"][row].index_select(0, indices)
         trajectory_targets.append(full_position)
+        velocity_targets.append(full_velocity)
         endpoint_targets.append(batch["position"][row, touch] - origin)
         current_position_targets.append(batch["position"][row, cut] - origin)
         teacher_features.append(torch.cat([
@@ -135,6 +138,7 @@ def make_complete_reach_window(
         observed_fractions.append(
             float(min(max(cut - onset, 0), denominator)) / denominator
         )
+        movement_samples.append(denominator)
         paths = batch.get("paths")
         source_paths.append(str(paths[row]) if paths is not None else str(row))
 
@@ -148,6 +152,12 @@ def make_complete_reach_window(
         "teacher_features": torch.stack(teacher_features),
         "trajectory_target": torch.stack(trajectory_targets),
         "complete_trajectory_target": torch.stack(trajectory_targets),
+        # Additional supervision-only labels for dynamics successors. Existing
+        # complete-reach models ignore these keys, so their behavior is unchanged.
+        "velocity_target": torch.stack(velocity_targets),
+        "movement_samples": torch.tensor(
+            movement_samples, dtype=torch.long, device=device
+        ),
         "endpoint_3d_target": torch.stack(endpoint_targets),
         "current_position_target": torch.stack(current_position_targets),
         "observed_fraction": torch.tensor(
