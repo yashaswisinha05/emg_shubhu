@@ -278,6 +278,11 @@ class TemporalCrossAttentionStudentEncoder(nn.Module):
             "intent_context": intent_context,
             "motion_context": motion_context,
             "interaction_context": interaction,
+            # Exposed for successor task heads that need temporally resolved
+            # EMG evidence. Existing models ignore these additional outputs;
+            # no parameter layout or checkpoint key changes.
+            "emg_tokens": emg_tokens,
+            "emg_token_mask": emg_mask,
             "fused_imu_trajectory": self.imu_motion_head(
                 fused_imu_pool
             ).reshape(-1, self.trajectory_steps, 3),

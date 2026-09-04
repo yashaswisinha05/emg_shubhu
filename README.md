@@ -246,6 +246,45 @@ python scripts/visualize_complete_reach_manipulator.py \
   --fps 20 --output-dir runs/soft_routed_manipulator_random
 ```
 
+### Experimental successor: temporal EMG residual for 3D
+
+[`scripts/train_emg_residual_complete_reach.py`](scripts/train_emg_residual_complete_reach.py)
+tests whether temporally resolved EMG can predict the part of the 3D path left
+unexplained by the soft-routed model. It does not replace or overwrite the
+current result.
+
+The new branch uses 16 learned path queries to attend to causal EMG tokens and
+predicts a bounded residual:
+
+```text
+soft-routed base path B(t) + gated temporal-EMG residual R(t) -> final path
+```
+
+Its path and endpoint output layers are zero-initialized. Before training, the
+new model therefore exactly reproduces the supplied soft-routed checkpoint.
+Training first freezes that checkpoint for a 10-epoch residual warm-up, then
+jointly fine-tunes for `--epochs` epochs at one-tenth of the original learning
+rate.
+
+```bash
+python scripts/train_emg_residual_complete_reach.py \
+  --root "/media/nahar3/Extreme SSD/emg2pose_dataset/emg_imu_vive" \
+  --initial-checkpoint runs/soft_routed_complete_reach/final.pt \
+  --config configs/tracked_emg_residual_complete_reach.yaml \
+  --cache-dir artifacts/tracked_cache_posture \
+  --session-prefixes dev_a1 dev_a2 dev_a3 dev_a4 \
+  --device cuda --epochs 30 --finetune-epochs 0 \
+  --lead-window-ms 0 400 \
+  --output-dir runs/emg_residual_complete_reach
+```
+
+The final report adds paired 3D interventions for full EMG+IMU, zeroed EMG,
+trial-shuffled EMG, and zeroed IMU. For each condition it prints complete-path
+error, endpoint error, direction angle, and wrong-way fraction. A positive
+`remove EMG path cost` or `shuffle EMG path cost` is the direct measurement of
+EMG helping 3D motion. This successor should be retained only if it improves
+those paired metrics without materially degrading the unified screen result.
+
 Before treating the one-seed values as paper results, repeat at minimum seeds
 `1`, `2`, and `3` and report the mean, spread, and paired trial-level
 confidence intervals. A gradient-routing ablation should compare scales
