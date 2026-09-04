@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Run the existing red-target/cyan-prediction UI with a distilled best model.
+"""Run the red-target/cyan-prediction UI with a wearable checkpoint.
 
 This has the same trial playback and visual layout as ``live_prediction_ui``.
-It loads channel+horizon or semantic-residual checkpoints, applies their exact
-training normalization/filter/PCA pipeline, and calls only
+It loads supported wearable checkpoints, including soft-routed complete-reach,
+applies their exact training normalization/filter/PCA pipeline, and calls only
 ``student_forward(EMG, IMU, time_mask)``.  Recorded VIVE is used only to place
 the red ground-truth target and calculate the displayed pixel error.
 
