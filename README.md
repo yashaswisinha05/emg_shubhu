@@ -285,6 +285,54 @@ error, endpoint error, direction angle, and wrong-way fraction. A positive
 EMG helping 3D motion. This successor should be retained only if it improves
 those paired metrics without materially degrading the unified screen result.
 
+### Experimental successor: one shared screen/3D goal
+
+[`scripts/train_goal_prototype_complete_reach.py`](scripts/train_goal_prototype_complete_reach.py)
+loads the temporal-EMG-residual checkpoint and tests whether the two output
+tasks improve when they share one wearable-predicted 8x5 goal distribution.
+The implementation is in
+[`src/emg_touch/models/goal_prototype_complete_reach.py`](src/emg_touch/models/goal_prototype_complete_reach.py)
+and its isolated configuration is
+[`configs/tracked_goal_prototype_complete_reach.yaml`](configs/tracked_goal_prototype_complete_reach.yaml).
+
+For each screen cell, the model learns a complete-path and endpoint residual
+prototype from training labels. At inference its EMG+IMU screen heatmap softly
+selects and mixes those prototypes; no true target id is supplied. In the
+reverse direction, the wearable-predicted 3D endpoint produces a bounded
+screen correction. Thus screen and 3D supervise a shared goal without making
+the two decoders identical:
+
+```text
+wearable goal probabilities -> screen coordinate
+                            -> target-conditioned 3D residual prototype
+
+IMU motion + temporal EMG correction + goal prototype -> complete 3D path
+predicted 3D endpoint -> bounded screen correction
+```
+
+All prototype tensors and the final geometry-correction layer start at zero.
+The supplied checkpoint is therefore reproduced exactly before training. The
+first 8 epochs train only the new bridge; `--epochs` then controls low-rate
+joint fine-tuning.
+
+```bash
+python scripts/train_goal_prototype_complete_reach.py \
+  --root "/media/nahar3/Extreme SSD/emg2pose_dataset/emg_imu_vive" \
+  --initial-checkpoint runs/emg_residual_complete_reach/final.pt \
+  --config configs/tracked_goal_prototype_complete_reach.yaml \
+  --cache-dir artifacts/tracked_cache_posture \
+  --session-prefixes dev_a1 dev_a2 dev_a3 dev_a4 \
+  --device cuda --epochs 30 --finetune-epochs 0 \
+  --lead-window-ms 0 400 \
+  --output-dir runs/goal_prototype_complete_reach
+```
+
+The final diagnostics report screen, complete-path, and endpoint results both
+before and after the goal bridge, goal-cell accuracy, bridge gates, and the
+same paired EMG 3D interventions. Retain this branch only when screen error is
+below `201.0 px`, path error is below `5.81 cm`, endpoint error is below
+`7.42 cm`, and EMG removal/shuffling costs remain positive.
+
 Before treating the one-seed values as paper results, repeat at minimum seeds
 `1`, `2`, and `3` and report the mean, spread, and paired trial-level
 confidence intervals. A gradient-routing ablation should compare scales

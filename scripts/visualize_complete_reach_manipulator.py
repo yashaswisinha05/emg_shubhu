@@ -62,6 +62,7 @@ def collect_complete_reach_trials(
         "asymmetric_intent_motion",
         "soft_routed_complete_reach",
         "emg_residual_complete_reach",
+        "goal_prototype_complete_reach",
     }
     if runner.kind not in supported_kinds:
         raise ValueError(
@@ -304,6 +305,7 @@ def main() -> None:
         "asymmetric_intent_motion",
         "soft_routed_complete_reach",
         "emg_residual_complete_reach",
+        "goal_prototype_complete_reach",
     }:
         raise SystemExit(
             "checkpoint must come from a complete-reach trainer; "

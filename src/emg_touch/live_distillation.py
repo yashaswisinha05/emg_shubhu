@@ -43,6 +43,9 @@ from .models.deterministic_complete_reach import (
 from .models.asymmetric_intent_motion import AsymmetricIntentMotionModel
 from .models.soft_routed_complete_reach import SoftRoutedCompleteReachModel
 from .models.emg_residual_complete_reach import EMGResidualCompleteReachModel
+from .models.goal_prototype_complete_reach import (
+    GoalPrototypeCompleteReachModel,
+)
 from .models.latent_distillation import WearableLatentDistillationModel
 from .models.rolling_dual_head_distillation import (
     RollingDualHeadDistillationModel,
@@ -62,6 +65,11 @@ RAW_IMU_AXES_PER_SENSOR = 6
 
 def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     keys = tuple(state)
+    if any(
+        key.startswith("student.goal_prototype_bridge.path_prototypes")
+        for key in keys
+    ):
+        return "goal_prototype_complete_reach"
     if any(
         key.startswith("student.emg_temporal_residual_head.cross_attention.")
         for key in keys
@@ -127,7 +135,8 @@ def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     ):
         return "latent_distillation"
     raise ValueError(
-        "unsupported checkpoint architecture; expected an EMG-residual or "
+        "unsupported checkpoint architecture; expected a shared-goal, "
+        "EMG-residual or "
         "soft-routed complete-reach, "
         "asymmetric intent-motion, "
         "deterministic, task-separated, "
@@ -334,7 +343,11 @@ class LiveDistillationModel:
         self.device = choose_device(device)
         emg_dim = emg_feature_count(self.config["data"])
         imu_dim = imu_feature_count(self.config["data"])
-        if self.kind == "emg_residual_complete_reach":
+        if self.kind == "goal_prototype_complete_reach":
+            self.model = GoalPrototypeCompleteReachModel(
+                self.config, emg_dim, imu_dim
+            )
+        elif self.kind == "emg_residual_complete_reach":
             self.model = EMGResidualCompleteReachModel(
                 self.config, emg_dim, imu_dim
             )
