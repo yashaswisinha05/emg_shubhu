@@ -46,6 +46,7 @@ from .models.emg_residual_complete_reach import EMGResidualCompleteReachModel
 from .models.emg_acceleration_complete_reach import (
     EMGAccelerationCompleteReachModel,
 )
+from .models.personalized_complete_reach import PersonalizedCompleteReachModel
 from .models.goal_prototype_complete_reach import (
     GoalPrototypeCompleteReachModel,
 )
@@ -68,6 +69,11 @@ RAW_IMU_AXES_PER_SENSOR = 6
 
 def checkpoint_kind(state: dict[str, torch.Tensor]) -> str:
     keys = tuple(state)
+    if any(
+        key.startswith("student.candidate_personalization.adapter.")
+        for key in keys
+    ):
+        return "personalized_complete_reach"
     if any(
         key.startswith("student.emg_acceleration_dynamics_head.cross_attention.")
         for key in keys
@@ -353,6 +359,10 @@ class LiveDistillationModel:
         imu_dim = imu_feature_count(self.config["data"])
         if self.kind == "goal_prototype_complete_reach":
             self.model = GoalPrototypeCompleteReachModel(
+                self.config, emg_dim, imu_dim
+            )
+        elif self.kind == "personalized_complete_reach":
+            self.model = PersonalizedCompleteReachModel(
                 self.config, emg_dim, imu_dim
             )
         elif self.kind == "emg_acceleration_complete_reach":

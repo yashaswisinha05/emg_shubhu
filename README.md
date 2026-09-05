@@ -389,6 +389,46 @@ and paired zeroed/shuffled-EMG costs. Retain this model only if it beats both
 about `201 px` and preserving positive EMG intervention costs. A smaller
 training loss alone is not evidence that acceleration helped.
 
+### Personalizing to one new candidate with 200 trials
+
+Do not train the complete network from scratch on 200 trials. The isolated
+[`scripts/train_personalized_complete_reach.py`](scripts/train_personalized_complete_reach.py)
+trainer retains the 800-trial acceleration model and adds a zero-initialized,
+rank-12 candidate adapter. It randomly reserves 20% validation and 20% test,
+fits normalization and PCA on the remaining 60% only, freezes the wearable
+encoders, trains the adapter, and finally tunes only the established output
+heads at one-tenth the learning rate. The untouched test split is evaluated
+once after validation selection.
+
+Replace `newperson_a1` with the unique prefix of the new candidate's folder:
+
+```bash
+python scripts/train_personalized_complete_reach.py \
+  --root "/media/nahar3/Extreme SSD/emg2pose_dataset/emg_imu_vive" \
+  --initial-checkpoint runs/emg_acceleration_complete_reach/final.pt \
+  --config configs/tracked_personalized_complete_reach.yaml \
+  --cache-dir artifacts/tracked_cache_personalized \
+  --session-prefixes newperson_a1 \
+  --device cuda --epochs 20 --finetune-epochs 10 \
+  --lead-window-ms 0 400 \
+  --output-dir runs/personalized_newperson_a1
+```
+
+The run also writes `live_calibration.npz` from the candidate training split.
+Use that exact file with the personalized checkpoint in true live inference:
+
+```bash
+python scripts/run_live_distillation_ui.py \
+  --checkpoint "Personalized=runs/personalized_newperson_a1/final.pt" \
+  --calibration runs/personalized_newperson_a1/live_calibration.npz \
+  --device cuda --interval-ms 40
+```
+
+For the paper, compare this against (1) the unadapted population checkpoint
+and (2) the same architecture trained from scratch using the identical
+train/validation/test trial indices. Calibration and model selection must not
+use the reserved test trials.
+
 ## Legacy `MERGED DATA` model
 
 The older `MERGED DATA` final model is:

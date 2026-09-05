@@ -64,6 +64,7 @@ def collect_complete_reach_trials(
         "emg_residual_complete_reach",
         "goal_prototype_complete_reach",
         "emg_acceleration_complete_reach",
+        "personalized_complete_reach",
     }
     if runner.kind not in supported_kinds:
         raise ValueError(
@@ -308,6 +309,7 @@ def main() -> None:
         "emg_residual_complete_reach",
         "goal_prototype_complete_reach",
         "emg_acceleration_complete_reach",
+        "personalized_complete_reach",
     }:
         raise SystemExit(
             "checkpoint must come from a complete-reach trainer; "

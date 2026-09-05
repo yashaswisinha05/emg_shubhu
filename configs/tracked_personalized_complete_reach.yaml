@@ -1,0 +1,36 @@
+base_config: tracked_emg_acceleration_complete_reach.yaml
+
+experiment_name: "tracked_personalized_complete_reach"
+
+data:
+  # Replace on the command line with the new candidate's folder prefix.
+  include_session_prefixes: ["candidate_a1"]
+  split_by: "trial"
+  validation_fraction: 0.20
+  test_fraction: 0.20
+
+model:
+  candidate_personalization:
+    rank: 12
+    source_session_count: 4
+    screen_residual_limit: 0.12
+    path_residual_limit_m: 0.10
+    gate_initial: 0.25
+    pixel_normalizer_px: 100.0
+    screen_weight: 0.75
+    path_weight: 0.50
+    endpoint_weight: 0.50
+    regularization_weight: 0.01
+    head_learning_rate_factor: 0.10
+
+training:
+  # Adapter-only epochs. --epochs overrides this value.
+  epochs: 20
+  learning_rate: 0.0001
+  early_stopping_patience: 7
+  cutoffs_per_trial: 4
+
+distillation:
+  teacher_epochs: 0
+  # Selected output-head tuning after adapter-only training.
+  finetune_epochs: 10
