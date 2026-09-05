@@ -484,6 +484,13 @@ same training-only `live_calibration.npz`. Keep `--seed` identical across all
 stages if overriding the default seed, otherwise the checkpoint chain would
 not represent one fixed experimental split.
 
+For candidate `32e00ff16111`, the complete three-stage sequence is also saved
+as one executable batch script:
+
+```bash
+bash scripts/train_candidate_from_scratch.sh
+```
+
 ## Legacy `MERGED DATA` model
 
 The older `MERGED DATA` final model is:
