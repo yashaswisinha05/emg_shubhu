@@ -429,6 +429,61 @@ and (2) the same architecture trained from scratch using the identical
 train/validation/test trial indices. Calibration and model selection must not
 use the reserved test trials.
 
+### Candidate-only training from scratch
+
+The scratch control uses the same candidate selection, seed, 60/20/20 split,
+training-only normalization, and causal labels as personalization. It is a
+three-stage architectural build, but it never loads the 800-trial population
+model. Run these commands in order, using the same unique candidate prefix in
+all three commands.
+
+Stage 1 trains the teacher and soft-routed EMG+IMU student from random weights:
+
+```bash
+python scripts/train_candidate_scratch_01_soft_routed.py \
+  --root "/media/nahar3/Extreme SSD/emg2pose_dataset/emg_imu_vive" \
+  --config configs/tracked_soft_routed_complete_reach.yaml \
+  --cache-dir artifacts/tracked_cache_candidate_scratch \
+  --session-prefixes newperson_a1 \
+  --device cuda --teacher-epochs 25 --epochs 50 \
+  --finetune-epochs 0 --lead-window-ms 0 400 \
+  --output-dir runs/candidate_scratch_01_soft_routed
+```
+
+Stage 2 adds and trains the zero-initialized temporal EMG residual:
+
+```bash
+python scripts/train_candidate_scratch_02_emg_residual.py \
+  --root "/media/nahar3/Extreme SSD/emg2pose_dataset/emg_imu_vive" \
+  --initial-checkpoint runs/candidate_scratch_01_soft_routed/final.pt \
+  --config configs/tracked_emg_residual_complete_reach.yaml \
+  --cache-dir artifacts/tracked_cache_candidate_scratch \
+  --session-prefixes newperson_a1 \
+  --device cuda --epochs 30 --finetune-epochs 0 \
+  --lead-window-ms 0 400 \
+  --output-dir runs/candidate_scratch_02_emg_residual
+```
+
+Stage 3 adds and trains the zero-initialized acceleration dynamics:
+
+```bash
+python scripts/train_candidate_scratch_03_acceleration.py \
+  --root "/media/nahar3/Extreme SSD/emg2pose_dataset/emg_imu_vive" \
+  --initial-checkpoint runs/candidate_scratch_02_emg_residual/final.pt \
+  --config configs/tracked_emg_acceleration_complete_reach.yaml \
+  --cache-dir artifacts/tracked_cache_candidate_scratch \
+  --session-prefixes newperson_a1 \
+  --device cuda --epochs 30 --finetune-epochs 0 \
+  --lead-window-ms 0 400 \
+  --output-dir runs/candidate_scratch_03_acceleration
+```
+
+The final scratch checkpoint is
+`runs/candidate_scratch_03_acceleration/final.pt`. Each stage also writes the
+same training-only `live_calibration.npz`. Keep `--seed` identical across all
+stages if overriding the default seed, otherwise the checkpoint chain would
+not represent one fixed experimental split.
+
 ## Legacy `MERGED DATA` model
 
 The older `MERGED DATA` final model is:

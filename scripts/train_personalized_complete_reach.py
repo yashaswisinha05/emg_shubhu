@@ -161,10 +161,9 @@ def build_candidate_loaders(
         np.asarray(imu_statistics[0], dtype=np.float32),
         np.asarray(imu_statistics[1], dtype=np.float32),
     )
+    candidate_settings = config["model"].get("candidate_personalization", {})
     config.setdefault("virtual_leader", {})["session_count"] = int(
-        config["model"]["candidate_personalization"].get(
-            "source_session_count", 4
-        )
+        candidate_settings.get("source_session_count", 1)
     )
     cache = Path(cache_dir) if cache_dir else None
     batch_size = int(config["training"].get("batch_size", 16))
@@ -188,6 +187,22 @@ def build_candidate_loaders(
     )
     print("normalization/PCA fit on candidate training trials only")
     return loader(train, True), loader(validation, False), loader(test, False)
+
+
+def save_candidate_calibration(output: str | Path) -> Path:
+    """Write the exact train-only statistics used by the latest loader."""
+    if _CANDIDATE_CALIBRATION is None:
+        raise RuntimeError("candidate calibration was not constructed")
+    path = Path(output) / "live_calibration.npz"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        emg_scale=_CANDIDATE_CALIBRATION[0],
+        imu_center=_CANDIDATE_CALIBRATION[1],
+        imu_scale=_CANDIDATE_CALIBRATION[2],
+    )
+    print(f"wrote train-only live calibration to {path}")
+    return path
 
 
 def personalization_losses(
@@ -415,16 +430,8 @@ def main() -> None:
         "population encoder -> low-rank adapter -> low-rate output-head tuning"
     )
     channel.main()
-    if _CANDIDATE_CALIBRATION is None:
-        raise RuntimeError("candidate calibration was not constructed")
     output = Path(_option_value("--output-dir", "runs/personalized_complete_reach"))
-    np.savez_compressed(
-        output / "live_calibration.npz",
-        emg_scale=_CANDIDATE_CALIBRATION[0],
-        imu_center=_CANDIDATE_CALIBRATION[1],
-        imu_scale=_CANDIDATE_CALIBRATION[2],
-    )
-    print(f"wrote train-only live calibration to {output / 'live_calibration.npz'}")
+    save_candidate_calibration(output)
 
 
 if __name__ == "__main__":
