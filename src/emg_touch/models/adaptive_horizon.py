@@ -104,6 +104,32 @@ def interpolate_at(
     return value, validity
 
 
+def blend_two(
+    value_floor: torch.Tensor, value_ceil: torch.Tensor, tau: torch.Tensor,
+    tau_floor: torch.Tensor,
+) -> torch.Tensor:
+    """Interpolate between two ALREADY-COMPUTED values by tau's fractional part.
+
+    For the trajectory model, one forward pass emits a whole rollout and
+    interpolate_at reads two points out of it. The pointing model has no
+    such rollout - changing how far before touch a prediction is made
+    changes what the ENCODER sees, not just what is read out of one fixed
+    computation - so there is no sequence to gather from. This is the same
+    interpolation idea with the gather removed: the caller runs the encoder
+    TWICE, once at floor(tau) and once at ceil(tau) samples of lead time,
+    and this blends the two resulting predictions. Gradient still reaches
+    tau through `fraction`, exactly as it does through interpolate_at's
+    gather weights - verified in isolation, see the adaptive-lead training
+    script's own tests before trusting this on real data.
+    """
+    fraction = (tau - tau_floor).clamp(0.0, 1.0)
+    weight_shape = (-1,) + (1,) * (value_floor.dim() - 1)
+    return (
+        value_floor * (1.0 - fraction).view(*weight_shape)
+        + value_ceil * fraction.view(*weight_shape)
+    )
+
+
 def adaptive_horizon_loss(
     trajectory: torch.Tensor, future: torch.Tensor, future_mask: torch.Tensor,
     tau: torch.Tensor, tau_max_samples: int, reach_weight: float,

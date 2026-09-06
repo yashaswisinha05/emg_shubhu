@@ -45,10 +45,12 @@ from emg_touch.models.personalized_complete_reach import (  # noqa: E402
 _ORIGINAL_TRAIN_STUDENT_PHASE = base.train_student_phase
 _ORIGINAL_SET_TRAINABLE = base.set_trainable
 _INITIAL_CHECKPOINT: Path | None = None
-_CANDIDATE_CALIBRATION: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+_CANDIDATE_CALIBRATIONS: dict[
+    str, tuple[np.ndarray, np.ndarray, np.ndarray]
+] = {}
 
 
-def _matches_prefix(path: Path, prefixes: list[str]) -> bool:
+def _candidate_for_path(path: Path, prefixes: list[str]) -> str | None:
     for part in path.parts:
         lowered = part.lower()
         for prefix in prefixes:
@@ -57,113 +59,137 @@ def _matches_prefix(path: Path, prefixes: list[str]) -> bool:
                 or lowered.startswith(prefix + "_")
                 or lowered.startswith(prefix + "-")
             ):
-                return True
-    return False
+                return prefix
+    return None
 
 
 class CandidateDataset(TrackedTrajectoryDataset):
-    """Apply one training-only calibration to all candidate splits."""
+    """Apply the correct training-only calibration to each candidate."""
 
     def __init__(
         self,
         trials: list[Path],
         data_config: dict[str, Any],
         cache_dir: Path | None,
-        emg_scale: np.ndarray | None,
-        imu_statistics: tuple[np.ndarray, np.ndarray] | None,
+        trial_candidates: dict[str, str],
+        candidate_index: dict[str, int],
+        emg_scales: dict[str, np.ndarray],
+        imu_statistics: dict[str, tuple[np.ndarray, np.ndarray]],
     ) -> None:
         super().__init__(
             trials, data_config, cache_dir, session_index={}, apply_emg_pca=False
         )
-        self.candidate_emg_scale = emg_scale
+        self.trial_candidates = trial_candidates
+        self.candidate_index = candidate_index
+        self.candidate_emg_scales = emg_scales
         self.candidate_imu_statistics = imu_statistics
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         result = super().__getitem__(index)
         if result.get("unusable"):
             return result
-        if self.candidate_emg_scale is not None:
-            result["emg"] = result["emg"] / torch.from_numpy(
-                self.candidate_emg_scale
-            )
+        candidate = self.trial_candidates[str(self.trials[index])]
+        scale = self.candidate_emg_scales.get(candidate)
+        if scale is not None:
+            result["emg"] = result["emg"] / torch.from_numpy(scale)
         result["emg"] = torch.from_numpy(
             apply_sensor_local_pca(result["emg"].numpy(), self.data_config)
         )
-        if self.candidate_imu_statistics is not None:
-            centre, spread = self.candidate_imu_statistics
+        statistics = self.candidate_imu_statistics.get(candidate)
+        if statistics is not None:
+            centre, spread = statistics
             result["imu"] = (
                 result["imu"] - torch.from_numpy(centre)
             ) / torch.from_numpy(spread)
-        result["session"] = 0
+        result["session"] = self.candidate_index[candidate]
         return result
 
 
 def build_candidate_loaders(
     config: dict[str, Any], root: str | Path, cache_dir: str | Path | None
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
-    global _CANDIDATE_CALIBRATION
+    global _CANDIDATE_CALIBRATIONS
     prefixes = [
         str(value).strip().lower()
         for value in config["data"].get("include_session_prefixes", [])
         if str(value).strip()
     ]
     if not prefixes:
-        raise ValueError("provide exactly one candidate using --session-prefixes")
-    trials = [
-        path
-        for paths in discover_trials(root).values()
-        for path in paths
-        if _matches_prefix(path, prefixes)
-    ]
-    if not trials:
+        raise ValueError("provide candidate folder names using --session-prefixes")
+    grouped: dict[str, list[Path]] = {prefix: [] for prefix in prefixes}
+    for paths in discover_trials(root).values():
+        for path in paths:
+            candidate = _candidate_for_path(path, prefixes)
+            if candidate is not None:
+                grouped[candidate].append(path)
+    missing = [prefix for prefix, trials in grouped.items() if not trials]
+    if missing:
         raise ValueError(
-            "candidate prefix matched no trial_*.csv: " + ", ".join(prefixes)
+            "candidate prefix matched no trial_*.csv: " + ", ".join(missing)
         )
-    generator = np.random.default_rng(int(config.get("seed", 42)))
-    generator.shuffle(trials)
+
     validation_fraction = float(config["data"].get("validation_fraction", 0.2))
     test_fraction = float(config["data"].get("test_fraction", 0.2))
-    n_test = max(1, int(round(len(trials) * test_fraction)))
-    n_validation = max(1, int(round(len(trials) * validation_fraction)))
-    train = trials[n_test + n_validation:]
-    validation = trials[n_test:n_test + n_validation]
-    test = trials[:n_test]
-    if len(train) < 20:
-        raise ValueError(
-            f"only {len(train)} candidate training trials remain after splitting"
-        )
+    train: list[Path] = []
+    validation: list[Path] = []
+    test: list[Path] = []
+    training_by_candidate: dict[str, list[Path]] = {}
+    seed = int(config.get("seed", 42))
+    for index, prefix in enumerate(prefixes):
+        selected = list(grouped[prefix])
+        np.random.default_rng(seed + index).shuffle(selected)
+        n_test = max(1, int(round(len(selected) * test_fraction)))
+        n_validation = max(1, int(round(len(selected) * validation_fraction)))
+        candidate_train = selected[n_test + n_validation:]
+        if len(candidate_train) < 20:
+            raise ValueError(
+                f"only {len(candidate_train)} training trials remain for {prefix}"
+            )
+        training_by_candidate[prefix] = candidate_train
+        train.extend(candidate_train)
+        validation.extend(selected[n_test:n_test + n_validation])
+        test.extend(selected[:n_test])
 
     # Strict evaluation: neither validation nor test samples contribute to
     # normalization or PCA fitting.
-    emg_scale = None
-    if bool(config["data"].get("emg_session_normalise", True)):
-        emg_scale = session_emg_scale(train, config["data"])
-    imu_statistics = None
-    if bool(config["data"].get("imu_session_normalise", True)):
-        imu_statistics = session_imu_statistics(train, config["data"])
-    trial_sessions = {str(path): "candidate" for path in trials}
-    scales = {"candidate": emg_scale} if emg_scale is not None else {}
+    scales: dict[str, np.ndarray] = {}
+    statistics: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    normalise_emg = bool(config["data"].get("emg_session_normalise", True))
+    normalise_imu = bool(config["data"].get("imu_session_normalise", True))
+    for prefix, candidate_train in training_by_candidate.items():
+        if normalise_emg:
+            found_scale = session_emg_scale(candidate_train, config["data"])
+            if found_scale is not None:
+                scales[prefix] = found_scale
+        if normalise_imu:
+            found_statistics = session_imu_statistics(
+                candidate_train, config["data"]
+            )
+            if found_statistics is not None:
+                statistics[prefix] = found_statistics
+    trial_candidates = {
+        str(path): prefix for prefix, trials in grouped.items() for path in trials
+    }
     fit_training_emg_pca(
-        train, config["data"], scales, trial_sessions=trial_sessions
+        train, config["data"], scales, trial_sessions=trial_candidates
     )
-    if emg_scale is None:
-        emg_scale = np.ones(
-            raw_emg_feature_count(config["data"]), dtype=np.float32
-        )
-    if imu_statistics is None:
-        imu_dim = imu_feature_count(config["data"])
-        imu_statistics = (
+    emg_dim = raw_emg_feature_count(config["data"])
+    imu_dim = imu_feature_count(config["data"])
+    _CANDIDATE_CALIBRATIONS = {}
+    for prefix in prefixes:
+        emg_scale = scales.get(prefix, np.ones(emg_dim, dtype=np.float32))
+        imu_centre, imu_scale = statistics.get(prefix, (
             np.zeros(imu_dim, dtype=np.float32),
             np.ones(imu_dim, dtype=np.float32),
+        ))
+        _CANDIDATE_CALIBRATIONS[prefix] = (
+            np.asarray(emg_scale, dtype=np.float32),
+            np.asarray(imu_centre, dtype=np.float32),
+            np.asarray(imu_scale, dtype=np.float32),
         )
-    _CANDIDATE_CALIBRATION = (
-        np.asarray(emg_scale, dtype=np.float32),
-        np.asarray(imu_statistics[0], dtype=np.float32),
-        np.asarray(imu_statistics[1], dtype=np.float32),
-    )
     candidate_settings = config["model"].get("candidate_personalization", {})
     config.setdefault("virtual_leader", {})["session_count"] = int(
-        candidate_settings.get("source_session_count", 1)
+        candidate_settings.get("source_session_count", len(prefixes))
     )
     cache = Path(cache_dir) if cache_dir else None
     batch_size = int(config["training"].get("batch_size", 16))
@@ -172,7 +198,13 @@ def build_candidate_loaders(
     def loader(selected: list[Path], shuffle: bool) -> DataLoader:
         return DataLoader(
             CandidateDataset(
-                selected, config["data"], cache, emg_scale, imu_statistics
+                selected,
+                config["data"],
+                cache,
+                trial_candidates,
+                {prefix: index for index, prefix in enumerate(prefixes)},
+                scales,
+                statistics,
             ),
             batch_size=batch_size,
             shuffle=shuffle,
@@ -181,28 +213,48 @@ def build_candidate_loaders(
             drop_last=False,
         )
 
+    for prefix in prefixes:
+        total = len(grouped[prefix])
+        training = len(training_by_candidate[prefix])
+        print(
+            f"candidate {prefix}: {total} total | {training} train | "
+            f"{total - training} validation+untouched-test"
+        )
     print(
-        f"candidate {', '.join(prefixes)}: {len(train)} train | "
-        f"{len(validation)} validation | {len(test)} untouched test"
+        f"combined: {len(train)} train | {len(validation)} validation | "
+        f"{len(test)} untouched test"
     )
-    print("normalization/PCA fit on candidate training trials only")
+    print("normalization fitted separately on each candidate's training trials")
     return loader(train, True), loader(validation, False), loader(test, False)
 
 
-def save_candidate_calibration(output: str | Path) -> Path:
-    """Write the exact train-only statistics used by the latest loader."""
-    if _CANDIDATE_CALIBRATION is None:
+def save_candidate_calibration(output: str | Path) -> list[Path]:
+    """Write exact train-only statistics for every selected candidate."""
+    if not _CANDIDATE_CALIBRATIONS:
         raise RuntimeError("candidate calibration was not constructed")
-    path = Path(output) / "live_calibration.npz"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        path,
-        emg_scale=_CANDIDATE_CALIBRATION[0],
-        imu_center=_CANDIDATE_CALIBRATION[1],
-        imu_scale=_CANDIDATE_CALIBRATION[2],
-    )
-    print(f"wrote train-only live calibration to {path}")
-    return path
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for prefix, calibration in _CANDIDATE_CALIBRATIONS.items():
+        safe = "".join(
+            character if character.isalnum() or character in "-_" else "_"
+            for character in prefix
+        )
+        name = (
+            "live_calibration.npz"
+            if len(_CANDIDATE_CALIBRATIONS) == 1
+            else f"live_calibration_{safe}.npz"
+        )
+        path = output / name
+        np.savez_compressed(
+            path,
+            emg_scale=calibration[0],
+            imu_center=calibration[1],
+            imu_scale=calibration[2],
+        )
+        written.append(path)
+        print(f"wrote {prefix} train-only live calibration to {path}")
+    return written
 
 
 def personalization_losses(

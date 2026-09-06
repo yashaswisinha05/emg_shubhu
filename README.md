@@ -484,12 +484,17 @@ same training-only `live_calibration.npz`. Keep `--seed` identical across all
 stages if overriding the default seed, otherwise the checkpoint chain would
 not represent one fixed experimental split.
 
-For candidate `32e00ff16111`, the complete three-stage sequence is also saved
-as one executable batch script:
+The complete three-stage sequence for `32e00ff16111`,
+`shubhamcal1_b0f8c99b`, and `f5a69f99ddeb` is saved as one executable batch
+script:
 
 ```bash
 bash scripts/train_candidate_from_scratch.sh
 ```
+
+Each candidate is split independently and receives separate training-only
+normalization. The combined training subsets train one model; separate
+`live_calibration_<candidate>.npz` files are written for later deployment.
 
 ## Legacy `MERGED DATA` model
 

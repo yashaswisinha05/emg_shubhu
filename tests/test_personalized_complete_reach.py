@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -17,6 +18,7 @@ from emg_touch.models.personalized_complete_reach import (
     PersonalizedCompleteReachModel,
 )
 from scripts.train_personalized_complete_reach import student_objective
+from scripts import train_personalized_complete_reach as personalization
 from tests.test_task_separated_complete_reach import _window
 
 
@@ -99,3 +101,47 @@ def test_personalized_live_model_still_accepts_only_wearables() -> None:
         )
     assert result["kind"] == "personalized_complete_reach"
     assert len(result["complete_trajectory_relative_m"]) == 16
+
+
+def test_multiple_candidates_are_split_and_normalized_separately() -> None:
+    config = load_config("configs/tracked_soft_routed_complete_reach.yaml")
+    prefixes = ["32e00ff16111", "shubhamcal1_b0f8c99b", "f5a69f99ddeb"]
+    config["data"]["include_session_prefixes"] = prefixes
+    discovered = {
+        prefix: [
+            Path("/data") / prefix / f"trial_{index:03d}.csv"
+            for index in range(50)
+        ]
+        for prefix in prefixes
+    }
+    emg_dim = personalization.raw_emg_feature_count(config["data"])
+    imu_dim = imu_feature_count(config["data"])
+    with (
+        patch.object(personalization, "discover_trials", return_value=discovered),
+        patch.object(
+            personalization,
+            "session_emg_scale",
+            side_effect=lambda trials, data: np.full(
+                emg_dim, float(len(trials)), dtype=np.float32
+            ),
+        ) as emg_scale,
+        patch.object(
+            personalization,
+            "session_imu_statistics",
+            side_effect=lambda trials, data: (
+                np.zeros(imu_dim, dtype=np.float32),
+                np.ones(imu_dim, dtype=np.float32),
+            ),
+        ) as imu_statistics,
+        patch.object(personalization, "fit_training_emg_pca"),
+    ):
+        train, validation, test = personalization.build_candidate_loaders(
+            config, "/data", None
+        )
+    assert len(train.dataset) == 90
+    assert len(validation.dataset) == 30
+    assert len(test.dataset) == 30
+    assert emg_scale.call_count == 3
+    assert imu_statistics.call_count == 3
+    assert config["virtual_leader"]["session_count"] == 3
+    assert set(personalization._CANDIDATE_CALIBRATIONS) == set(prefixes)
