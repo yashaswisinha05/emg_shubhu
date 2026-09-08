@@ -16,6 +16,15 @@ from scripts import train_reach_grasp as train
 from emg_touch.data.reach_grasp import preprocess
 from emg_touch.data.annotation_uncertainty import soften_events
 from emg_touch.models.reach_grasp import ReachGraspModel
+from emg_touch.models.reach_grasp_patch_transformer import ReachGraspPatchTransformer
+
+
+def model_class(state):
+    if state.get("format") == "reach_grasp_annotation_v1":
+        return ReachGraspModel
+    if state.get("format") == "reach_grasp_patch_transformer_v1":
+        return ReachGraspPatchTransformer
+    raise ValueError("requires an annotation-aware TCN or patch-transformer checkpoint")
 
 
 def stable_triggers(times, probabilities, valid, high, low_ratio=.5,
@@ -166,9 +175,7 @@ def main():
     for name in ["imu", "emg", "emg_imu"]:
         path = args.run_dir / (name + "_best.pt")
         state = torch.load(path, map_location=args.device, weights_only=False)
-        if state.get("format") != "reach_grasp_annotation_v1":
-            raise ValueError("requires annotation-aware checkpoints")
-        model = ReachGraspModel(**state["model_args"]).to(args.device)
+        model = model_class(state)(**state["model_args"]).to(args.device)
         model.load_state_dict(state["state_dict"])
         model.eval().requires_grad_(False)
         def load(which):

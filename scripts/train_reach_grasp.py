@@ -19,6 +19,10 @@ from emg_touch.data.reach_grasp import preprocess
 from emg_touch.models.reach_grasp import ReachGraspModel
 from emg_touch.data.annotation_uncertainty import soften_events, holding_transitions
 
+MODEL_CLASS = ReachGraspModel
+MODEL_FORMAT = "reach_grasp_annotation_v1"
+MODEL_EXTRA_ARGS = {}
+
 
 def normalization(trials):
     result = {}
@@ -262,7 +266,8 @@ def main():
     for modality in args.models:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
-        model = ReachGraspModel(modality).to(args.device)
+        model_args = {"modality": modality, **MODEL_EXTRA_ARGS}
+        model = MODEL_CLASS(**model_args).to(args.device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
         best, stale, history = float("inf"), 0, []
         path = args.output_dir / (modality.replace("+", "_") + "_best.pt")
@@ -299,7 +304,7 @@ def main():
             history.append({"epoch": epoch, "validation": report, "thresholds": thresholds})
             if selection < best:
                 best, stale = selection, 0
-                torch.save({"format": "reach_grasp_annotation_v1" if args.annotation_aware else "reach_grasp_v1", "model_args": {"modality": modality},
+                torch.save({"format": MODEL_FORMAT if args.annotation_aware else "reach_grasp_v1", "model_args": model_args,
                     "state_dict": model.state_dict(), "normalization": stats, "preprocessing": settings,
                     "event_thresholds": thresholds, "event_tolerance_s": tolerance, "epoch": epoch,
                     "validation": report, "seed": args.seed}, path)
@@ -314,7 +319,7 @@ def main():
     if args.annotation_aware:
         for path in selected_paths.values():
             state = torch.load(path, map_location=args.device, weights_only=False)
-            model = ReachGraspModel(**state["model_args"]).to(args.device)
+            model = MODEL_CLASS(**state["model_args"]).to(args.device)
             model.load_state_dict(state["state_dict"])
             state["holding_decoder"] = choose_transition(predict(model, validation, stats, args), tolerance)
             torch.save(state, path)
@@ -336,7 +341,7 @@ def main():
             for e, key in enumerate(["grasp", "release"])} for ms in [100, 150, 200, 300]}
     for modality, path in selected_paths.items():
         state = torch.load(path, map_location=args.device, weights_only=False)
-        model = ReachGraspModel(**state["model_args"]).to(args.device)
+        model = MODEL_CLASS(**state["model_args"]).to(args.device)
         model.load_state_dict(state["state_dict"])
         predictions = predict(model, test, stats, args)
         results[modality] = metrics(predictions, state["event_thresholds"], tolerance)
