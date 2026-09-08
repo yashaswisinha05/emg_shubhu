@@ -18,11 +18,29 @@ sys.path.insert(0, str(ROOT / "src"))
 from emg_touch.data.reach_grasp import preprocess
 from emg_touch.models.reach_grasp import ReachGraspModel
 from emg_touch.data.annotation_uncertainty import soften_events, holding_transitions
-from emg_touch.physics.rotation_6d import orientation_errors_numpy
+from emg_touch.physics.rotation_6d import orientation_errors_numpy, rotation_6d_to_matrix
 
 MODEL_CLASS = ReachGraspModel
 MODEL_FORMAT = "reach_grasp_annotation_v1"
 MODEL_EXTRA_ARGS = {}
+
+
+def event_time_targets(time, events, centers=(0., .1, .2, .3, .4),
+                       uncertainty_s=.08, maximum_s=.45):
+    """Soft causal targets for time-to-grasp/release plus a no-event class."""
+    time = np.asarray(time, dtype=float)
+    events = np.asarray(events, dtype=float)
+    centers = np.asarray(centers, dtype=float)
+    result = np.zeros((len(time), 2, len(centers) + 1), dtype="float32")
+    for event in range(2):
+        delta = events[event] - time
+        near = (delta >= -uncertainty_s) & (delta <= maximum_s)
+        score = np.exp(-.5 * ((delta[:, None] - centers) /
+                              max(uncertainty_s, 1e-6)) ** 2)
+        score /= np.maximum(score.sum(1, keepdims=True), 1e-12)
+        result[near, event, :-1] = score[near]
+        result[~near, event, -1] = 1.
+    return result
 
 
 def normalization(trials):
@@ -81,7 +99,22 @@ def batches(trials, stats, batch_size, device, shuffle=False):
             orientation_mask[i, :n] = t.get("orientation_valid", np.zeros(n, bool))
         b["orientation"] = torch.from_numpy(orientation).to(device)
         b["orientation_mask"] = torch.from_numpy(orientation_mask).to(device)
+        event_time = np.zeros((len(selected), length, 2, 6), dtype="float32")
+        for i, t in enumerate(selected):
+            n = len(t["time"])
+            uncertainty = float(t.get("annotation_uncertainty_s", .08))
+            event_time[i, :n] = event_time_targets(
+                t["time"], t["events"], uncertainty_s=max(.04, uncertainty))
+        b["event_time_targets"] = torch.from_numpy(event_time).to(device)
         yield b
+
+
+def geodesic_radians(predicted, target):
+    predicted_matrix = rotation_6d_to_matrix(predicted)
+    target_matrix = rotation_6d_to_matrix(target)
+    relative = predicted_matrix.transpose(-1, -2) @ target_matrix
+    cosine = ((relative.diagonal(dim1=-2, dim2=-1).sum(-1) - 1) / 2)
+    return torch.acos(cosine.clamp(-1 + 1e-6, 1 - 1e-6))
 
 
 def usable(b, modality):
@@ -153,6 +186,16 @@ def predict(model, trials, stats, args, zero_emg=False):
             item = {"trial": trial, "prob": prob, "valid": mask, "position": position}
             if "orientation_6d" in out:
                 item["orientation_6d"] = out["orientation_6d"][i, :n].cpu().numpy()
+            if "event_time_logits" in out:
+                item["event_time_probability"] = out["event_time_logits"][
+                    i, :n].softmax(-1).cpu().numpy()
+            if "position_log_variance" in out:
+                item["position_std"] = (out["position_log_variance"][i, :n]
+                    .mul(.5).exp().cpu().numpy() * np.asarray(stats["position"]["std"]))
+            if "orientation_log_variance" in out:
+                item["orientation_std_deg"] = np.degrees(
+                    out["orientation_log_variance"][i, :n, 0]
+                    .mul(.5).exp().cpu().numpy())
             result.append(item)
     return result
 
@@ -164,8 +207,10 @@ def metrics(predictions, thresholds, tolerance):
     tp = fp = fn = 0
     full_tp = full_fp = full_fn = 0
     certain_frames = available_frames = 0
-    distances = []
+    distances, position_sigma, position_covered = [], [], []
     orientation_errors, yaw_errors = [], []
+    orientation_sigma, orientation_covered = [], []
+    event_time_errors, event_horizon_correct = [], []
     for item in predictions:
         valid = item["valid"] & item["trial"].get("holding_certain", np.ones_like(item["valid"]))
         true = item["trial"]["holding"].astype(bool)
@@ -181,6 +226,11 @@ def metrics(predictions, thresholds, tolerance):
         fn += int((~pred & true & valid).sum())
         pm = item["valid"] & item["trial"]["pose_valid"]
         distances.extend(np.linalg.norm(item["position"][pm] - item["trial"]["position"][pm], axis=-1) * 100)
+        if "position_std" in item and pm.any():
+            error = np.linalg.norm(item["position"][pm] - item["trial"]["position"][pm], axis=-1)
+            sigma = np.linalg.norm(item["position_std"][pm], axis=-1)
+            position_sigma.extend(sigma * 100)
+            position_covered.extend(error <= sigma)
         if "orientation_6d" in item:
             om = item["valid"] & item["trial"]["orientation_valid"]
             if om.any():
@@ -188,18 +238,42 @@ def metrics(predictions, thresholds, tolerance):
                     item["orientation_6d"][om], item["trial"]["orientation"][om])
                 orientation_errors.extend(geodesic)
                 yaw_errors.extend(yaw)
+                if "orientation_std_deg" in item:
+                    sigma = item["orientation_std_deg"][om]
+                    orientation_sigma.extend(sigma)
+                    orientation_covered.extend(geodesic <= sigma)
+        if "event_time_probability" in item:
+            centers = np.array([0., .1, .2, .3, .4])
+            for event in range(2):
+                delta = item["trial"]["events"][event] - item["trial"]["time"]
+                considered = item["valid"] & (delta >= 0) & (delta <= .45)
+                probability = item["event_time_probability"][:, event]
+                conditional = probability[:, :-1] / np.maximum(
+                    probability[:, :-1].sum(1, keepdims=True), 1e-9)
+                expected = conditional @ centers
+                event_time_errors.extend(np.abs(expected[considered] - delta[considered]) * 1000)
+                event_horizon_correct.extend((probability[considered, -1] < .5).tolist())
     result["holding_f1"] = 2 * tp / max(1, 2 * tp + fp + fn)
     result["holding_boundary_excluded"] = any("holding_certain" in i["trial"] for i in predictions)
     result["holding_f1_all_valid_frames"] = 2 * full_tp / max(1, 2 * full_tp + full_fp + full_fn)
     result["holding_certain_fraction_of_valid"] = certain_frames / max(1, available_frames)
     result["position_cm"] = float(np.mean(distances)) if distances else None
     result["valid_pose_frames"] = len(distances)
+    if position_sigma:
+        result["position_predicted_1sigma_cm"] = float(np.mean(position_sigma))
+        result["position_1sigma_coverage"] = float(np.mean(position_covered))
     if orientation_errors:
         result["orientation_geodesic_deg"] = float(np.mean(orientation_errors))
         result["orientation_geodesic_median_deg"] = float(np.median(orientation_errors))
         result["yaw_mae_deg"] = float(np.mean(yaw_errors))
         result["yaw_median_ae_deg"] = float(np.median(yaw_errors))
         result["valid_orientation_frames"] = len(orientation_errors)
+    if orientation_sigma:
+        result["orientation_predicted_1sigma_deg"] = float(np.mean(orientation_sigma))
+        result["orientation_1sigma_coverage"] = float(np.mean(orientation_covered))
+    if event_time_errors:
+        result["event_time_mae_ms_within_450ms"] = float(np.mean(event_time_errors))
+        result["event_within_450ms_recall"] = float(np.mean(event_horizon_correct))
     result["valid_wearable_fraction"] = float(np.mean(np.concatenate([i["valid"] for i in predictions])))
     return result
 
@@ -240,13 +314,21 @@ def main():
     p.add_argument("--selection-tolerance-ms", type=float, default=200.)
     p.add_argument("--orientation-weight", type=float, default=0.,
                    help="6D rotation loss weight; active only for models with an orientation head")
+    p.add_argument("--physiological-augmentation", action="store_true",
+                   help="Apply causal EMG/IMU gain, placement, noise and dropout augmentation")
+    p.add_argument("--augmentation-strength", type=float, default=1.)
+    p.add_argument("--event-time-weight", type=float, default=0.,
+                   help="Auxiliary grasp/release time-to-event distribution loss")
+    p.add_argument("--pose-uncertainty-weight", type=float, default=0.,
+                   help="Heteroscedastic position/orientation NLL weight")
     args = p.parse_args()
     if args.epochs < 1 or args.batch_size < 1 or args.patience < 1:
         p.error("epochs, batch size, patience must be positive")
     if args.uncertainty_ms <= 0 or args.selection_tolerance_ms <= 0:
         p.error("uncertainty and selection tolerance must be positive")
-    if args.orientation_weight < 0:
-        p.error("orientation weight cannot be negative")
+    if min(args.orientation_weight, args.augmentation_strength,
+           args.event_time_weight, args.pose_uncertainty_weight) < 0:
+        p.error("loss weights and augmentation strength cannot be negative")
     if args.annotation_aware and args.output_dir == Path("runs/reach_grasp_seed42"):
         args.output_dir = Path("runs/reach_grasp_annotation_seed42")
     tolerance = args.selection_tolerance_ms / 1000 if args.annotation_aware else .15
@@ -295,6 +377,10 @@ def main():
     weights = torch.tensor(np.clip((label_mask.sum(0) - positive) / np.maximum(positive, 1), 1, 50),
                            dtype=torch.float32, device=args.device)
     selected_paths = {}
+    augmenter = None
+    if args.physiological_augmentation:
+        from emg_touch.data.wearable_augmentation import PhysiologicalWearableAugmenter
+        augmenter = PhysiologicalWearableAugmenter(args.augmentation_strength)
     for modality in args.models:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -307,6 +393,8 @@ def main():
             model.train()
             losses = []
             for b in batches(train, stats, args.batch_size, args.device, True):
+                if augmenter is not None:
+                    b = augmenter(b, stats, modality)
                 valid = usable(b, modality)
                 if not valid.any():
                     continue
@@ -315,13 +403,36 @@ def main():
                 event_loss = F.binary_cross_entropy_with_logits(out["logits"], b["labels"], pos_weight=weights, reduction="none")
                 loss_mask = valid.unsqueeze(-1) * b["label_mask"]
                 loss = (event_loss * loss_mask).sum() / loss_mask.sum().clamp_min(1)
+                if "event_time_logits" in out and args.event_time_weight:
+                    target = b["event_time_targets"]
+                    horizon_loss = -(target * out["event_time_logits"].log_softmax(-1)).sum(-1)
+                    # Prevent the abundant no-event frames from overwhelming
+                    # the short anticipatory windows around each transition.
+                    horizon_weight = torch.where(target[..., -1] > .5, .1, 1.)
+                    horizon_mask = valid.unsqueeze(-1).expand_as(horizon_loss)
+                    loss = loss + args.event_time_weight * (
+                        horizon_loss * horizon_weight * horizon_mask).sum() / (
+                        horizon_weight * horizon_mask).sum().clamp_min(1)
                 pose_mask = valid & b["pose_mask"].squeeze(-1).bool()
                 if pose_mask.any():
-                    loss = loss + .2 * F.smooth_l1_loss(out["position"][pose_mask], b["pose"][pose_mask])
+                    pose_loss = F.smooth_l1_loss(out["position"][pose_mask], b["pose"][pose_mask])
+                    if "position_log_variance" in out and args.pose_uncertainty_weight:
+                        residual = out["position"][pose_mask] - b["pose"][pose_mask]
+                        log_variance = out["position_log_variance"][pose_mask]
+                        nll = .5 * (torch.exp(-log_variance) * residual.square() + log_variance)
+                        pose_loss = pose_loss + args.pose_uncertainty_weight * nll.mean()
+                    loss = loss + .2 * pose_loss
                 orientation_mask = valid & b["orientation_mask"]
                 if "orientation_6d" in out and orientation_mask.any():
-                    loss = loss + args.orientation_weight * F.smooth_l1_loss(
+                    orientation_loss = F.smooth_l1_loss(
                         out["orientation_6d"][orientation_mask], b["orientation"][orientation_mask])
+                    if "orientation_log_variance" in out and args.pose_uncertainty_weight:
+                        angle = geodesic_radians(out["orientation_6d"][orientation_mask],
+                                                 b["orientation"][orientation_mask])
+                        log_variance = out["orientation_log_variance"][orientation_mask][:, 0]
+                        nll = .5 * (torch.exp(-log_variance) * angle.square() + log_variance)
+                        orientation_loss = orientation_loss + args.pose_uncertainty_weight * nll.mean()
+                    loss = loss + args.orientation_weight * orientation_loss
                 if not torch.isfinite(loss):
                     raise FloatingPointError("nonfinite loss")
                 loss.backward()
@@ -347,6 +458,12 @@ def main():
                     "event_thresholds": thresholds, "event_tolerance_s": tolerance, "epoch": epoch,
                     "validation": report, "seed": args.seed,
                     "orientation_weight": args.orientation_weight,
+                    "robust_training": {"physiological_augmentation": args.physiological_augmentation,
+                        "augmentation_strength": args.augmentation_strength,
+                        "event_time_weight": args.event_time_weight,
+                        "pose_uncertainty_weight": args.pose_uncertainty_weight,
+                        "event_time_bin_centers_s": [0., .1, .2, .3, .4],
+                        "no_event_bin": 5},
                     "orientation_representation": "6D first-two rotation-matrix columns; VIVE quaternion wxyz"}, path)
             else:
                 stale += 1

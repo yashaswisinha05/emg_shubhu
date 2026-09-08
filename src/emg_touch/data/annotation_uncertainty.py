@@ -9,6 +9,7 @@ def soften_events(trial, uncertainty_s):
     trial["event_labels"] = np.where(distance <= uncertainty_s,
         np.exp(-.5 * (distance / (uncertainty_s / 2))**2), 0).astype("float32")
     trial["holding_certain"] = (distance > uncertainty_s).all(1)
+    trial["annotation_uncertainty_s"] = float(uncertainty_s)
     return trial
 
 

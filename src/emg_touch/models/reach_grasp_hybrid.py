@@ -73,4 +73,4 @@ class ReachGraspHybrid(nn.Module):
         return {"logits": logits, "position": self.position(context),
                 "fusion_weights": context_weights,
                 "local_fusion_weights": local_weights,
-                "context_features": context}
+                "context_features": context, "local_features": local}

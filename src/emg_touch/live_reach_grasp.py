@@ -10,6 +10,7 @@ from scipy.signal import butter, sosfilt, sosfilt_zi
 
 from .data.hybrid_event_decoder import apply_decoder
 from .models.reach_grasp_orientation_hybrid import ReachGraspOrientationHybrid
+from .models.reach_grasp_robust import RobustReachGraspModel
 from .physics.manipulator_ik import ThreeRManipulator
 from .physics.rotation_6d import (matrix_to_euler_zyx_degrees,
                                   matrix_to_quaternion_numpy,
@@ -140,13 +141,17 @@ class LiveReachGraspPredictor:
         self.checkpoint = Path(checkpoint)
         self.device = torch.device(device)
         state = torch.load(self.checkpoint, map_location=self.device, weights_only=False)
-        if state.get("format") != "reach_grasp_orientation_hybrid_v1":
-            raise ValueError("checkpoint must come from train_reach_grasp_orientation.py")
+        model_classes = {
+            "reach_grasp_orientation_hybrid_v1": ReachGraspOrientationHybrid,
+            "reach_grasp_robust_v1": RobustReachGraspModel,
+        }
+        if state.get("format") not in model_classes:
+            raise ValueError("checkpoint must come from the orientation or robust reach-grasp trainer")
         if state["model_args"].get("modality") != "emg+imu":
             raise ValueError("live inference requires the trained emg+imu checkpoint")
         if "hybrid_event_decoder" not in state:
             raise ValueError("checkpoint has no validation-frozen hybrid event decoder")
-        self.model = ReachGraspOrientationHybrid(**state["model_args"]).to(self.device)
+        self.model = model_classes[state["format"]](**state["model_args"]).to(self.device)
         self.model.load_state_dict(state["state_dict"])
         self.model.eval().requires_grad_(False)
         self.stats = state["normalization"]
@@ -203,10 +208,32 @@ class LiveReachGraspPredictor:
                     "triggered": triggers, "trigger_time_s": trigger_times,
                     "trigger_probability": trigger_probability,
                     "position_m": None, "orientation_quaternion_wxyz": None,
-                    "orientation_deg_zyx": None, "frames": int(len(time))}
+                    "orientation_deg_zyx": None, "position_uncertainty_cm": None,
+                    "orientation_uncertainty_deg": None,
+                    "event_time_estimate_ms": None, "frames": int(len(time))}
         rotation = rotation_6d_to_matrix(out["orientation_6d"][0, -1]).cpu().numpy()
         yaw, pitch, roll = matrix_to_euler_zyx_degrees(rotation)
         quaternion = matrix_to_quaternion_numpy(rotation)
+        position_uncertainty = None
+        if "position_log_variance" in out:
+            sigma = (out["position_log_variance"][0, -1].mul(.5).exp().cpu().numpy()
+                     * np.asarray(self.stats["position"]["std"]))
+            position_uncertainty = float(np.linalg.norm(sigma) * 100)
+        orientation_uncertainty = None
+        if "orientation_log_variance" in out:
+            orientation_uncertainty = float(np.degrees(
+                out["orientation_log_variance"][0, -1, 0].mul(.5).exp().cpu()))
+        event_time = None
+        if "event_time_logits" in out:
+            horizon = out["event_time_logits"][0, -1].softmax(-1).cpu().numpy()
+            centers_ms = np.array([0., 100., 200., 300., 400.])
+            event_time = {}
+            for index, name in enumerate(["grasp", "release"]):
+                event_mass = max(float(horizon[index, :-1].sum()), 1e-9)
+                event_time[name] = {
+                    "expected_ms": float(horizon[index, :-1] @ centers_ms / event_mass),
+                    "within_450ms_probability": float(event_mass),
+                }
         return {"event": "prediction", "time_s": float(time[-1]),
                 "valid": bool(valid[-1]), "holding_probability": float(probability[-1, 0]),
                 "grasp_probability": float(decoded["prob"][-1, 1]),
@@ -217,6 +244,9 @@ class LiveReachGraspPredictor:
                 "orientation_quaternion_wxyz": [float(value) for value in quaternion],
                 "orientation_deg_zyx": {"yaw": float(yaw), "pitch": float(pitch),
                                         "roll": float(roll)},
+                "position_uncertainty_cm": position_uncertainty,
+                "orientation_uncertainty_deg": orientation_uncertainty,
+                "event_time_estimate_ms": event_time,
                 "frames": int(len(time))}
 
 

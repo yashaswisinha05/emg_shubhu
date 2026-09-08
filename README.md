@@ -813,6 +813,13 @@ to Franka Panda pose IK, while grasp/release triggers operate its fingers, see
 [`docs/live_franka_pybullet.md`](docs/live_franka_pybullet.md). The live robot
 input contains no VIVE channels.
 
+### Robust event-horizon and uncertain-pose model
+
+The new training-only physiological augmentation, grasp/release time-to-event
+heads, and position/orientation uncertainty experiment is documented in
+[`docs/reach_grasp_robust.md`](docs/reach_grasp_robust.md). It creates a new
+checkpoint format and does not replace the previous orientation-hybrid model.
+
 ## Switching from MDN to CVAE
 
 The recommended default is:
