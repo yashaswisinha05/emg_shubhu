@@ -16,6 +16,8 @@ sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 from scripts.live_reach_grasp_orientation import (EMG_NAMES, IMU_NAMES,
                                                    delsys_loop, emit, stdin_loop)
 from emg_touch.live_reach_grasp import LiveReachGraspPredictor
+from emg_touch.deployment_control import (CommandFilteredPredictor,
+                                          FinalPoseCommandFilter)
 from emg_touch.physics.franka_pybullet import (LiveFrankaPyBulletController,
                                                 PoseMapper)
 from emg_touch.physics.confidence_se3 import ConfidenceAwareSE3Controller
@@ -90,7 +92,15 @@ def replay_csv(predictor, controller, trial_csv, interval_s, speed=1.,
         emit_fn(result)
         predictions += 1
         last_prediction = stamp
-    settled = controller.settle(settle_steps) if hasattr(controller, "settle") else None
+    used_steps = 0
+    if hasattr(predictor, "settle_predictions") and hasattr(controller, "simulation_steps"):
+        maximum_updates = settle_steps // controller.simulation_steps
+        for terminal in predictor.settle_predictions(maximum_updates):
+            emit_fn(controller.attach(terminal))
+            used_steps += controller.simulation_steps
+    remaining_steps = max(0, settle_steps - used_steps)
+    settled = (controller.settle(remaining_steps)
+               if hasattr(controller, "settle") else None)
     emit_fn({"event": "replay_complete", "trial": str(path),
              "predictions": predictions, "final_settle": settled})
     return predictions
@@ -137,9 +147,11 @@ def main():
                         help="Consecutive holding predictions required for fallback")
     parser.add_argument("--disable-confidence-aware-control", action="store_true")
     parser.add_argument("--workspace-lower", type=float, nargs=3,
-                        default=(.20, -.45, .15))
+                        default=(-10., -10., -10.),
+                        help="Optional bounds in the model output frame")
     parser.add_argument("--workspace-upper", type=float, nargs=3,
-                        default=(.75, .45, .85))
+                        default=(10., 10., 10.),
+                        help="Optional bounds in the model output frame")
     parser.add_argument("--max-cartesian-velocity-mps", type=float, default=.8)
     parser.add_argument("--max-cartesian-acceleration-mps2", type=float, default=3.)
     parser.add_argument("--max-angular-velocity-degps", type=float, default=180.)
@@ -176,6 +188,9 @@ def main():
                 orientation_hold_uncertainty_deg=args.orientation_hold_uncertainty_deg)
         except ValueError as error:
             parser.error(str(error))
+    if motion_filter is not None:
+        predictor = CommandFilteredPredictor(
+            predictor, FinalPoseCommandFilter(motion_filter))
     try:
         controller = LiveFrankaPyBulletController(
             gui=not args.headless, mapper=mapper, base_position=args.robot_base,
@@ -185,11 +200,12 @@ def main():
             holding_close_threshold=args.holding_close_threshold,
             holding_open_threshold=args.holding_open_threshold,
             holding_persistence_frames=args.holding_persistence_frames,
-            motion_filter=motion_filter)
+            motion_filter=None)
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
     emit({"event": "franka_ready", "input": "4 EMG + 24 IMU only",
-          "ik_target": "constrained model XYZ + model quaternion",
+          "ik_target": "portable final XYZ + quaternion command",
+          "control_frame": "model output before robot mapping",
           "confidence_aware_control": motion_filter is not None,
           "gui": not args.headless})
     try:

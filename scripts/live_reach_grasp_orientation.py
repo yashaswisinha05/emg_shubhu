@@ -18,6 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from emg_touch.live_reach_grasp import (LiveReachGraspPredictor,
                                         LiveThreeRGripperController)
+from emg_touch.deployment_control import (CommandFilteredPredictor,
+                                          FinalPoseCommandFilter)
+from emg_touch.physics.confidence_se3 import ConfidenceAwareSE3Controller
 
 SENSORS = ["S0", "S4", "S8", "S12"]
 EMG_NAMES = [f"EMG 1_{sensor}" for sensor in SENSORS]
@@ -165,6 +168,17 @@ def main():
     parser.add_argument("--axis-signs", type=float, nargs=3, default=(1., 1., 1.))
     parser.add_argument("--gripper-open-m", type=float, default=.08)
     parser.add_argument("--gripper-closed-m", type=float, default=.015)
+    parser.add_argument("--disable-final-pose-control", action="store_true")
+    parser.add_argument("--output-workspace-lower", type=float, nargs=3,
+                        default=(-10., -10., -10.))
+    parser.add_argument("--output-workspace-upper", type=float, nargs=3,
+                        default=(10., 10., 10.))
+    parser.add_argument("--max-cartesian-velocity-mps", type=float, default=.8)
+    parser.add_argument("--max-cartesian-acceleration-mps2", type=float, default=3.)
+    parser.add_argument("--max-angular-velocity-degps", type=float, default=180.)
+    parser.add_argument("--max-angular-acceleration-degps2", type=float, default=720.)
+    parser.add_argument("--position-hold-uncertainty-cm", type=float, default=20.)
+    parser.add_argument("--orientation-hold-uncertainty-deg", type=float, default=60.)
     parser.add_argument("--print-protocol", action="store_true")
     args = parser.parse_args()
     if args.print_protocol:
@@ -173,11 +187,27 @@ def main():
     if min(args.interval_ms, args.warmup_ms, args.poll_ms) <= 0:
         parser.error("interval, warmup and poll must be positive")
     predictor = LiveReachGraspPredictor(args.checkpoint, args.device, args.warmup_ms)
+    if not args.disable_final_pose_control:
+        try:
+            dynamics = ConfidenceAwareSE3Controller(
+                args.output_workspace_lower, args.output_workspace_upper,
+                args.max_cartesian_velocity_mps,
+                args.max_cartesian_acceleration_mps2,
+                args.max_angular_velocity_degps,
+                args.max_angular_acceleration_degps2,
+                position_hold_uncertainty_cm=args.position_hold_uncertainty_cm,
+                orientation_hold_uncertainty_deg=args.orientation_hold_uncertainty_deg)
+        except ValueError as error:
+            parser.error(str(error))
+        predictor = CommandFilteredPredictor(
+            predictor, FinalPoseCommandFilter(dynamics))
     controller = LiveThreeRGripperController(
         args.link_lengths, args.initial_joint_deg, args.base_world,
         args.axis_order, args.axis_signs, args.gripper_open_m, args.gripper_closed_m)
     emit({"event": "model_loaded", "checkpoint": str(args.checkpoint),
           "device": str(predictor.device), "input": "4 EMG + 24 IMU only",
+          "final_pose_control": not args.disable_final_pose_control,
+          "control_frame": "model output before system mapping",
           "outputs": ["holding", "grasp", "release", "position_xyz",
                       "orientation_quaternion", "yaw_pitch_roll", "3r_joint_angles",
                       "gripper_open_close"]})
