@@ -24,6 +24,7 @@ def holding_transitions(times, probability, valid, low=.35, high=.65, persistenc
     state, candidate, since, previous = None, None, None, None
     events = [[], []]
     for t, p, good in zip(times, probability, valid):
+        good = good and np.isfinite(p)
         if not good or (previous is not None and t - previous > .05):
             candidate, since = None, None
         previous = t

@@ -25,6 +25,40 @@ def test_confirmation_is_causal_and_rearms():
     np.testing.assert_allclose(inspect.stable_triggers(t, p, valid, .5, persistence_s=.06), [.36, .96])
 
 
+def test_dropout_never_rearms_original_detector():
+    t = np.arange(120) / 100
+    p = np.ones(120)
+    valid = np.ones(120, bool)
+    valid[50:60] = False
+    p[50:60] = 0  # Even legacy zero-filled outputs must be safe with a mask.
+    assert train.detect(t, p, .5, valid=valid) == [0.]
+    p[50:60] = np.nan
+    assert train.detect(t, p, .5, valid=valid) == [0.]
+    assert train.detect(t, p, .5) == [0.]  # NaN also means unknown.
+    p[80:85] = 0  # Actual valid low evidence DOES rearm the detector.
+    np.testing.assert_allclose(train.detect(t, p, .5, valid=valid), [0., .85])
+
+
+def test_invalid_persistence_does_not_emit_duplicate():
+    t = np.arange(150) / 100
+    p = np.ones(150)
+    valid = np.ones(150, bool)
+    valid[50:60] = False
+    p[50:60] = np.nan
+    np.testing.assert_allclose(inspect.stable_triggers(t, p, valid, .5), [.06])
+
+
+def test_event_summary_uses_validity_mask():
+    t = np.arange(120) / 100
+    prob = np.ones((120, 3))
+    valid = np.ones(120, bool)
+    valid[50:60] = False
+    prob[50:60] = 0
+    item = {"trial": {"time": t, "events": [0., 1.]}, "prob": prob, "valid": valid}
+    summary = train.event_summary([item], 0, .5, .15)
+    assert summary["tp"] == 1 and summary["fp"] == 0
+
+
 def test_inspection_smoke(tmp_path, monkeypatch):
     torch.set_num_threads(1)
     run = tmp_path / "run"

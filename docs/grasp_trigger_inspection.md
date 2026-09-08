@@ -1,5 +1,42 @@
 # Full-trial plots and trigger stability
 
+## Mask-aware evaluation fix (v2)
+
+Previously, missing wearable frames were set to probability zero. The original
+event-head decoder did not consume the validity mask, so a missing frame could
+rearm it and create a false rising edge when data returned. This could introduce
+both false triggers AND accidental matches. Old event scores are therefore not
+guaranteed to be either optimistic or pessimistic.
+
+Current evaluation represents missing predictions as NaN; every decoder skips
+invalid/nonfinite samples. The original threshold detector preserves its last
+observed high/low state across gaps. Persistence decoders discard pending evidence
+but preserve arming/confirmed state. Real events fully inside gaps can remain
+missed; no absent event is reconstructed. Plots now show gaps, not zero spikes.
+
+Reevaluate existing checkpoints WITHOUT retraining:
+
+```bash
+git pull origin main
+python scripts/inspect_grasp_triggers.py \
+  --run-dir runs/reach_grasp_annotation_seed42 \
+  --device cuda --split validation --plots 6 \
+  --output-dir runs/grasp_trigger_inspection_masked_v2
+```
+
+The script reports `checkpoint_thresholds_masked` to isolate corrected decoding
+with the old saved thresholds. It also refits the same threshold grid on corrected
+validation outputs, then tunes stability; these appear as `original_heads` and
+`selected_heads`. Values are saved in `decoder_report.json`, not written into the
+checkpoint. Plots use refitted thresholds. To inspect test after this validation
+selection, use `--split test` and a separate output directory.
+
+This reevaluates the existing selected weights; it does not reselect an earlier
+training epoch that might have won under corrected scoring. The earlier checkpoint
+selection was affected by the bug. Retraining is not needed for this diagnostic,
+but a fresh training run with corrected validation would be needed to redo that
+selection. All existing checkpoint/result files remain unchanged.
+
 No retraining. Original checkpoints are read-only. Run on the machine holding
 the saved annotation-aware run and original CSV files:
 
@@ -30,7 +67,7 @@ cannot be verified from uncertain annotations alone.
 
 ## Decoder study
 
-The existing event-head thresholds remain fixed. A small validation sweep adds
+After the v2 validation threshold refit, thresholds remain fixed. A small validation sweep adds
 hysteresis (rearm below 0.5 or 0.8 times the high threshold), persistence
 (30/60/100 ms), and the original 400 ms refractory period. The original decoder
 is also eligible, so validation can select no change. Parameters are selected

@@ -27,7 +27,7 @@ def stable_triggers(times, probabilities, valid, high, low_ratio=.5,
         if previous is not None and t - previous > .05:
             since = None
         previous = t
-        if not good:
+        if not good or not np.isfinite(p):
             since = None
             continue
         if p < high * low_ratio:
@@ -68,7 +68,8 @@ def choose(items, thresholds, tolerance):
 
 def detections(item, thresholds, parameters):
     if parameters is None:
-        return [train.detect(item["trial"]["time"], item["prob"][:, e + 1], thresholds[e])
+        return [train.detect(item["trial"]["time"], item["prob"][:, e + 1], thresholds[e],
+                             valid=item["valid"])
                 for e in range(2)]
     return decode([item], thresholds, parameters)[0]["detections"]
 
@@ -95,7 +96,8 @@ def plot_trial(item, thresholds, parameters, holding_parameters, uncertainty, ou
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    trial, prob = item["trial"], item["prob"]
+    trial = item["trial"]
+    prob = np.where(item["valid"][:, None], item["prob"], np.nan)
     t = trial["time"]
     fig, axes = plt.subplots(5, 1, figsize=(13, 11), sharex=True, constrained_layout=True)
     fig.suptitle(Path(trial["path"]).name + " — complete recorded trial, causal predictions")
@@ -173,14 +175,21 @@ def main():
             return [soften_events(preprocess(Path(file), state["preprocessing"]),
                     state["preprocessing"]["annotation_uncertainty_s"]) for file in splits[which]]
         validation = train.predict(model, load("validation"), state["normalization"], args)
-        thresholds, tolerance = state["event_thresholds"], state["event_tolerance_s"]
+        saved_thresholds, tolerance = state["event_thresholds"], state["event_tolerance_s"]
+        # Old checkpoints selected thresholds using zero-filled gaps. Refit the
+        # same threshold grid on corrected VALIDATION outputs, not test outputs.
+        thresholds = [max([.2, .35, .5, .65, .8], key=lambda high:
+            train.event_summary(validation, e, high, tolerance)["f1"]) for e in range(2)]
         parameters, sweep = choose(validation, thresholds, tolerance)
         # Test is only loaded AFTER parameters have been fixed from validation.
         items = validation if args.split == "validation" else train.predict(model, load("test"), state["normalization"], args)
         decoded = items if parameters is None else decode(items, thresholds, parameters)
         holding = train.transition_predictions(items, state["holding_decoder"])
-        report[name] = {"selected_parameters": parameters, "validation_sweep": sweep,
+        report[name] = {"evaluation_version": "mask_aware_v2",
+            "checkpoint_thresholds": saved_thresholds, "validation_thresholds": thresholds,
+            "selected_parameters": parameters, "validation_sweep": sweep,
             "by_tolerance_ms": {str(ms): {
+                "checkpoint_thresholds_masked": train.metrics(items, saved_thresholds, ms / 1000),
                 "original_heads": train.metrics(items, thresholds, ms / 1000),
                 "selected_heads": train.metrics(decoded, thresholds, ms / 1000),
                 "holding_transitions": train.metrics(holding, thresholds, ms / 1000)}

@@ -77,10 +77,18 @@ def usable(b, modality):
     return b[modality + "_usable"]
 
 
-def detect(times, probabilities, threshold, refractory=.4):
-    """Causal rising-threshold detector: no peak search into future samples."""
+def detect(times, probabilities, threshold, refractory=.4, valid=None):
+    """Causal rising-threshold detector; unknown samples never rearm it.
+
+    Preserve the last observed threshold state across gaps. A genuine drop and
+    rise entirely inside a gap cannot be recovered from absent measurements.
+    """
     detections, above, previous = [], False, -np.inf
-    for stamp, p in zip(times, probabilities):
+    if valid is None:
+        valid = np.ones(len(times), dtype=bool)
+    for stamp, p, good in zip(times, probabilities, valid):
+        if not good or not np.isfinite(p):
+            continue
         current = p >= threshold
         if current and not above and stamp - previous >= refractory:
             detections.append(float(stamp))
@@ -94,7 +102,8 @@ def event_summary(predictions, event, threshold, tolerance):
     for item in predictions:
         actual = item["trial"]["events"][event]
         detections = (item["detections"][event] if "detections" in item else
-                      detect(item["trial"]["time"], item["prob"][:, event + 1], threshold))
+                      detect(item["trial"]["time"], item["prob"][:, event + 1], threshold,
+                             valid=item.get("valid")))
         match = [d for d in detections if abs(d - actual) <= tolerance]
         if match:
             chosen = min(match, key=lambda d: abs(d - actual))
@@ -124,7 +133,9 @@ def predict(model, trials, stats, args, zero_emg=False):
             n = len(trial["time"])
             prob = out["logits"][i, :n].sigmoid().cpu().numpy()
             mask = valid[i, :n].cpu().numpy()
-            prob[~mask] = 0
+            # Missing evidence is neither an event-negative nor a release.
+            # Decoders skip it; plots display a gap, not a fabricated zero.
+            prob[~mask] = np.nan
             position = out["position"][i, :n].cpu().numpy() * stats["position"]["std"] + stats["position"]["mean"]
             result.append({"trial": trial, "prob": prob, "valid": mask, "position": position})
     return result
