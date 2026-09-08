@@ -17,6 +17,7 @@ from emg_touch.data.reach_grasp import preprocess
 from emg_touch.data.annotation_uncertainty import soften_events
 from emg_touch.models.reach_grasp import ReachGraspModel
 from emg_touch.models.reach_grasp_patch_transformer import ReachGraspPatchTransformer
+from emg_touch.models.reach_grasp_hybrid import ReachGraspHybrid
 
 
 def model_class(state):
@@ -24,7 +25,9 @@ def model_class(state):
         return ReachGraspModel
     if state.get("format") == "reach_grasp_patch_transformer_v1":
         return ReachGraspPatchTransformer
-    raise ValueError("requires an annotation-aware TCN or patch-transformer checkpoint")
+    if state.get("format") == "reach_grasp_hybrid_v1":
+        return ReachGraspHybrid
+    raise ValueError("requires an annotation-aware TCN, patch-transformer, or hybrid checkpoint")
 
 
 def stable_triggers(times, probabilities, valid, high, low_ratio=.5,

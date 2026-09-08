@@ -38,7 +38,7 @@ class CausalPatchBranch(nn.Module):
         result[:, 1::2] = torch.cos(time * scale[:result[:, 1::2].shape[1]])
         return result
 
-    def forward(self, values):
+    def forward_features(self, values):
         frames = self.input(values)
         channel = frames.transpose(1, 2)
         local = 0
@@ -55,7 +55,11 @@ class CausalPatchBranch(nn.Module):
         if expanded.shape[1] < values.shape[1]:
             expanded = torch.cat([expanded, expanded[:, -1:].expand(
                 -1, values.shape[1] - expanded.shape[1], -1)], 1)
-        return self.output(torch.cat([local, expanded], -1))
+        return {"local": local,
+                "context": self.output(torch.cat([local, expanded], -1))}
+
+    def forward(self, values):
+        return self.forward_features(values)["context"]
 
 
 class ReachGraspPatchTransformer(nn.Module):
