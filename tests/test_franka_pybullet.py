@@ -2,6 +2,7 @@ import numpy as np
 
 from emg_touch.physics.franka_pybullet import (LiveFrankaPyBulletController,
                                                 PoseMapper)
+from emg_touch.physics.confidence_se3 import ConfidenceAwareSE3Controller
 from emg_touch.physics.rotation_6d import quaternion_to_matrix_numpy
 
 
@@ -210,6 +211,40 @@ def test_probability_state_machine_latches_until_opposite_event():
     assert held["gripper"]["state"] == "closed"
     opened = controller.attach(prediction(release=True, valid=False))
     assert opened["gripper"]["state"] == "open"
+
+
+def test_holding_state_is_persistent_fallback_for_grasp_and_release():
+    fake = FakeBullet()
+    controller = LiveFrankaPyBulletController(
+        gui=False, bullet=fake, holding_persistence_frames=2)
+    first_high = controller.attach(prediction(holding=.96))
+    assert first_high["gripper"]["state"] == "open"
+    closed = controller.attach(prediction(holding=.95))
+    assert closed["gripper"]["state"] == "closed"
+    assert closed["gripper"]["command_source"] == "holding_probability_rise"
+    first_low = controller.attach(prediction(holding=.10))
+    assert first_low["gripper"]["state"] == "closed"
+    opened = controller.attach(prediction(holding=.05))
+    assert opened["gripper"]["state"] == "open"
+    assert opened["gripper"]["command_source"] == "holding_probability_fall"
+
+
+def test_settle_advances_rate_limited_target_to_last_model_request():
+    fake = FakeBullet()
+    motion = ConfidenceAwareSE3Controller(
+        workspace_lower=(0., -1., 0.), workspace_upper=(1., 1., 1.),
+        max_velocity_mps=.2, max_acceleration_mps2=100., default_dt_s=.1)
+    controller = LiveFrankaPyBulletController(
+        gui=False, bullet=fake, simulation_steps=2, motion_filter=motion,
+        mapper=PoseMapper((0., 0., 0.), (1., 0., 0., 0.)))
+    controller.attach(prediction(position=(.2, 0., .5)))
+    controller.attach(prediction(position=(.5, 0., .5)))
+    before = controller.last_target[0].copy()
+    report = controller.settle(steps=40)
+    after = controller.last_target[0]
+    assert np.linalg.norm(after - np.array([.5, 0., .5])) < np.linalg.norm(
+        before - np.array([.5, 0., .5]))
+    assert report["terminal_catchup_updates"] > 0
 
 
 def test_pybullet_debug_overlay_contains_reference_model_actual_and_markers():

@@ -44,9 +44,9 @@ class ConfidenceAwareSE3Controller:
     authority; it can never increase velocity, acceleration, or workspace.
     """
     def __init__(self, workspace_lower=(.20, -.45, .15),
-                 workspace_upper=(.75, .45, .85), max_velocity_mps=.35,
-                 max_acceleration_mps2=1.2, max_angular_velocity_degps=90.,
-                 max_angular_acceleration_degps2=360.,
+                 workspace_upper=(.75, .45, .85), max_velocity_mps=.8,
+                 max_acceleration_mps2=3., max_angular_velocity_degps=180.,
+                 max_angular_acceleration_degps2=720.,
                  position_full_uncertainty_cm=5., position_hold_uncertainty_cm=20.,
                  orientation_full_uncertainty_deg=15.,
                  orientation_hold_uncertainty_deg=60., default_dt_s=.04,

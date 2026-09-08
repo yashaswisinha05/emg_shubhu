@@ -87,6 +87,8 @@ class LiveFrankaPyBulletController:
     def __init__(self, gui=True, mapper=None, base_position=(0., 0., 0.),
                  simulation_steps=24, open_width_m=.04, closed_width_m=0.,
                  grasp_probability_threshold=.9, release_probability_threshold=.9,
+                 holding_close_threshold=.8, holding_open_threshold=.2,
+                 holding_persistence_frames=2,
                  bullet=None, data_path=None, motion_filter=None):
         if simulation_steps < 1:
             raise ValueError("simulation_steps must be positive")
@@ -95,6 +97,10 @@ class LiveFrankaPyBulletController:
         if not (0 <= grasp_probability_threshold <= 1
                 and 0 <= release_probability_threshold <= 1):
             raise ValueError("grasp and release thresholds must be between 0 and 1")
+        if not 0 <= holding_open_threshold < holding_close_threshold <= 1:
+            raise ValueError("holding thresholds require 0 <= open < close <= 1")
+        if holding_persistence_frames < 1:
+            raise ValueError("holding persistence must be positive")
         if bullet is None:
             try:
                 import pybullet as bullet
@@ -119,6 +125,9 @@ class LiveFrankaPyBulletController:
         self.widths = {"open": float(open_width_m), "closed": float(closed_width_m)}
         self.event_thresholds = {"grasp": float(grasp_probability_threshold),
                                  "release": float(release_probability_threshold)}
+        self.holding_thresholds = {"close": float(holding_close_threshold),
+                                   "open": float(holding_open_threshold)}
+        self.holding_persistence_frames = int(holding_persistence_frames)
         self.debug_items = []
         self.reference_positions = None
         self._discover_joints()
@@ -170,7 +179,10 @@ class LiveFrankaPyBulletController:
         if self.motion_filter is not None:
             self.motion_filter.reset()
         self.gripper = "open"
+        self._holding_candidate = None
+        self._holding_candidate_frames = 0
         self.last_target = None
+        self.last_request = None
         self.previous_model_position = None
         self.previous_actual_position = None
         self.reference_drawn = False
@@ -265,13 +277,78 @@ class LiveFrankaPyBulletController:
             physicsClientId=self.client)[0]) for joint in self.finger_joints]
 
     def settle(self, steps=240):
-        """Let the final persistent arm and gripper commands converge."""
+        """Advance the bounded target to the final request, then let it converge."""
         if steps < 0:
             raise ValueError("settle steps cannot be negative")
+        remaining = int(steps)
+        catchup_steps = 0
+        if (self.motion_filter is not None and self.last_request is not None
+                and remaining > 0):
+            requested_position, requested_quaternion = self.last_request
+            while remaining >= self.simulation_steps:
+                timestamp = (None if self.motion_filter.timestamp is None else
+                             self.motion_filter.timestamp + self.motion_filter.default_dt)
+                position, quaternion, _ = self.motion_filter.step(
+                    requested_position, requested_quaternion, timestamp,
+                    event_time_estimate_ms=None, gripper_state=self.gripper)
+                self._command_arm(position, quaternion)
+                self._command_gripper()
+                self._step()
+                catchup_steps += 1
+                remaining -= self.simulation_steps
+                if (np.linalg.norm(position - requested_position) < 1e-3
+                        and quaternion_angle_degrees(
+                            quaternion, requested_quaternion) < 1.):
+                    break
         self._command_gripper()
-        self._step(steps)
+        self._step(remaining)
         return {"simulation_steps": int(steps), "gripper_state": self.gripper,
+                "terminal_catchup_updates": catchup_steps,
                 "actual_finger_joint_positions_m": self._finger_positions()}
+
+    def _holding_fallback(self, holding_probability):
+        """Return a persistent state transition inferred from the holding head."""
+        candidate = None
+        if holding_probability is not None and np.isfinite(holding_probability):
+            if (self.gripper == "open"
+                    and holding_probability >= self.holding_thresholds["close"]):
+                candidate = "closed"
+            elif (self.gripper == "closed"
+                  and holding_probability <= self.holding_thresholds["open"]):
+                candidate = "open"
+        if candidate is None:
+            self._holding_candidate = None
+            self._holding_candidate_frames = 0
+            return None
+        if candidate == self._holding_candidate:
+            self._holding_candidate_frames += 1
+        else:
+            self._holding_candidate = candidate
+            self._holding_candidate_frames = 1
+        if self._holding_candidate_frames < self.holding_persistence_frames:
+            return None
+        self._holding_candidate = None
+        self._holding_candidate_frames = 0
+        return candidate
+
+    def _command_arm(self, target_position, target_quaternion):
+        solution = self.p.calculateInverseKinematics(
+            self.robot, self.ee_link, targetPosition=target_position.tolist(),
+            targetOrientation=self._xyzw(target_quaternion),
+            lowerLimits=self.ik_lower.tolist(), upperLimits=self.ik_upper.tolist(),
+            jointRanges=self.ik_ranges.tolist(), restPoses=self.ik_rest.tolist(),
+            jointDamping=[.1] * len(self.ik_rest), maxNumIterations=100,
+            residualThreshold=1e-5, physicsClientId=self.client)
+        solution = np.asarray(solution)
+        target_joints = np.clip(solution[self.arm_solution_indices],
+                                self.lower, self.upper)
+        self.last_target = (target_position.copy(), target_quaternion.copy(),
+                            target_joints.copy())
+        self.p.setJointMotorControlArray(
+            self.robot, self.arm_joints, self.p.POSITION_CONTROL,
+            targetPositions=target_joints.tolist(), forces=[87.] * 7,
+            physicsClientId=self.client)
+        return target_joints
 
     def attach(self, prediction):
         command = "hold"
@@ -286,6 +363,7 @@ class LiveFrankaPyBulletController:
             return max(finite, default=None)
 
         grasp_score, release_score = score("grasp"), score("release")
+        holding_probability = prediction.get("holding_probability")
         # Latched state machine: after closing, grasp probability cannot reopen
         # the fingers. Only a confident release can do that, and vice versa.
         if (self.gripper == "closed" and release_score is not None
@@ -298,10 +376,21 @@ class LiveFrankaPyBulletController:
             self.gripper, command = "closed", "close"
             command_source = "grasp_probability"
             self._update_status("CLOSED", [.9, .05, .05])
+        else:
+            holding_state = self._holding_fallback(holding_probability)
+            if holding_state == "closed":
+                self.gripper, command = "closed", "close"
+                command_source = "holding_probability_rise"
+                self._update_status("CLOSED", [.9, .05, .05])
+            elif holding_state == "open":
+                self.gripper, command = "open", "open"
+                command_source = "holding_probability_fall"
+                self._update_status("OPEN", [0., .7, 0.])
         prediction["gripper"] = {"state": self.gripper, "command": command,
                                   "command_source": command_source,
                                   "grasp_control_probability": grasp_score,
                                   "release_control_probability": release_score,
+                                  "holding_control_probability": holding_probability,
                                   "finger_joint_position_m": self.widths[self.gripper]}
         # Grasp/release must still execute when the coincident wearable pose
         # frame is invalid. Arm motors retain their last valid position target.
@@ -325,6 +414,7 @@ class LiveFrankaPyBulletController:
         position = np.array([prediction["position_m"][axis] for axis in "xyz"])
         quaternion = prediction["orientation_quaternion_wxyz"]
         requested_position, requested_quaternion, mode = self.mapper.map(position, quaternion)
+        self.last_request = (requested_position.copy(), requested_quaternion.copy())
         target_position, target_quaternion = requested_position, requested_quaternion
         control = None
         if self.motion_filter is not None:
@@ -334,22 +424,7 @@ class LiveFrankaPyBulletController:
                 prediction.get("orientation_uncertainty_deg"),
                 prediction.get("event_time_estimate_ms"), self.gripper)
         self._draw_reference()
-        solution = self.p.calculateInverseKinematics(
-            self.robot, self.ee_link, targetPosition=target_position.tolist(),
-            targetOrientation=self._xyzw(target_quaternion),
-            lowerLimits=self.ik_lower.tolist(), upperLimits=self.ik_upper.tolist(),
-            jointRanges=self.ik_ranges.tolist(), restPoses=self.ik_rest.tolist(),
-            jointDamping=[.1] * len(self.ik_rest), maxNumIterations=100,
-            residualThreshold=1e-5,
-            physicsClientId=self.client)
-        solution = np.asarray(solution)
-        target_joints = np.clip(solution[self.arm_solution_indices],
-                                self.lower, self.upper)
-        self.last_target = (target_position.copy(), target_quaternion.copy(),
-                            target_joints.copy())
-        self.p.setJointMotorControlArray(self.robot, self.arm_joints,
-            self.p.POSITION_CONTROL, targetPositions=target_joints.tolist(),
-            forces=[87.] * 7, physicsClientId=self.client)
+        target_joints = self._command_arm(target_position, target_quaternion)
         self._step()
         prediction["gripper"]["actual_finger_joint_positions_m"] = (
             self._finger_positions())

@@ -129,15 +129,21 @@ def main():
                         help="Simulation steps after recorded data ends")
     parser.add_argument("--grasp-probability-threshold", type=float, default=.9)
     parser.add_argument("--release-probability-threshold", type=float, default=.9)
+    parser.add_argument("--holding-close-threshold", type=float, default=.8,
+                        help="Fallback close threshold for persistent holding state")
+    parser.add_argument("--holding-open-threshold", type=float, default=.2,
+                        help="Fallback reopen threshold for persistent holding state")
+    parser.add_argument("--holding-persistence-frames", type=int, default=2,
+                        help="Consecutive holding predictions required for fallback")
     parser.add_argument("--disable-confidence-aware-control", action="store_true")
     parser.add_argument("--workspace-lower", type=float, nargs=3,
                         default=(.20, -.45, .15))
     parser.add_argument("--workspace-upper", type=float, nargs=3,
                         default=(.75, .45, .85))
-    parser.add_argument("--max-cartesian-velocity-mps", type=float, default=.35)
-    parser.add_argument("--max-cartesian-acceleration-mps2", type=float, default=1.2)
-    parser.add_argument("--max-angular-velocity-degps", type=float, default=90.)
-    parser.add_argument("--max-angular-acceleration-degps2", type=float, default=360.)
+    parser.add_argument("--max-cartesian-velocity-mps", type=float, default=.8)
+    parser.add_argument("--max-cartesian-acceleration-mps2", type=float, default=3.)
+    parser.add_argument("--max-angular-velocity-degps", type=float, default=180.)
+    parser.add_argument("--max-angular-acceleration-degps2", type=float, default=720.)
     parser.add_argument("--position-hold-uncertainty-cm", type=float, default=20.)
     parser.add_argument("--orientation-hold-uncertainty-deg", type=float, default=60.)
     args = parser.parse_args()
@@ -176,6 +182,9 @@ def main():
             simulation_steps=args.simulation_steps,
             grasp_probability_threshold=args.grasp_probability_threshold,
             release_probability_threshold=args.release_probability_threshold,
+            holding_close_threshold=args.holding_close_threshold,
+            holding_open_threshold=args.holding_open_threshold,
+            holding_persistence_frames=args.holding_persistence_frames,
             motion_filter=motion_filter)
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
