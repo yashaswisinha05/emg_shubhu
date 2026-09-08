@@ -34,6 +34,37 @@ The default opens the PyBullet GUI. Add `--headless` for a non-visual run.
 Each JSON prediction reports the requested robot pose, solved joint angles,
 actual simulated end-effector pose, and IK/FK tracking errors.
 
+## Run on an unseen recorded trial
+
+No Delsys connection is needed. Point the same program at a held-out CSV:
+
+```bash
+python scripts/live_franka_pybullet.py \
+  --checkpoint runs/reach_grasp_orientation/emg_imu_best.pt \
+  --trial-csv /path/to/held_out_recording/trial_069.csv \
+  --device cuda \
+  --speed 1.0
+```
+
+`--speed 1.0` follows the recorded timing, `--speed 2.0` runs twice as fast,
+and `--speed 0` runs without waiting. To choose a reproducible random trial
+recursively from a held-out directory:
+
+```bash
+python scripts/live_franka_pybullet.py \
+  --checkpoint runs/reach_grasp_orientation/emg_imu_best.pt \
+  --trial-root /path/to/held_out_recording \
+  --trial-seed 7 \
+  --device cuda \
+  --speed 1.0
+```
+
+The replay reader extracts only `time_perf_counter`, the four trained EMG
+channels, and the 24 trained accelerometer/gyroscope channels. Even when the
+CSV contains VIVE position and orientation, those columns are never passed to
+the predictor. Missing wearable values retain the same causal, bounded-gap
+handling used by live inference.
+
 ## Coordinate calibration
 
 For meaningful absolute robot motion, measure the rigid transform from the
