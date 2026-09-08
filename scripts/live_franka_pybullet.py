@@ -120,6 +120,8 @@ def main():
     parser.add_argument("--home-position", type=float, nargs=3, default=(.45, 0., .50))
     parser.add_argument("--home-orientation-wxyz", type=float, nargs=4,
                         default=(0., 1., 0., 0.))
+    parser.add_argument("--trajectory-z-rotation-deg", type=float, default=90.,
+                        help="Rotate mapped trajectory anticlockwise about robot Z")
     parser.add_argument("--simulation-steps", type=int, default=24,
                         help="Physics settling steps after each model prediction")
     parser.add_argument("--final-settle-steps", type=int, default=240,
@@ -138,7 +140,8 @@ def main():
     try:
         mapper = PoseMapper(args.robot_from_vive_translation,
             args.robot_from_vive_quaternion_wxyz,
-            args.home_position, args.home_orientation_wxyz)
+            args.home_position, args.home_orientation_wxyz,
+            args.trajectory_z_rotation_deg)
     except ValueError as error:
         parser.error(str(error))
     predictor = LiveReachGraspPredictor(args.checkpoint, args.device, args.warmup_ms)

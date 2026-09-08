@@ -83,6 +83,12 @@ The mapping is `p_robot = R_calibration p_model + translation` and
 `R_robot = R_calibration R_model`. Model and command-line quaternions use
 `w x y z`; the integration converts them to PyBullet's `x y z w` convention.
 
+The Franka script additionally applies a `+90°` anticlockwise rotation around
+the robot Z axis by default. It rotates position about the anchored home point,
+so the starting point remains fixed, and applies the same rotation to the
+predicted end-effector orientation. Override or disable it with
+`--trajectory-z-rotation-deg ANGLE` (use `0` to disable).
+
 Without an explicit calibration, the first predicted pose is anchored at
 `--home-position 0.45 0 0.50` and subsequent relative position and orientation
 changes are preserved. This synthetic anchor is useful for visualization, but

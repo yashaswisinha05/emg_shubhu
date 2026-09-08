@@ -20,7 +20,8 @@ def normalized_quaternion(value):
 class PoseMapper:
     """Rigid VIVE-world to Panda-base mapping, explicit or first-pose anchored."""
     def __init__(self, translation=None, quaternion_wxyz=None,
-                 home_position=(.45, 0., .50), home_quaternion_wxyz=(0., 1., 0., 0.)):
+                 home_position=(.45, 0., .50), home_quaternion_wxyz=(0., 1., 0., 0.),
+                 trajectory_z_rotation_deg=0.):
         if (translation is None) != (quaternion_wxyz is None):
             raise ValueError("explicit calibration needs both translation and quaternion")
         self.translation = None if translation is None else np.asarray(translation, dtype=float)
@@ -35,6 +36,13 @@ class PoseMapper:
             home_quaternion_wxyz))
         if self.home_position.shape != (3,) or not np.isfinite(self.home_position).all():
             raise ValueError("home position must contain three finite values")
+        angle = np.radians(float(trajectory_z_rotation_deg))
+        if not np.isfinite(angle):
+            raise ValueError("trajectory z rotation must be finite")
+        cosine, sine = np.cos(angle), np.sin(angle)
+        self.trajectory_rotation = np.array([
+            [cosine, -sine, 0.], [sine, cosine, 0.], [0., 0., 1.]])
+        self.trajectory_z_rotation_deg = float(trajectory_z_rotation_deg)
         self.reset()
 
     def reset(self):
@@ -57,6 +65,13 @@ class PoseMapper:
             mapped_position = self.home_position + self.home_rotation @ relative_position
             mapped_rotation = self.home_rotation @ relative_rotation
             mode = "synthetic first-pose anchor"
+        # Rotate the complete robot-frame trajectory about its anchored start,
+        # and rotate end-effector orientation by the same world-frame rotation.
+        mapped_position = (self.home_position + self.trajectory_rotation
+                           @ (mapped_position - self.home_position))
+        mapped_rotation = self.trajectory_rotation @ mapped_rotation
+        if abs(self.trajectory_z_rotation_deg) > 1e-9:
+            mode += f" + z rotation {self.trajectory_z_rotation_deg:+g} deg"
         return mapped_position, matrix_to_quaternion_numpy(mapped_rotation), mode
 
 

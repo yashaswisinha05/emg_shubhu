@@ -124,6 +124,21 @@ def test_synthetic_mapper_anchors_first_pose_and_preserves_relative_motion():
     assert mode == "synthetic first-pose anchor"
 
 
+def test_post_mapping_z_rotation_is_anticlockwise_about_home_anchor():
+    mapper = PoseMapper(home_position=(.45, 0., .5),
+                        home_quaternion_wxyz=(1., 0., 0., 0.),
+                        trajectory_z_rotation_deg=90.)
+    first, _, _ = mapper.map((2., 3., 4.), (1., 0., 0., 0.))
+    moved, quaternion, mode = mapper.map((2.1, 3., 4.), (1., 0., 0., 0.))
+    np.testing.assert_allclose(first, (.45, 0., .5), atol=1e-7)
+    # Positive model x becomes positive robot y after active +90 degree Rz.
+    np.testing.assert_allclose(moved, (.45, .1, .5), atol=1e-7)
+    expected = quaternion_to_matrix_numpy((np.sqrt(.5), 0., 0., np.sqrt(.5)))
+    np.testing.assert_allclose(quaternion_to_matrix_numpy(quaternion), expected,
+                               atol=1e-7)
+    assert "z rotation +90 deg" in mode
+
+
 def prediction(position=(.45, 0., .5), quaternion=(1., 0., 0., 0.),
                grasp=False, release=False, holding=0., valid=True):
     return {
