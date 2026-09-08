@@ -3,7 +3,9 @@ import torch
 
 from emg_touch.data.reach_grasp import SENSORS, preprocess
 from emg_touch.live_reach_grasp import (LiveReachGraspPredictor,
-                                        LiveReachGraspPreprocessor)
+                                        LiveReachGraspPreprocessor,
+                                        LiveThreeRGripperController)
+from emg_touch.physics.manipulator_ik import ThreeRManipulator
 from emg_touch.models.reach_grasp_orientation_hybrid import ReachGraspOrientationHybrid
 from scripts.live_reach_grasp_orientation import channel_indices
 from tests.test_reach_grasp import frame, settings
@@ -71,3 +73,46 @@ def test_live_channel_mapping_rejects_missing_sensor():
         assert "missing" in str(error)
     else:
         raise AssertionError("missing channel should fail")
+
+
+def prediction(world, grasp=False, release=False):
+    return {"valid": True,
+            "position_m": {axis: float(value) for axis, value in zip("xyz", world)},
+            "triggered": {"grasp": grasp, "release": release},
+            "trigger_time_s": {"grasp": 1. if grasp else None,
+                               "release": 2. if release else None}}
+
+
+def test_live_ik_uses_model_endpoint_and_gripper_transitions():
+    arm = ThreeRManipulator((.5, .6))
+    angles = np.array([.3, .2, 1.0])
+    base = np.array([1., 2., 3.])
+    world = base + arm.forward(angles)[-1]
+    controller = LiveThreeRGripperController(
+        (.5, .6), np.degrees(angles), base_world=base)
+    opened = controller.attach(prediction(world))
+    np.testing.assert_allclose(
+        opened["manipulator"]["projected_endpoint_m"], world - base, atol=1e-7)
+    assert opened["gripper"]["state"] == "open"
+    assert opened["manipulator"]["ik_fk_residual_cm"] < 1e-5
+    closed = controller.attach(prediction(world, grasp=True))
+    assert closed["gripper"]["state"] == "closed"
+    assert closed["gripper"]["command"] == "close"
+    assert np.isclose(np.linalg.norm(np.diff(
+        closed["manipulator"]["gripper_jaw_points_m"], axis=0)), .015)
+    held = controller.attach(prediction(world))
+    assert held["gripper"] == {"state": "closed", "command": "hold", "width_m": .015}
+    released = controller.attach(prediction(world, release=True))
+    assert released["gripper"]["state"] == "open"
+    assert released["gripper"]["command"] == "open"
+
+
+def test_synthetic_ik_anchor_is_explicit_and_resettable():
+    controller = LiveThreeRGripperController(initial_joint_deg=(0, 20, 90))
+    first = controller.attach(prediction(np.array([4., -2., 1.])))
+    assert first["manipulator"]["calibration"] == "synthetic initial pose"
+    home = controller.arm.forward(np.radians([0, 20, 90]))[-1]
+    np.testing.assert_allclose(first["manipulator"]["requested_endpoint_m"], home)
+    controller.attach(prediction(np.array([4.1, -2., 1.]), grasp=True))
+    controller.reset()
+    assert controller.gripper == "open" and controller.first_world is None

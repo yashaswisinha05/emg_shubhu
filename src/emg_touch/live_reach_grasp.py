@@ -10,6 +10,7 @@ from scipy.signal import butter, sosfilt, sosfilt_zi
 
 from .data.hybrid_event_decoder import apply_decoder
 from .models.reach_grasp_orientation_hybrid import ReachGraspOrientationHybrid
+from .physics.manipulator_ik import ThreeRManipulator
 from .physics.rotation_6d import (matrix_to_euler_zyx_degrees,
                                   matrix_to_quaternion_numpy,
                                   rotation_6d_to_matrix)
@@ -208,3 +209,81 @@ class LiveReachGraspPredictor:
                 "orientation_deg_zyx": {"yaw": float(yaw), "pitch": float(pitch),
                                         "roll": float(roll)},
                 "frames": int(len(time))}
+
+
+class LiveThreeRGripperController:
+    """Map predicted VIVE XYZ to continuous 3R IK and grasp-triggered jaws."""
+    def __init__(self, link_lengths=(.50, .60), initial_joint_deg=(0., 20., 90.),
+                 base_world=None, axis_order="xyz", axis_signs=(1., 1., 1.),
+                 open_width_m=.08, closed_width_m=.015):
+        if len(axis_order) != 3 or set(axis_order.lower()) != set("xyz"):
+            raise ValueError("axis_order must be an xyz permutation")
+        signs = np.asarray(axis_signs, dtype=float)
+        if signs.shape != (3,) or not np.isfinite(signs).all() or np.any(signs == 0):
+            raise ValueError("axis_signs must contain three finite nonzero values")
+        if not 0 <= closed_width_m < open_width_m:
+            raise ValueError("gripper widths must satisfy 0 <= closed < open")
+        self.arm = ThreeRManipulator(tuple(link_lengths))
+        self.initial = np.radians(np.asarray(initial_joint_deg, dtype=float))
+        if self.initial.shape != (3,) or not np.isfinite(self.initial).all():
+            raise ValueError("initial_joint_deg must contain three finite angles")
+        self.base_world = None if base_world is None else np.asarray(base_world, dtype=float)
+        if self.base_world is not None and (self.base_world.shape != (3,) or
+                                             not np.isfinite(self.base_world).all()):
+            raise ValueError("base_world must contain three finite VIVE coordinates")
+        self.indices = np.array(["xyz".index(axis) for axis in axis_order.lower()])
+        self.signs = signs
+        self.widths = {"open": float(open_width_m), "closed": float(closed_width_m)}
+        self.reset()
+
+    def reset(self):
+        self.previous = self.initial.copy()
+        self.first_world = None
+        self.gripper = "open"
+
+    def _axes(self, vector):
+        return np.asarray(vector, dtype=float)[self.indices] * self.signs
+
+    def _requested(self, world):
+        if self.base_world is not None:
+            return self._axes(world - self.base_world), "measured shoulder/base"
+        if self.first_world is None:
+            self.first_world = world.copy()
+        home = self.arm.forward(self.initial)[-1]
+        return home + self._axes(world - self.first_world), "synthetic initial pose"
+
+    def attach(self, prediction):
+        """Attach robot/gripper output without changing the model prediction."""
+        command = "hold"
+        events = [(prediction["trigger_time_s"].get(name), name)
+                  for name in ("grasp", "release")
+                  if prediction["triggered"].get(name)]
+        for _, name in sorted(events):
+            wanted = "closed" if name == "grasp" else "open"
+            command = "close" if wanted == "closed" else "open"
+            self.gripper = wanted
+        prediction["gripper"] = {"state": self.gripper, "command": command,
+                                  "width_m": self.widths[self.gripper]}
+        if not prediction["valid"] or prediction["position_m"] is None:
+            prediction["manipulator"] = None
+            return prediction
+        world = np.array([prediction["position_m"][axis] for axis in "xyz"])
+        requested, calibration = self._requested(world)
+        solved = self.arm.inverse(requested, previous=self.previous)
+        self.previous = solved.angles
+        yaw = solved.angles[0]
+        lateral = np.array([-np.sin(yaw), np.cos(yaw), 0.])
+        hand = solved.chain[-1]
+        half = .5 * self.widths[self.gripper]
+        jaws = np.stack([hand - half * lateral, hand + half * lateral])
+        prediction["manipulator"] = {
+            "calibration": calibration,
+            "requested_endpoint_m": requested.tolist(),
+            "projected_endpoint_m": solved.projected.tolist(),
+            "workspace_projected": bool(solved.was_projected),
+            "joint_angles_deg": {name: float(value) for name, value in zip(
+                ["q1_yaw", "q2_shoulder", "q3_elbow"], np.degrees(solved.angles))},
+            "chain_m": solved.chain.tolist(), "gripper_jaw_points_m": jaws.tolist(),
+            "ik_fk_residual_cm": float(100 * np.linalg.norm(
+                solved.chain[-1] - solved.projected))}
+        return prediction

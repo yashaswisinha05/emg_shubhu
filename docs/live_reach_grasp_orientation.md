@@ -23,6 +23,28 @@ warmup: holding/grasp/release probabilities and triggers, XYZ in metres,
 quaternion `(w,x,y,z)`, and ZYX yaw/pitch/roll in degrees. Send `start` between
 trials to clear filter, transformer, and event-decoder history.
 
+The same output now contains analytical 3R inverse kinematics and a two-finger
+gripper. `joint_angles_deg` contains base yaw, shoulder, and elbow angles;
+`chain_m` contains base=P1, elbow, and end-effector points. A validated grasp
+trigger closes the gripper and a release trigger opens it. Between triggers the
+previous gripper state is retained. The returned jaw points are placed at the
+model-driven end effector.
+
+For physically meaningful angles, measure the shoulder/base in the same VIVE
+world frame and pass it explicitly:
+
+```bash
+... --base-world X Y Z --link-lengths 0.50 0.60 \
+    --axis-order xyz --axis-signs 1 1 1
+```
+
+Without `--base-world`, the program anchors the first predicted model position
+to `--initial-joint-deg 0 20 90`. This is useful for visualizing motion shape,
+but those angles are synthetic and must not be reported as physical arm angles.
+Targets outside the robot workspace are radially projected and marked with
+`workspace_projected: true`. The 3R IK uses XYZ only; the separately predicted
+wrist orientation is reported but cannot be imposed by a position-only 3R arm.
+
 On a machine using the same `EMGCollector.py` Delsys interface as data
 collection, the script can connect directly:
 

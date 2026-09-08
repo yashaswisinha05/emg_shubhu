@@ -16,7 +16,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from emg_touch.live_reach_grasp import LiveReachGraspPredictor
+from emg_touch.live_reach_grasp import (LiveReachGraspPredictor,
+                                        LiveThreeRGripperController)
 
 SENSORS = ["S0", "S4", "S8", "S12"]
 EMG_NAMES = [f"EMG 1_{sensor}" for sensor in SENSORS]
@@ -40,9 +41,9 @@ def emit(value):
     print(json.dumps(value, separators=(",", ":"), allow_nan=False), flush=True)
 
 
-def safe_predict(predictor):
+def safe_predict(predictor, controller):
     try:
-        emit(predictor.predict())
+        emit(controller.attach(predictor.predict()))
     except RuntimeError as error:
         emit({"event": "not_ready", "reason": str(error),
               "frames": predictor.pipeline.frames})
@@ -57,7 +58,7 @@ def add_batch(predictor, message):
         predictor.add_sample(stamp, e, i)
 
 
-def stdin_loop(predictor, interval_s):
+def stdin_loop(predictor, controller, interval_s):
     last_prediction = -np.inf
     for line_number, line in enumerate(sys.stdin, 1):
         if not line.strip():
@@ -67,6 +68,7 @@ def stdin_loop(predictor, interval_s):
             event = message.get("event")
             if event in {"start", "reset"}:
                 predictor.reset()
+                controller.reset()
                 last_prediction = -np.inf
                 emit({"event": "ready"})
             elif event == "sample":
@@ -74,7 +76,7 @@ def stdin_loop(predictor, interval_s):
             elif event == "samples":
                 add_batch(predictor, message)
             elif event == "predict":
-                safe_predict(predictor)
+                safe_predict(predictor, controller)
                 continue
             elif event == "stop":
                 return
@@ -82,7 +84,7 @@ def stdin_loop(predictor, interval_s):
                 raise ValueError(f"unknown event {event!r}")
             latest = predictor.pipeline.last_time
             if latest is not None and latest - last_prediction >= interval_s:
-                safe_predict(predictor)
+                safe_predict(predictor, controller)
                 last_prediction = latest
         except Exception as error:
             emit({"event": "error", "line": line_number, "reason": str(error)})
@@ -101,7 +103,7 @@ def channel_indices(names):
             [position[name] for name in IMU_NAMES])
 
 
-def delsys_loop(predictor, sdk_path, interval_s, poll_s):
+def delsys_loop(predictor, controller, sdk_path, interval_s, poll_s):
     directory = Path(sdk_path).resolve()
     if not directory.is_dir():
         raise SystemExit(f"Delsys SDK directory does not exist: {directory}")
@@ -134,7 +136,7 @@ def delsys_loop(predictor, sdk_path, interval_s, poll_s):
             if len(stamps):
                 last_sample = float(stamps[-1])
                 if last_prediction is None or last_sample - last_prediction >= interval_s:
-                    safe_predict(predictor)
+                    safe_predict(predictor, controller)
                     last_prediction = last_sample
     except KeyboardInterrupt:
         pass
@@ -152,6 +154,17 @@ def main():
     parser.add_argument("--delsys-sdk-path",
                         help="If supplied, connect directly instead of reading stdin")
     parser.add_argument("--poll-ms", type=float, default=10.)
+    parser.add_argument("--link-lengths", type=float, nargs=2, default=(.50, .60),
+                        metavar=("L1", "L2"))
+    parser.add_argument("--initial-joint-deg", type=float, nargs=3,
+                        default=(0., 20., 90.), metavar=("YAW", "SHOULDER", "ELBOW"))
+    parser.add_argument("--base-world", type=float, nargs=3,
+                        metavar=("X", "Y", "Z"),
+                        help="Measured shoulder=P1 in VIVE world metres; omission uses synthetic anchoring")
+    parser.add_argument("--axis-order", default="xyz")
+    parser.add_argument("--axis-signs", type=float, nargs=3, default=(1., 1., 1.))
+    parser.add_argument("--gripper-open-m", type=float, default=.08)
+    parser.add_argument("--gripper-closed-m", type=float, default=.015)
     parser.add_argument("--print-protocol", action="store_true")
     args = parser.parse_args()
     if args.print_protocol:
@@ -160,15 +173,19 @@ def main():
     if min(args.interval_ms, args.warmup_ms, args.poll_ms) <= 0:
         parser.error("interval, warmup and poll must be positive")
     predictor = LiveReachGraspPredictor(args.checkpoint, args.device, args.warmup_ms)
+    controller = LiveThreeRGripperController(
+        args.link_lengths, args.initial_joint_deg, args.base_world,
+        args.axis_order, args.axis_signs, args.gripper_open_m, args.gripper_closed_m)
     emit({"event": "model_loaded", "checkpoint": str(args.checkpoint),
           "device": str(predictor.device), "input": "4 EMG + 24 IMU only",
           "outputs": ["holding", "grasp", "release", "position_xyz",
-                      "orientation_quaternion", "yaw_pitch_roll"]})
+                      "orientation_quaternion", "yaw_pitch_roll", "3r_joint_angles",
+                      "gripper_open_close"]})
     if args.delsys_sdk_path:
-        delsys_loop(predictor, args.delsys_sdk_path,
+        delsys_loop(predictor, controller, args.delsys_sdk_path,
                     args.interval_ms / 1000, args.poll_ms / 1000)
     else:
-        stdin_loop(predictor, args.interval_ms / 1000)
+        stdin_loop(predictor, controller, args.interval_ms / 1000)
 
 
 if __name__ == "__main__":
