@@ -71,14 +71,15 @@ class LiveFrankaPyBulletController:
 
     def __init__(self, gui=True, mapper=None, base_position=(0., 0., 0.),
                  simulation_steps=24, open_width_m=.04, closed_width_m=0.,
-                 holding_close_threshold=.8, holding_open_threshold=.2,
+                 grasp_probability_threshold=.9, release_probability_threshold=.9,
                  bullet=None, data_path=None):
         if simulation_steps < 1:
             raise ValueError("simulation_steps must be positive")
         if not 0 <= closed_width_m < open_width_m <= .04:
             raise ValueError("Panda finger positions require 0 <= closed < open <= 0.04 m")
-        if not 0 <= holding_open_threshold < holding_close_threshold <= 1:
-            raise ValueError("holding thresholds require 0 <= open < close <= 1")
+        if not (0 <= grasp_probability_threshold <= 1
+                and 0 <= release_probability_threshold <= 1):
+            raise ValueError("grasp and release thresholds must be between 0 and 1")
         if bullet is None:
             try:
                 import pybullet as bullet
@@ -100,8 +101,10 @@ class LiveFrankaPyBulletController:
         self.mapper = mapper or PoseMapper()
         self.simulation_steps = int(simulation_steps)
         self.widths = {"open": float(open_width_m), "closed": float(closed_width_m)}
-        self.holding_thresholds = {"open": float(holding_open_threshold),
-                                   "closed": float(holding_close_threshold)}
+        self.event_thresholds = {"grasp": float(grasp_probability_threshold),
+                                 "release": float(release_probability_threshold)}
+        self.debug_items = []
+        self.reference_positions = None
         self._discover_joints()
         self.reset()
 
@@ -145,15 +148,78 @@ class LiveFrankaPyBulletController:
                                  for index, _ in active], dtype=float)
 
     def reset(self):
+        if hasattr(self.p, "removeAllUserDebugItems"):
+            self.p.removeAllUserDebugItems(physicsClientId=self.client)
         self.mapper.reset()
         self.gripper = "open"
         self.last_target = None
+        self.previous_model_position = None
+        self.previous_actual_position = None
+        self.reference_drawn = False
+        self.status_text = -1
         for joint, value in zip(self.arm_joints, self.REST):
             self.p.resetJointState(self.robot, joint, float(value),
                                    physicsClientId=self.client)
         for joint in self.finger_joints:
             self.p.resetJointState(self.robot, joint, self.widths["open"],
                                    physicsClientId=self.client)
+        self._update_status("OPEN", [0., .7, 0.])
+        self._debug_text("BLACK: withheld VIVE   CYAN: model request   ORANGE: Franka EE",
+                         [-.35, 0., 1.15], [.1, .1, .1], 1.25)
+
+    def set_reference_trajectory(self, positions):
+        """Store withheld VIVE XYZ for a black comparison-only GUI trace."""
+        values = np.asarray(positions, dtype=float)
+        if values.ndim != 2 or values.shape[1] != 3:
+            raise ValueError("reference trajectory must have shape [frames, 3]")
+        self.reference_positions = values[np.isfinite(values).all(axis=1)]
+        self.reference_drawn = False
+
+    def _debug_line(self, first, second, color, width=3.):
+        if not hasattr(self.p, "addUserDebugLine"):
+            return
+        item = self.p.addUserDebugLine(
+            np.asarray(first).tolist(), np.asarray(second).tolist(), color,
+            lineWidth=width, lifeTime=0, physicsClientId=self.client)
+        self.debug_items.append(item)
+
+    def _debug_text(self, text, position, color, size=1.5, replace=-1):
+        if not hasattr(self.p, "addUserDebugText"):
+            return replace
+        kwargs = {"textColorRGB": color, "textSize": size, "lifeTime": 0,
+                  "physicsClientId": self.client}
+        if replace >= 0:
+            kwargs["replaceItemUniqueId"] = replace
+        item = self.p.addUserDebugText(text, np.asarray(position).tolist(), **kwargs)
+        self.debug_items.append(item)
+        return item
+
+    def _update_status(self, text, color):
+        self.status_text = self._debug_text(
+            f"GRIPPER: {text}", [-.25, 0., 1.05], color, 2.5,
+            getattr(self, "status_text", -1))
+
+    def _marker(self, position, color, label):
+        position = np.asarray(position, dtype=float)
+        radius = .025
+        for axis in range(3):
+            offset = np.zeros(3)
+            offset[axis] = radius
+            self._debug_line(position - offset, position + offset, color, 5.)
+        self._debug_text(label, position + np.array([0., 0., .035]), color, 1.4)
+
+    def _draw_reference(self):
+        if self.reference_drawn or self.reference_positions is None:
+            return
+        mapped = []
+        for position in self.reference_positions:
+            value, _, _ = self.mapper.map(position, (1., 0., 0., 0.))
+            mapped.append(value)
+        for first, second in zip(mapped, mapped[1:]):
+            self._debug_line(first, second, [.05, .05, .05], 4.)
+        if mapped:
+            self._marker(mapped[0], [.1, .1, .1], "VIVE START")
+        self.reference_drawn = True
 
     @staticmethod
     def _xyzw(wxyz):
@@ -192,22 +258,32 @@ class LiveFrankaPyBulletController:
     def attach(self, prediction):
         command = "hold"
         command_source = None
-        ordered = [(prediction["trigger_time_s"].get(name), name)
-                   for name in ("grasp", "release")
-                   if prediction["triggered"].get(name)
-                   and prediction["trigger_time_s"].get(name) is not None]
-        for _, name in sorted(ordered, key=lambda item: item[0]):
-            self.gripper = "closed" if name == "grasp" else "open"
-            command = "close" if name == "grasp" else "open"
-            command_source = f"{name}_event"
-        holding = prediction.get("holding_probability")
-        if not ordered and holding is not None and np.isfinite(holding):
-            if self.gripper == "open" and holding >= self.holding_thresholds["closed"]:
-                self.gripper, command, command_source = "closed", "close", "holding_fallback"
-            elif self.gripper == "closed" and holding <= self.holding_thresholds["open"]:
-                self.gripper, command, command_source = "open", "open", "holding_fallback"
+        trigger_probability = prediction.get("trigger_probability", {})
+
+        def score(name):
+            values = [prediction.get(f"{name}_probability"),
+                      trigger_probability.get(name)]
+            finite = [float(value) for value in values
+                      if value is not None and np.isfinite(value)]
+            return max(finite, default=None)
+
+        grasp_score, release_score = score("grasp"), score("release")
+        # Latched state machine: after closing, grasp probability cannot reopen
+        # the fingers. Only a confident release can do that, and vice versa.
+        if (self.gripper == "closed" and release_score is not None
+                and release_score >= self.event_thresholds["release"]):
+            self.gripper, command = "open", "open"
+            command_source = "release_probability"
+            self._update_status("OPEN", [0., .7, 0.])
+        elif (self.gripper == "open" and grasp_score is not None
+              and grasp_score >= self.event_thresholds["grasp"]):
+            self.gripper, command = "closed", "close"
+            command_source = "grasp_probability"
+            self._update_status("CLOSED", [.9, .05, .05])
         prediction["gripper"] = {"state": self.gripper, "command": command,
                                   "command_source": command_source,
+                                  "grasp_control_probability": grasp_score,
+                                  "release_control_probability": release_score,
                                   "finger_joint_position_m": self.widths[self.gripper]}
         # Grasp/release must still execute when the coincident wearable pose
         # frame is invalid. Arm motors retain their last valid position target.
@@ -216,14 +292,22 @@ class LiveFrankaPyBulletController:
             self._step()
             prediction["gripper"]["actual_finger_joint_positions_m"] = (
                 self._finger_positions())
+            held_position = (None if self.last_target is None
+                             else self.last_target[0].tolist())
+            if command in {"close", "open"} and held_position is not None:
+                color = [.9, 0., .9] if command == "close" else [.9, .1, .1]
+                self._marker(held_position, color,
+                             "GRASP" if command == "close" else "RELEASE")
             prediction["franka"] = {
                 "pose_command": "held_last_valid" if self.last_target is not None
                                 else "rest_pose",
+                "held_target_position_m": held_position,
                 "reason": "invalid wearable pose frame"}
             return prediction
         position = np.array([prediction["position_m"][axis] for axis in "xyz"])
         quaternion = prediction["orientation_quaternion_wxyz"]
         target_position, target_quaternion, mode = self.mapper.map(position, quaternion)
+        self._draw_reference()
         solution = self.p.calculateInverseKinematics(
             self.robot, self.ee_link, targetPosition=target_position.tolist(),
             targetOrientation=self._xyzw(target_quaternion),
@@ -249,6 +333,20 @@ class LiveFrankaPyBulletController:
             computeForwardKinematics=True, physicsClientId=self.client)
         actual_position = np.asarray(state[4], dtype=float)
         actual_quaternion = self._wxyz(state[5])
+        if self.previous_model_position is None:
+            self._marker(target_position, [0., .7, .7], "MODEL START")
+        else:
+            self._debug_line(self.previous_model_position, target_position,
+                             [0., .8, .9], 4.)
+        if self.previous_actual_position is not None:
+            self._debug_line(self.previous_actual_position, actual_position,
+                             [1., .45, 0.], 4.)
+        self.previous_model_position = target_position.copy()
+        self.previous_actual_position = actual_position.copy()
+        if command == "close":
+            self._marker(target_position, [.9, 0., .9], "GRASP")
+        elif command == "open":
+            self._marker(target_position, [.9, .1, .1], "RELEASE")
         prediction["franka"] = {
             "mapping": mode, "target_position_m": target_position.tolist(),
             "target_orientation_wxyz": target_quaternion.tolist(),

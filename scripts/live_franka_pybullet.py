@@ -54,9 +54,22 @@ def replay_csv(predictor, controller, trial_csv, interval_s, speed=1.,
     imu = frame[IMU_NAMES].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
     predictor.reset()
     controller.reset()
+    vive_names = [f"VIVE_T0_pos_{axis}_m" for axis in "xyz"]
+    reference = None
+    if all(name in frame for name in vive_names):
+        reference = frame[vive_names].apply(
+            pd.to_numeric, errors="coerce").to_numpy(dtype=float)[order]
+        reference = reference[np.isfinite(reference).all(axis=1)]
+        if len(reference):
+            # A few hundred segments are visually continuous without flooding
+            # the PyBullet debug renderer with every raw 1 kHz sample.
+            stride = max(1, int(np.ceil(len(reference) / 300)))
+            reference = reference[::stride]
+            controller.set_reference_trajectory(reference)
     emit_fn({"event": "replay_started", "trial": str(path),
              "rows": int(len(order)), "input": "4 EMG + 24 IMU only",
-             "vive_columns_ignored": True})
+             "vive_is_model_input": False,
+             "vive_comparison_frames": 0 if reference is None else int(len(reference))})
     last_prediction = -np.inf
     wall_start, data_start = time.monotonic(), float(stamps[order[0]])
     predictions = 0
@@ -111,8 +124,8 @@ def main():
                         help="Physics settling steps after each model prediction")
     parser.add_argument("--final-settle-steps", type=int, default=240,
                         help="Simulation steps after recorded data ends")
-    parser.add_argument("--holding-close-threshold", type=float, default=.8)
-    parser.add_argument("--holding-open-threshold", type=float, default=.2)
+    parser.add_argument("--grasp-probability-threshold", type=float, default=.9)
+    parser.add_argument("--release-probability-threshold", type=float, default=.9)
     args = parser.parse_args()
     if (min(args.interval_ms, args.warmup_ms, args.poll_ms) <= 0
             or min(args.speed, args.final_settle_steps) < 0):
@@ -133,8 +146,8 @@ def main():
         controller = LiveFrankaPyBulletController(
             gui=not args.headless, mapper=mapper, base_position=args.robot_base,
             simulation_steps=args.simulation_steps,
-            holding_close_threshold=args.holding_close_threshold,
-            holding_open_threshold=args.holding_open_threshold)
+            grasp_probability_threshold=args.grasp_probability_threshold,
+            release_probability_threshold=args.release_probability_threshold)
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
     emit({"event": "franka_ready", "input": "4 EMG + 24 IMU only",

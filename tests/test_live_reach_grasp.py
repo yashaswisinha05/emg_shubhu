@@ -59,6 +59,7 @@ def test_live_predictor_outputs_every_head_without_vive(tmp_path):
     assert len(result["orientation_quaternion_wxyz"]) == 4
     assert set(result["orientation_deg_zyx"]) == {"yaw", "pitch", "roll"}
     assert set(result["triggered"]) == {"grasp", "release"}
+    assert set(result["trigger_probability"]) == {"grasp", "release"}
 
 
 def test_live_channel_mapping_rejects_missing_sensor():

@@ -31,6 +31,9 @@ class FakeController:
     def reset(self):
         self.reset_count += 1
 
+    def set_reference_trajectory(self, positions):
+        self.reference = np.asarray(positions)
+
     def attach(self, result):
         result["franka"] = "driven"
         return result
@@ -41,7 +44,8 @@ def recorded_frame():
     for index, name in enumerate(EMG_NAMES + IMU_NAMES):
         frame[name] = np.arange(4, dtype=float) + index
     # Poisoned VIVE data demonstrates that replay neither requires nor reads it.
-    frame["VIVE_T0_pos_x_m"] = ["not", "model", "input", "ever"]
+    for axis, offset in zip("xyz", [0., 1., 2.]):
+        frame[f"VIVE_T0_pos_{axis}_m"] = np.arange(4) + offset
     return frame
 
 
@@ -55,7 +59,8 @@ def test_csv_replay_is_chronological_wearable_only_and_handles_duplicates(tmp_pa
     assert [row[0] for row in predictor.rows] == [10., 10.001, 10.002]
     assert all(row[1].shape == (4,) and row[2].shape == (24,)
                for row in predictor.rows)
-    assert output[0]["vive_columns_ignored"] is True
+    assert output[0]["vive_is_model_input"] is False
+    assert controller.reference.shape == (3, 3)
     assert output[-1]["event"] == "replay_complete"
     assert count == output[-1]["predictions"] == 2
 

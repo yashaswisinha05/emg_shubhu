@@ -59,11 +59,12 @@ python scripts/live_franka_pybullet.py \
   --speed 1.0
 ```
 
-The replay reader extracts only `time_perf_counter`, the four trained EMG
-channels, and the 24 trained accelerometer/gyroscope channels. Even when the
-CSV contains VIVE position and orientation, those columns are never passed to
-the predictor. Missing wearable values retain the same causal, bounded-gap
-handling used by live inference.
+The replay reader passes only `time_perf_counter`, the four trained EMG
+channels, and the 24 trained accelerometer/gyroscope channels to the model.
+When VIVE XYZ is present it is drawn as a black, comparison-only trajectory;
+it is never passed to the predictor. Missing wearable values retain the same
+causal, bounded-gap handling used by live inference, and the Panda holds the
+last valid target rather than receiving invented pose values.
 
 ## Coordinate calibration
 
@@ -87,12 +88,17 @@ Without an explicit calibration, the first predicted pose is anchored at
 changes are preserved. This synthetic anchor is useful for visualization, but
 it is not a substitute for robot/world calibration on physical hardware.
 
-The fingers start open. A model grasp trigger commands both Panda finger
-joints to `0.00 m`; a release trigger commands each to `0.04 m`. Finger
-commands are executed even when the simultaneous pose frame is invalid. As a
-fallback for a missed event pulse, holding probability above `0.8` closes the
-fingers and probability below `0.2` opens them. Override these values with
-`--holding-close-threshold` and `--holding-open-threshold`.
+The fingers start open. Grasp probability at or above `0.9` commands both
+Panda finger joints to `0.00 m`, then latches the gripper closed. Only release
+probability at or above `0.9` opens each finger to `0.04 m`. The confirmed
+probability at the decoder's event timestamp is preserved even when the
+current pose frame is invalid. Override the thresholds with
+`--grasp-probability-threshold` and `--release-probability-threshold`.
+
+The PyBullet GUI draws the entire withheld VIVE path in black, the growing
+model-requested path in cyan, and the actual Franka end-effector path in
+orange. Crosses label model start, grasp, and release, and large text reports
+`GRIPPER: OPEN` or `GRIPPER: CLOSED`.
 
 During missing/invalid wearable frames the Panda keeps its last valid arm
 target and the simulation continues stepping, instead of freezing. Recorded

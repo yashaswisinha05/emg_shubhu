@@ -15,6 +15,8 @@ class FakeBullet:
         self.motor_calls = []
         self.link_pose = None
         self.steps = 0
+        self.debug_lines = []
+        self.debug_text = []
         arm = [(f"panda_joint{i}", f"panda_link{i}", -2.9, 2.9,
                 self.JOINT_REVOLUTE)
                for i in range(1, 8)]
@@ -79,6 +81,18 @@ class FakeBullet:
     def disconnect(self, **kwargs):
         self.disconnected = True
 
+    def removeAllUserDebugItems(self, **kwargs):
+        self.debug_lines.clear()
+        self.debug_text.clear()
+
+    def addUserDebugLine(self, first, second, color, **kwargs):
+        self.debug_lines.append((first, second, color, kwargs))
+        return len(self.debug_lines)
+
+    def addUserDebugText(self, text, position, **kwargs):
+        self.debug_text.append((text, position, kwargs))
+        return len(self.debug_text)
+
 
 def test_explicit_pose_mapping_applies_one_rigid_transform():
     # 90 degrees around z, followed by a base-frame translation.
@@ -117,6 +131,10 @@ def prediction(position=(.45, 0., .5), quaternion=(1., 0., 0., 0.),
         "position_m": dict(zip("xyz", position)) if valid else None,
         "orientation_quaternion_wxyz": list(quaternion) if valid else None,
         "holding_probability": holding,
+        "grasp_probability": .95 if grasp else .05,
+        "release_probability": .95 if release else .05,
+        "trigger_probability": {"grasp": .95 if grasp else None,
+                                "release": .95 if release else None},
         "triggered": {"grasp": grasp, "release": release},
         "trigger_time_s": {"grasp": 1. if grasp else None,
                            "release": 2. if release else None},
@@ -161,18 +179,34 @@ def test_invalid_release_still_opens_fingers_and_keeps_stepping_arm():
     steps_before = fake.steps
     released = controller.attach(prediction(release=True, valid=False))
     assert released["gripper"]["state"] == "open"
-    assert released["gripper"]["command_source"] == "release_event"
+    assert released["gripper"]["command_source"] == "release_probability"
     assert last_finger_targets(fake, controller) == [.04, .04]
     assert fake.steps == steps_before + 2
     assert released["franka"]["pose_command"] == "held_last_valid"
 
 
-def test_holding_hysteresis_recovers_missed_event_pulses():
+def test_probability_state_machine_latches_until_opposite_event():
     fake = FakeBullet()
     controller = LiveFrankaPyBulletController(gui=False, bullet=fake)
-    closed = controller.attach(prediction(holding=.9))
+    closed = controller.attach(prediction(grasp=True))
     assert closed["gripper"]["state"] == "closed"
-    assert closed["gripper"]["command_source"] == "holding_fallback"
-    opened = controller.attach(prediction(holding=.1, valid=False))
+    # Low grasp probability cannot open the latched gripper.
+    held = controller.attach(prediction())
+    assert held["gripper"]["state"] == "closed"
+    opened = controller.attach(prediction(release=True, valid=False))
     assert opened["gripper"]["state"] == "open"
-    assert opened["gripper"]["command_source"] == "holding_fallback"
+
+
+def test_pybullet_debug_overlay_contains_reference_model_actual_and_markers():
+    fake = FakeBullet()
+    controller = LiveFrankaPyBulletController(gui=False, bullet=fake)
+    controller.set_reference_trajectory([[.45, 0., .5], [.44, .01, .49]])
+    controller.attach(prediction())
+    controller.attach(prediction((.44, .01, .49), grasp=True))
+    colors = [line[2] for line in fake.debug_lines]
+    assert [.05, .05, .05] in colors  # withheld VIVE
+    assert [0., .8, .9] in colors     # model request
+    assert [1., .45, 0.] in colors    # actual Franka end effector
+    labels = [item[0] for item in fake.debug_text]
+    assert any("GRIPPER: CLOSED" in label for label in labels)
+    assert "GRASP" in labels

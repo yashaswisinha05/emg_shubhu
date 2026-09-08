@@ -181,12 +181,19 @@ class LiveReachGraspPredictor:
         item = {"trial": {"time": time}, "prob": probability,
                 "valid": valid, "position": position}
         decoded = apply_decoder([item], self.decoder)[0]
-        triggers, trigger_times = {}, {}
+        triggers, trigger_times, trigger_probability = {}, {}, {}
         for event, name in enumerate(["grasp", "release"]):
             new = [stamp for stamp in decoded["detections"][event]
                    if stamp > self.last_trigger[event] + 1e-9]
             triggers[name] = bool(new)
             trigger_times[name] = new[-1] if new else None
+            if new:
+                detected = int(np.argmin(np.abs(time - new[-1])))
+                value = decoded["prob"][detected, event + 1]
+                trigger_probability[name] = (float(value)
+                                             if np.isfinite(value) else None)
+            else:
+                trigger_probability[name] = None
             if new:
                 self.last_trigger[event] = new[-1]
         if not valid[-1]:
@@ -194,6 +201,7 @@ class LiveReachGraspPredictor:
                     "valid": False, "holding_probability": None,
                     "grasp_probability": None, "release_probability": None,
                     "triggered": triggers, "trigger_time_s": trigger_times,
+                    "trigger_probability": trigger_probability,
                     "position_m": None, "orientation_quaternion_wxyz": None,
                     "orientation_deg_zyx": None, "frames": int(len(time))}
         rotation = rotation_6d_to_matrix(out["orientation_6d"][0, -1]).cpu().numpy()
@@ -204,6 +212,7 @@ class LiveReachGraspPredictor:
                 "grasp_probability": float(decoded["prob"][-1, 1]),
                 "release_probability": float(decoded["prob"][-1, 2]),
                 "triggered": triggers, "trigger_time_s": trigger_times,
+                "trigger_probability": trigger_probability,
                 "position_m": {axis: float(value) for axis, value in zip("xyz", position[-1])},
                 "orientation_quaternion_wxyz": [float(value) for value in quaternion],
                 "orientation_deg_zyx": {"yaw": float(yaw), "pitch": float(pitch),
