@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from emg_touch.data.reach_grasp import preprocess
 from emg_touch.models.reach_grasp import ReachGraspModel
 from emg_touch.data.annotation_uncertainty import soften_events, holding_transitions
+from emg_touch.physics.rotation_6d import orientation_errors_numpy
 
 MODEL_CLASS = ReachGraspModel
 MODEL_FORMAT = "reach_grasp_annotation_v1"
@@ -72,6 +73,14 @@ def batches(trials, stats, batch_size, device, shuffle=False):
                          if key == "pose" else t["pose_valid"][:, None])
                 x[i, :n] = value
             b[key] = torch.from_numpy(x).to(device)
+        orientation = np.zeros((len(selected), length, 6), dtype="float32")
+        orientation_mask = np.zeros((len(selected), length), dtype=bool)
+        for i, t in enumerate(selected):
+            n = len(t["time"])
+            orientation[i, :n] = t.get("orientation", np.zeros((n, 6)))
+            orientation_mask[i, :n] = t.get("orientation_valid", np.zeros(n, bool))
+        b["orientation"] = torch.from_numpy(orientation).to(device)
+        b["orientation_mask"] = torch.from_numpy(orientation_mask).to(device)
         yield b
 
 
@@ -141,7 +150,10 @@ def predict(model, trials, stats, args, zero_emg=False):
             # Decoders skip it; plots display a gap, not a fabricated zero.
             prob[~mask] = np.nan
             position = out["position"][i, :n].cpu().numpy() * stats["position"]["std"] + stats["position"]["mean"]
-            result.append({"trial": trial, "prob": prob, "valid": mask, "position": position})
+            item = {"trial": trial, "prob": prob, "valid": mask, "position": position}
+            if "orientation_6d" in out:
+                item["orientation_6d"] = out["orientation_6d"][i, :n].cpu().numpy()
+            result.append(item)
     return result
 
 
@@ -153,6 +165,7 @@ def metrics(predictions, thresholds, tolerance):
     full_tp = full_fp = full_fn = 0
     certain_frames = available_frames = 0
     distances = []
+    orientation_errors, yaw_errors = [], []
     for item in predictions:
         valid = item["valid"] & item["trial"].get("holding_certain", np.ones_like(item["valid"]))
         true = item["trial"]["holding"].astype(bool)
@@ -168,12 +181,25 @@ def metrics(predictions, thresholds, tolerance):
         fn += int((~pred & true & valid).sum())
         pm = item["valid"] & item["trial"]["pose_valid"]
         distances.extend(np.linalg.norm(item["position"][pm] - item["trial"]["position"][pm], axis=-1) * 100)
+        if "orientation_6d" in item:
+            om = item["valid"] & item["trial"]["orientation_valid"]
+            if om.any():
+                geodesic, yaw = orientation_errors_numpy(
+                    item["orientation_6d"][om], item["trial"]["orientation"][om])
+                orientation_errors.extend(geodesic)
+                yaw_errors.extend(yaw)
     result["holding_f1"] = 2 * tp / max(1, 2 * tp + fp + fn)
     result["holding_boundary_excluded"] = any("holding_certain" in i["trial"] for i in predictions)
     result["holding_f1_all_valid_frames"] = 2 * full_tp / max(1, 2 * full_tp + full_fp + full_fn)
     result["holding_certain_fraction_of_valid"] = certain_frames / max(1, available_frames)
     result["position_cm"] = float(np.mean(distances)) if distances else None
     result["valid_pose_frames"] = len(distances)
+    if orientation_errors:
+        result["orientation_geodesic_deg"] = float(np.mean(orientation_errors))
+        result["orientation_geodesic_median_deg"] = float(np.median(orientation_errors))
+        result["yaw_mae_deg"] = float(np.mean(yaw_errors))
+        result["yaw_median_ae_deg"] = float(np.median(yaw_errors))
+        result["valid_orientation_frames"] = len(orientation_errors)
     result["valid_wearable_fraction"] = float(np.mean(np.concatenate([i["valid"] for i in predictions])))
     return result
 
@@ -212,11 +238,15 @@ def main():
     p.add_argument("--annotation-aware", action="store_true")
     p.add_argument("--uncertainty-ms", type=float, default=200.)
     p.add_argument("--selection-tolerance-ms", type=float, default=200.)
+    p.add_argument("--orientation-weight", type=float, default=0.,
+                   help="6D rotation loss weight; active only for models with an orientation head")
     args = p.parse_args()
     if args.epochs < 1 or args.batch_size < 1 or args.patience < 1:
         p.error("epochs, batch size, patience must be positive")
     if args.uncertainty_ms <= 0 or args.selection_tolerance_ms <= 0:
         p.error("uncertainty and selection tolerance must be positive")
+    if args.orientation_weight < 0:
+        p.error("orientation weight cannot be negative")
     if args.annotation_aware and args.output_dir == Path("runs/reach_grasp_seed42"):
         args.output_dir = Path("runs/reach_grasp_annotation_seed42")
     tolerance = args.selection_tolerance_ms / 1000 if args.annotation_aware else .15
@@ -243,6 +273,8 @@ def main():
             trials.append(trial)
         except (ValueError, KeyError) as exc:
             rejected[str(path)] = str(exc)
+    if args.orientation_weight and not any(t["orientation_valid"].any() for t in trials):
+        raise ValueError("orientation loss requested but no valid VIVE_T0_quat_w/x/y/z labels were found")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "data_audit.json").write_text(json.dumps({"rejected": rejected,
         "accepted": {t["path"]: t["audit"] for t in trials}}, indent=2))
@@ -286,6 +318,10 @@ def main():
                 pose_mask = valid & b["pose_mask"].squeeze(-1).bool()
                 if pose_mask.any():
                     loss = loss + .2 * F.smooth_l1_loss(out["position"][pose_mask], b["pose"][pose_mask])
+                orientation_mask = valid & b["orientation_mask"]
+                if "orientation_6d" in out and orientation_mask.any():
+                    loss = loss + args.orientation_weight * F.smooth_l1_loss(
+                        out["orientation_6d"][orientation_mask], b["orientation"][orientation_mask])
                 if not torch.isfinite(loss):
                     raise FloatingPointError("nonfinite loss")
                 loss.backward()
@@ -300,6 +336,8 @@ def main():
             report = metrics(predictions, thresholds, tolerance)
             # Primary task is interaction; pose is reported, not used to disguise event failures.
             selection = 1 - report["event_macro_f1"] + .05 * (1 - report["holding_f1"])
+            if args.orientation_weight and "orientation_geodesic_deg" in report:
+                selection += .05 * report["orientation_geodesic_deg"] / 180
             print(modality, epoch, report, flush=True)
             history.append({"epoch": epoch, "validation": report, "thresholds": thresholds})
             if selection < best:
@@ -307,7 +345,9 @@ def main():
                 torch.save({"format": MODEL_FORMAT if args.annotation_aware else "reach_grasp_v1", "model_args": model_args,
                     "state_dict": model.state_dict(), "normalization": stats, "preprocessing": settings,
                     "event_thresholds": thresholds, "event_tolerance_s": tolerance, "epoch": epoch,
-                    "validation": report, "seed": args.seed}, path)
+                    "validation": report, "seed": args.seed,
+                    "orientation_weight": args.orientation_weight,
+                    "orientation_representation": "6D first-two rotation-matrix columns; VIVE quaternion wxyz"}, path)
             else:
                 stale += 1
             if stale >= args.patience:

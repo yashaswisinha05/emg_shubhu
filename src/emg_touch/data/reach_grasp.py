@@ -4,6 +4,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from scipy.signal import butter, sosfilt, sosfilt_zi, lfilter
+from emg_touch.physics.rotation_6d import (
+    matrix_to_rotation_6d_numpy, quaternion_to_matrix_numpy)
 
 SENSORS = ["S0", "S4", "S8", "S12"]
 
@@ -126,6 +128,18 @@ def preprocess(path, settings):
             pv &= np.isfinite(value) & (np.abs(value) <= limit)
     position = np.nan_to_num(position[index]).astype("float32")
     pose_valid = pv[index] & recent
+    quaternion_names = [f"VIVE_T0_quat_{axis}" for axis in "wxyz"]
+    if all(name in frame for name in quaternion_names):
+        quaternion = numeric(frame, quaternion_names)
+        quaternion_norm = np.linalg.norm(quaternion, axis=1)
+        qv = np.isfinite(quaternion).all(1) & (quaternion_norm > .5) & (quaternion_norm < 1.5)
+        qv &= pv
+        rotation = quaternion_to_matrix_numpy(np.nan_to_num(quaternion[index], nan=0.))
+        orientation = matrix_to_rotation_6d_numpy(rotation).astype("float32")
+        orientation_valid = qv[index] & recent
+    else:
+        orientation = np.zeros((len(grid), 6), dtype="float32")
+        orientation_valid = np.zeros(len(grid), dtype=bool)
     holding = ((grid >= events[0]) & (grid < events[1])).astype("float32")
     event_labels = ((grid[:, None] >= events) &
                     (grid[:, None] < events + settings["event_pulse_s"])).astype("float32")
@@ -133,7 +147,9 @@ def preprocess(path, settings):
             "emg": features.astype("float32"), "emg_valid": emg_valid,
             "imu": imu[index].astype("float32"), "imu_valid": iv,
             "position": position, "pose_valid": pose_valid,
+            "orientation": orientation, "orientation_valid": orientation_valid,
             "holding": holding, "event_labels": event_labels,
             "audit": {"label_source": label_source, "frames": len(grid),
                       "emg_valid_fraction": float(ev.mean()), "imu_valid_fraction": float(iv.mean()),
-                      "pose_valid_fraction": float(pose_valid.mean())}}
+                      "pose_valid_fraction": float(pose_valid.mean()),
+                      "orientation_valid_fraction": float(orientation_valid.mean())}}

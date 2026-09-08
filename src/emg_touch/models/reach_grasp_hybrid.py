@@ -72,4 +72,5 @@ class ReachGraspHybrid(nn.Module):
         logits = torch.cat([self.holding(context), event_logits], -1)
         return {"logits": logits, "position": self.position(context),
                 "fusion_weights": context_weights,
-                "local_fusion_weights": local_weights}
+                "local_fusion_weights": local_weights,
+                "context_features": context}

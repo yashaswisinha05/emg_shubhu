@@ -17,6 +17,11 @@ from emg_touch.data.hybrid_event_decoder import apply_decoder, calibrate_decoder
 from emg_touch.data.reach_grasp import preprocess
 from emg_touch.models.reach_grasp_hybrid import ReachGraspHybrid
 
+MODEL_CLASS = ReachGraspHybrid
+MODEL_FORMAT = "reach_grasp_hybrid_v1"
+MODEL_EXTRA_ARGS = {"width": 128, "patch": 16, "stride": 4,
+                    "layers": 4, "heads": 4, "dropout": .1}
+
 
 def has(name):
     return any(value == name or value.startswith(name + "=") for value in sys.argv[1:])
@@ -50,7 +55,7 @@ def calibrate_run(options):
     for modality in options.models:
         checkpoint = options.output_dir / (modality.replace("+", "_") + "_best.pt")
         state = torch.load(checkpoint, map_location=options.device, weights_only=False)
-        model = ReachGraspHybrid(**state["model_args"]).to(options.device)
+        model = MODEL_CLASS(**state["model_args"]).to(options.device)
         model.load_state_dict(state["state_dict"])
         model.eval().requires_grad_(False)
         validation_trials = load_trials(splits["validation"], state)
@@ -96,10 +101,9 @@ def main():
     options = wrapper_arguments()
     original = train.MODEL_CLASS, train.MODEL_FORMAT, train.MODEL_EXTRA_ARGS
     try:
-        train.MODEL_CLASS = ReachGraspHybrid
-        train.MODEL_FORMAT = "reach_grasp_hybrid_v1"
-        train.MODEL_EXTRA_ARGS = {"width": 128, "patch": 16, "stride": 4,
-                                  "layers": 4, "heads": 4, "dropout": .1}
+        train.MODEL_CLASS = MODEL_CLASS
+        train.MODEL_FORMAT = MODEL_FORMAT
+        train.MODEL_EXTRA_ARGS = MODEL_EXTRA_ARGS
         if not has("--annotation-aware"):
             sys.argv[1:1] = ["--annotation-aware"]
         if not has("--uncertainty-ms"):
