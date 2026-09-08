@@ -88,4 +88,17 @@ changes are preserved. This synthetic anchor is useful for visualization, but
 it is not a substitute for robot/world calibration on physical hardware.
 
 The fingers start open. A model grasp trigger commands both Panda finger
-joints to `0.00 m`; a release trigger commands each to `0.04 m`.
+joints to `0.00 m`; a release trigger commands each to `0.04 m`. Finger
+commands are executed even when the simultaneous pose frame is invalid. As a
+fallback for a missed event pulse, holding probability above `0.8` closes the
+fingers and probability below `0.2` opens them. Override these values with
+`--holding-close-threshold` and `--holding-open-threshold`.
+
+During missing/invalid wearable frames the Panda keeps its last valid arm
+target and the simulation continues stepping, instead of freezing. Recorded
+replay also runs 240 final simulation steps by default so the arm and fingers
+can converge to the last model command. Use `--final-settle-steps` to change
+this duration. Each prediction uses 24 physics settling steps by default;
+change this with `--simulation-steps`. IK arrays include all nine movable
+Panda DoFs, preventing
+PyBullet from discarding joint damping because the two finger DoFs were absent.

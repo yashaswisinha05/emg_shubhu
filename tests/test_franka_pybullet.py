@@ -7,19 +7,25 @@ from emg_touch.physics.rotation_6d import quaternion_to_matrix_numpy
 
 class FakeBullet:
     GUI, DIRECT, POSITION_CONTROL = 1, 2, 3
+    JOINT_REVOLUTE, JOINT_PRISMATIC, JOINT_FIXED = 0, 1, 4
 
     def __init__(self):
         self.states = {}
         self.ik_call = None
         self.motor_calls = []
         self.link_pose = None
-        arm = [(f"panda_joint{i}", f"panda_link{i}", -2.9, 2.9)
+        self.steps = 0
+        arm = [(f"panda_joint{i}", f"panda_link{i}", -2.9, 2.9,
+                self.JOINT_REVOLUTE)
                for i in range(1, 8)]
-        fixed = [("panda_joint8", "panda_hand", 0., -1.),
-                 ("panda_hand_joint", "panda_leftfinger", 0., -1.)]
-        fingers = [("panda_finger_joint1", "panda_leftfinger", 0., .04),
-                   ("panda_finger_joint2", "panda_rightfinger", 0., .04)]
-        target = [("panda_grasptarget_joint", "panda_grasptarget", 0., -1.)]
+        fixed = [("panda_joint8", "panda_hand", 0., -1., self.JOINT_FIXED),
+                 ("panda_hand_joint", "panda_leftfinger", 0., -1., self.JOINT_FIXED)]
+        fingers = [("panda_finger_joint1", "panda_leftfinger", 0., .04,
+                    self.JOINT_PRISMATIC),
+                   ("panda_finger_joint2", "panda_rightfinger", 0., .04,
+                    self.JOINT_PRISMATIC)]
+        target = [("panda_grasptarget_joint", "panda_grasptarget", 0., -1.,
+                   self.JOINT_FIXED)]
         self.joints = arm + fixed + fingers + target
 
     def connect(self, mode):
@@ -41,9 +47,10 @@ class FakeBullet:
         return len(self.joints)
 
     def getJointInfo(self, robot, index, **kwargs):
-        name, link, lower, upper = self.joints[index]
+        name, link, lower, upper, joint_type = self.joints[index]
         info = [None] * 13
-        info[1], info[8], info[9], info[12] = name.encode(), lower, upper, link.encode()
+        info[1], info[2], info[8], info[9], info[12] = (
+            name.encode(), joint_type, lower, upper, link.encode())
         return tuple(info)
 
     def resetJointState(self, robot, joint, value, **kwargs):
@@ -60,7 +67,7 @@ class FakeBullet:
             self.states[joint] = value
 
     def stepSimulation(self, **kwargs):
-        pass
+        self.steps += 1
 
     def getJointState(self, robot, joint, **kwargs):
         return (self.states[joint], 0., (), 0.)
@@ -104,15 +111,21 @@ def test_synthetic_mapper_anchors_first_pose_and_preserves_relative_motion():
 
 
 def prediction(position=(.45, 0., .5), quaternion=(1., 0., 0., 0.),
-               grasp=False, release=False):
+               grasp=False, release=False, holding=0., valid=True):
     return {
-        "valid": True,
-        "position_m": dict(zip("xyz", position)),
-        "orientation_quaternion_wxyz": list(quaternion),
+        "valid": valid,
+        "position_m": dict(zip("xyz", position)) if valid else None,
+        "orientation_quaternion_wxyz": list(quaternion) if valid else None,
+        "holding_probability": holding,
         "triggered": {"grasp": grasp, "release": release},
         "trigger_time_s": {"grasp": 1. if grasp else None,
                            "release": 2. if release else None},
     }
+
+
+def last_finger_targets(fake, controller):
+    return next(call[1]["targetPositions"] for call in reversed(fake.motor_calls)
+                if call[0] == controller.finger_joints)
 
 
 def test_model_pose_drives_franka_ik_and_events_drive_real_finger_joints():
@@ -125,14 +138,41 @@ def test_model_pose_drives_franka_ik_and_events_drive_real_finger_joints():
     closed = controller.attach(prediction(grasp=True))
     assert fake.ik_call["targetPosition"] == [.45, 0., .5]
     assert fake.ik_call["targetOrientation"] == [0., 0., 0., 1.]
+    assert len(fake.ik_call["jointDamping"]) == 9
     assert len(closed["franka"]["target_joint_angles_deg"]) == 7
     assert closed["gripper"]["state"] == "closed"
-    assert fake.motor_calls[-1][1]["targetPositions"] == [0., 0.]
+    assert last_finger_targets(fake, controller) == [0., 0.]
     assert closed["franka"]["position_tracking_error_cm"] == 0.
     assert closed["franka"]["orientation_tracking_error_deg"] == 0.
 
     opened = controller.attach(prediction(release=True))
     assert opened["gripper"]["state"] == "open"
-    assert fake.motor_calls[-1][1]["targetPositions"] == [.04, .04]
+    assert last_finger_targets(fake, controller) == [.04, .04]
     controller.close()
     assert fake.disconnected and controller.client == -1
+
+
+def test_invalid_release_still_opens_fingers_and_keeps_stepping_arm():
+    fake = FakeBullet()
+    controller = LiveFrankaPyBulletController(
+        gui=False, mapper=PoseMapper((0., 0., 0.), (1., 0., 0., 0.)),
+        simulation_steps=2, bullet=fake)
+    controller.attach(prediction(grasp=True))
+    steps_before = fake.steps
+    released = controller.attach(prediction(release=True, valid=False))
+    assert released["gripper"]["state"] == "open"
+    assert released["gripper"]["command_source"] == "release_event"
+    assert last_finger_targets(fake, controller) == [.04, .04]
+    assert fake.steps == steps_before + 2
+    assert released["franka"]["pose_command"] == "held_last_valid"
+
+
+def test_holding_hysteresis_recovers_missed_event_pulses():
+    fake = FakeBullet()
+    controller = LiveFrankaPyBulletController(gui=False, bullet=fake)
+    closed = controller.attach(prediction(holding=.9))
+    assert closed["gripper"]["state"] == "closed"
+    assert closed["gripper"]["command_source"] == "holding_fallback"
+    opened = controller.attach(prediction(holding=.1, valid=False))
+    assert opened["gripper"]["state"] == "open"
+    assert opened["gripper"]["command_source"] == "holding_fallback"

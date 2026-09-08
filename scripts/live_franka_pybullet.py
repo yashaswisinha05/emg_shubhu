@@ -28,7 +28,7 @@ def choose_trial(root, seed):
 
 
 def replay_csv(predictor, controller, trial_csv, interval_s, speed=1.,
-               emit_fn=emit, sleep_fn=time.sleep):
+               settle_steps=240, emit_fn=emit, sleep_fn=time.sleep):
     """Causally replay one recorded trial using only its wearable columns."""
     path = Path(trial_csv).expanduser().resolve()
     if not path.is_file():
@@ -76,8 +76,9 @@ def replay_csv(predictor, controller, trial_csv, interval_s, speed=1.,
         emit_fn(result)
         predictions += 1
         last_prediction = stamp
+    settled = controller.settle(settle_steps) if hasattr(controller, "settle") else None
     emit_fn({"event": "replay_complete", "trial": str(path),
-             "predictions": predictions})
+             "predictions": predictions, "final_settle": settled})
     return predictions
 
 
@@ -106,9 +107,15 @@ def main():
     parser.add_argument("--home-position", type=float, nargs=3, default=(.45, 0., .50))
     parser.add_argument("--home-orientation-wxyz", type=float, nargs=4,
                         default=(0., 1., 0., 0.))
-    parser.add_argument("--simulation-steps", type=int, default=10)
+    parser.add_argument("--simulation-steps", type=int, default=24,
+                        help="Physics settling steps after each model prediction")
+    parser.add_argument("--final-settle-steps", type=int, default=240,
+                        help="Simulation steps after recorded data ends")
+    parser.add_argument("--holding-close-threshold", type=float, default=.8)
+    parser.add_argument("--holding-open-threshold", type=float, default=.2)
     args = parser.parse_args()
-    if min(args.interval_ms, args.warmup_ms, args.poll_ms) <= 0 or args.speed < 0:
+    if (min(args.interval_ms, args.warmup_ms, args.poll_ms) <= 0
+            or min(args.speed, args.final_settle_steps) < 0):
         parser.error("interval, warmup and poll must be positive")
     if args.trial_root:
         try:
@@ -125,7 +132,9 @@ def main():
     try:
         controller = LiveFrankaPyBulletController(
             gui=not args.headless, mapper=mapper, base_position=args.robot_base,
-            simulation_steps=args.simulation_steps)
+            simulation_steps=args.simulation_steps,
+            holding_close_threshold=args.holding_close_threshold,
+            holding_open_threshold=args.holding_open_threshold)
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
     emit({"event": "franka_ready", "input": "4 EMG + 24 IMU only",
@@ -133,7 +142,8 @@ def main():
     try:
         if args.trial_csv:
             replay_csv(predictor, controller, args.trial_csv,
-                       args.interval_ms / 1000, args.speed)
+                       args.interval_ms / 1000, args.speed,
+                       args.final_settle_steps)
         elif args.delsys_sdk_path:
             delsys_loop(predictor, controller, args.delsys_sdk_path,
                         args.interval_ms / 1000, args.poll_ms / 1000)
