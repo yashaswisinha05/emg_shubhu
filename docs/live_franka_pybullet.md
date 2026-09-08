@@ -89,6 +89,13 @@ so the starting point remains fixed, and applies the same rotation to the
 predicted end-effector orientation. Override or disable it with
 `--trajectory-z-rotation-deg ANGLE` (use `0` to disable).
 
+For robust checkpoints, confidence-aware SE(3) filtering is enabled by default.
+It applies workspace, Cartesian velocity/acceleration, and angular
+velocity/acceleration constraints before IK. Learned uncertainty can only lower
+control authority. An imminent grasp/release estimate can slow motion but never
+raise a physical limit. Use `--disable-confidence-aware-control` for the direct
+IK ablation.
+
 Without an explicit calibration, the first predicted pose is anchored at
 `--home-position 0.45 0 0.50` and subsequent relative position and orientation
 changes are preserved. This synthetic anchor is useful for visualization, but

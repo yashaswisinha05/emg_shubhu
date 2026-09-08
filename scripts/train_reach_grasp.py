@@ -294,7 +294,7 @@ def tolerance_report(predictions, thresholds, transition):
     decoded = transition_predictions(predictions, transition)
     return {str(ms): {"event_heads": metrics(predictions, thresholds, ms / 1000),
                      "holding_transitions": metrics(decoded, [.5, .5], ms / 1000)}
-            for ms in [100, 150, 200, 300]}
+            for ms in [100, 150, 200, 300, 1500]}
 
 
 def main():
@@ -495,7 +495,7 @@ def main():
         for e, key in enumerate(["grasp", "release"])}
     if args.annotation_aware:
         results["schedule_by_tolerance"] = {str(ms): {key: event_summary(schedule, e, .5, ms / 1000)
-            for e, key in enumerate(["grasp", "release"])} for ms in [100, 150, 200, 300]}
+            for e, key in enumerate(["grasp", "release"])} for ms in [100, 150, 200, 300, 1500]}
     for modality, path in selected_paths.items():
         state = torch.load(path, map_location=args.device, weights_only=False)
         model = MODEL_CLASS(**state["model_args"]).to(args.device)

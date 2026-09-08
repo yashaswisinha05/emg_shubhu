@@ -87,7 +87,7 @@ class LiveFrankaPyBulletController:
     def __init__(self, gui=True, mapper=None, base_position=(0., 0., 0.),
                  simulation_steps=24, open_width_m=.04, closed_width_m=0.,
                  grasp_probability_threshold=.9, release_probability_threshold=.9,
-                 bullet=None, data_path=None):
+                 bullet=None, data_path=None, motion_filter=None):
         if simulation_steps < 1:
             raise ValueError("simulation_steps must be positive")
         if not 0 <= closed_width_m < open_width_m <= .04:
@@ -114,6 +114,7 @@ class LiveFrankaPyBulletController:
             basePosition=list(base_position), useFixedBase=True,
             physicsClientId=self.client)
         self.mapper = mapper or PoseMapper()
+        self.motion_filter = motion_filter
         self.simulation_steps = int(simulation_steps)
         self.widths = {"open": float(open_width_m), "closed": float(closed_width_m)}
         self.event_thresholds = {"grasp": float(grasp_probability_threshold),
@@ -166,6 +167,8 @@ class LiveFrankaPyBulletController:
         if hasattr(self.p, "removeAllUserDebugItems"):
             self.p.removeAllUserDebugItems(physicsClientId=self.client)
         self.mapper.reset()
+        if self.motion_filter is not None:
+            self.motion_filter.reset()
         self.gripper = "open"
         self.last_target = None
         self.previous_model_position = None
@@ -321,7 +324,15 @@ class LiveFrankaPyBulletController:
             return prediction
         position = np.array([prediction["position_m"][axis] for axis in "xyz"])
         quaternion = prediction["orientation_quaternion_wxyz"]
-        target_position, target_quaternion, mode = self.mapper.map(position, quaternion)
+        requested_position, requested_quaternion, mode = self.mapper.map(position, quaternion)
+        target_position, target_quaternion = requested_position, requested_quaternion
+        control = None
+        if self.motion_filter is not None:
+            target_position, target_quaternion, control = self.motion_filter.step(
+                requested_position, requested_quaternion,
+                prediction.get("time_s"), prediction.get("position_uncertainty_cm"),
+                prediction.get("orientation_uncertainty_deg"),
+                prediction.get("event_time_estimate_ms"), self.gripper)
         self._draw_reference()
         solution = self.p.calculateInverseKinematics(
             self.robot, self.ee_link, targetPosition=target_position.tolist(),
@@ -349,21 +360,23 @@ class LiveFrankaPyBulletController:
         actual_position = np.asarray(state[4], dtype=float)
         actual_quaternion = self._wxyz(state[5])
         if self.previous_model_position is None:
-            self._marker(target_position, [0., .7, .7], "MODEL START")
+            self._marker(requested_position, [0., .7, .7], "MODEL START")
         else:
-            self._debug_line(self.previous_model_position, target_position,
+            self._debug_line(self.previous_model_position, requested_position,
                              [0., .8, .9], 4.)
         if self.previous_actual_position is not None:
             self._debug_line(self.previous_actual_position, actual_position,
                              [1., .45, 0.], 4.)
-        self.previous_model_position = target_position.copy()
+        self.previous_model_position = requested_position.copy()
         self.previous_actual_position = actual_position.copy()
         if command == "close":
             self._marker(target_position, [.9, 0., .9], "GRASP")
         elif command == "open":
             self._marker(target_position, [.9, .1, .1], "RELEASE")
         prediction["franka"] = {
-            "mapping": mode, "target_position_m": target_position.tolist(),
+            "mapping": mode, "requested_position_m": requested_position.tolist(),
+            "requested_orientation_wxyz": requested_quaternion.tolist(),
+            "target_position_m": target_position.tolist(),
             "target_orientation_wxyz": target_quaternion.tolist(),
             "target_joint_angles_deg": np.degrees(target_joints).tolist(),
             "actual_joint_angles_deg": np.degrees(actual_joints).tolist(),
@@ -372,7 +385,8 @@ class LiveFrankaPyBulletController:
             "position_tracking_error_cm": float(100 * np.linalg.norm(
                 actual_position - target_position)),
             "orientation_tracking_error_deg": quaternion_angle_degrees(
-                actual_quaternion, target_quaternion)}
+                actual_quaternion, target_quaternion),
+            "confidence_aware_control": control}
         return prediction
 
     def close(self):

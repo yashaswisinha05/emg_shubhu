@@ -78,6 +78,25 @@ python scripts/live_franka_pybullet.py \
 ```
 
 JSON predictions include `position_uncertainty_cm`,
-`orientation_uncertainty_deg`, and `event_time_estimate_ms`. The current Franka
-controller continues using its validated state machine; these uncertainty
-values are exposed for the next confidence-aware controls experiment.
+`orientation_uncertainty_deg`, and `event_time_estimate_ms`. The Franka script
+uses these values in its confidence-aware SE(3) command filter by default.
+
+The results include a 1500 ms coarse event-success tolerance as requested, but
+checkpoint/decoder selection remains at 200 ms. The coarse number must not be
+used alone because a trial-schedule predictor can score well at that tolerance.
+
+## Confidence-aware Franka control
+
+Before IK, the mapped model pose passes through a causal controller that:
+
+- clips XYZ to a configured robot workspace;
+- bounds Cartesian speed and acceleration;
+- bounds angular speed and angular acceleration;
+- reduces motion authority as predicted pose uncertainty rises;
+- decelerates to a hold instead of discontinuously setting velocity to zero;
+- slows the approach when the model assigns at least 0.5 probability to a
+  grasp/release within 150 ms.
+
+Safety limits are deterministic. EMG cannot increase them; its anticipatory
+event estimate can only slow the robot. Disable the filter for an ablation with
+`--disable-confidence-aware-control`.

@@ -81,7 +81,7 @@ def calibrate_run(options):
                 transitions, state["event_thresholds"], tolerance),
             "combined": train.metrics(combined, [.5, .5], tolerance),
             "by_tolerance_ms": {str(ms): train.metrics(combined, [.5, .5], ms / 1000)
-                                for ms in [100, 150, 200, 300]}}
+                                for ms in [100, 150, 200, 300, 1500]}}
         results["hybrid_event_decoding"][modality] = report
         if modality == "emg+imu":
             removed = train.predict(model, test_trials, state["normalization"], options,
@@ -90,7 +90,7 @@ def calibrate_run(options):
                 "combined": train.metrics(apply_decoder(removed, decoder), [.5, .5], tolerance),
                 "by_tolerance_ms": {str(ms): train.metrics(
                     apply_decoder(removed, decoder), [.5, .5], ms / 1000)
-                    for ms in [100, 150, 200, 300]}}
+                    for ms in [100, 150, 200, 300, 1500]}}
         print(modality, "hybrid decoder", decoder,
               "test", report["combined"]["event_macro_f1"], flush=True)
     results_path.write_text(json.dumps(results, indent=2))

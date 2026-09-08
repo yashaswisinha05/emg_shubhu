@@ -18,6 +18,7 @@ from scripts.live_reach_grasp_orientation import (EMG_NAMES, IMU_NAMES,
 from emg_touch.live_reach_grasp import LiveReachGraspPredictor
 from emg_touch.physics.franka_pybullet import (LiveFrankaPyBulletController,
                                                 PoseMapper)
+from emg_touch.physics.confidence_se3 import ConfidenceAwareSE3Controller
 
 
 def choose_trial(root, seed):
@@ -128,6 +129,17 @@ def main():
                         help="Simulation steps after recorded data ends")
     parser.add_argument("--grasp-probability-threshold", type=float, default=.9)
     parser.add_argument("--release-probability-threshold", type=float, default=.9)
+    parser.add_argument("--disable-confidence-aware-control", action="store_true")
+    parser.add_argument("--workspace-lower", type=float, nargs=3,
+                        default=(.20, -.45, .15))
+    parser.add_argument("--workspace-upper", type=float, nargs=3,
+                        default=(.75, .45, .85))
+    parser.add_argument("--max-cartesian-velocity-mps", type=float, default=.35)
+    parser.add_argument("--max-cartesian-acceleration-mps2", type=float, default=1.2)
+    parser.add_argument("--max-angular-velocity-degps", type=float, default=90.)
+    parser.add_argument("--max-angular-acceleration-degps2", type=float, default=360.)
+    parser.add_argument("--position-hold-uncertainty-cm", type=float, default=20.)
+    parser.add_argument("--orientation-hold-uncertainty-deg", type=float, default=60.)
     args = parser.parse_args()
     if (min(args.interval_ms, args.warmup_ms, args.poll_ms) <= 0
             or min(args.speed, args.final_settle_steps) < 0):
@@ -145,16 +157,32 @@ def main():
     except ValueError as error:
         parser.error(str(error))
     predictor = LiveReachGraspPredictor(args.checkpoint, args.device, args.warmup_ms)
+    motion_filter = None
+    if not args.disable_confidence_aware_control:
+        try:
+            motion_filter = ConfidenceAwareSE3Controller(
+                args.workspace_lower, args.workspace_upper,
+                args.max_cartesian_velocity_mps,
+                args.max_cartesian_acceleration_mps2,
+                args.max_angular_velocity_degps,
+                args.max_angular_acceleration_degps2,
+                position_hold_uncertainty_cm=args.position_hold_uncertainty_cm,
+                orientation_hold_uncertainty_deg=args.orientation_hold_uncertainty_deg)
+        except ValueError as error:
+            parser.error(str(error))
     try:
         controller = LiveFrankaPyBulletController(
             gui=not args.headless, mapper=mapper, base_position=args.robot_base,
             simulation_steps=args.simulation_steps,
             grasp_probability_threshold=args.grasp_probability_threshold,
-            release_probability_threshold=args.release_probability_threshold)
+            release_probability_threshold=args.release_probability_threshold,
+            motion_filter=motion_filter)
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
     emit({"event": "franka_ready", "input": "4 EMG + 24 IMU only",
-          "ik_target": "model XYZ + model quaternion", "gui": not args.headless})
+          "ik_target": "constrained model XYZ + model quaternion",
+          "confidence_aware_control": motion_filter is not None,
+          "gui": not args.headless})
     try:
         if args.trial_csv:
             replay_csv(predictor, controller, args.trial_csv,

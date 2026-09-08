@@ -46,7 +46,8 @@ def test_soft_training_smoke(tmp_path, monkeypatch):
         "--device", "cpu", "--epochs", "1", "--raw-rate-hz", "1000", "--annotation-aware"])
     trainer.main()
     results = json.loads((out / "results.json").read_text())
-    assert set(results["emg+imu"]["by_tolerance_ms"]) == {"100", "150", "200", "300"}
+    assert set(results["emg+imu"]["by_tolerance_ms"]) == {
+        "100", "150", "200", "300", "1500"}
     assert results["emg"]["holding_boundary_excluded"]
     state = torch.load(out / "emg_imu_best.pt", weights_only=False)
     assert state["format"] == "reach_grasp_annotation_v1"
