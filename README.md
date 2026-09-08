@@ -806,6 +806,13 @@ python scripts/predict_csv.py path/to/trial.csv \
 
 The output contains normalized coordinates, pixel coordinates, and samples from the predictive distribution.
 
+### Live Franka simulation
+
+To transfer the live EMG+IMU model's predicted XYZ and orientation directly
+to Franka Panda pose IK, while grasp/release triggers operate its fingers, see
+[`docs/live_franka_pybullet.md`](docs/live_franka_pybullet.md). The live robot
+input contains no VIVE channels.
+
 ## Switching from MDN to CVAE
 
 The recommended default is:

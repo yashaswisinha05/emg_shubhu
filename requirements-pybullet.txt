@@ -1,0 +1,2 @@
+# Optional live Franka simulation backend (Linux/Windows wheels are recommended).
+pybullet==3.2.7
