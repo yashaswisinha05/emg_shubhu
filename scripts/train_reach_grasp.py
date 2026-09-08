@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from emg_touch.data.reach_grasp import preprocess
 from emg_touch.models.reach_grasp import ReachGraspModel
+from emg_touch.data.annotation_uncertainty import soften_events, holding_transitions
 
 
 def normalization(trials):
@@ -57,11 +58,12 @@ def batches(trials, stats, batch_size, device, shuffle=False):
                 usable[i, :n] = valid.mean(1) >= .75
             b[key] = torch.from_numpy(x).to(device)
             b[key + "_usable"] = torch.from_numpy(usable).to(device)
-        for key, width in [("labels", 3), ("pose", 3), ("pose_mask", 1)]:
+        for key, width in [("labels", 3), ("label_mask", 3), ("pose", 3), ("pose_mask", 1)]:
             x = np.zeros((len(selected), length, width), dtype="float32")
             for i, t in enumerate(selected):
                 n = len(t["time"])
-                value = (np.column_stack([t["holding"], t["event_labels"]]) if key == "labels" else
+                value = (np.column_stack([t.get("holding_certain", np.ones(n)), np.ones((n, 2))]) if key == "label_mask" else
+                         np.column_stack([t["holding"], t["event_labels"]]) if key == "labels" else
                          (t["position"] - stats["position"]["mean"]) / stats["position"]["std"]
                          if key == "pose" else t["pose_valid"][:, None])
                 x[i, :n] = value
@@ -91,7 +93,8 @@ def event_summary(predictions, event, threshold, tolerance):
     tp, fp, fn, latency, minutes = 0, 0, 0, [], 0.
     for item in predictions:
         actual = item["trial"]["events"][event]
-        detections = detect(item["trial"]["time"], item["prob"][:, event + 1], threshold)
+        detections = (item["detections"][event] if "detections" in item else
+                      detect(item["trial"]["time"], item["prob"][:, event + 1], threshold))
         match = [d for d in detections if abs(d - actual) <= tolerance]
         if match:
             chosen = min(match, key=lambda d: abs(d - actual))
@@ -132,21 +135,51 @@ def metrics(predictions, thresholds, tolerance):
               for e, key in enumerate(["grasp", "release"])}
     result["event_macro_f1"] = (result["grasp"]["f1"] + result["release"]["f1"]) / 2
     tp = fp = fn = 0
+    full_tp = full_fp = full_fn = 0
+    certain_frames = available_frames = 0
     distances = []
     for item in predictions:
-        valid = item["valid"]
+        valid = item["valid"] & item["trial"].get("holding_certain", np.ones_like(item["valid"]))
         true = item["trial"]["holding"].astype(bool)
         pred = item["prob"][:, 0] >= .5
+        full = item["valid"]
+        full_tp += int((pred & true & full).sum())
+        full_fp += int((pred & ~true & full).sum())
+        full_fn += int((~pred & true & full).sum())
+        certain_frames += int(valid.sum())
+        available_frames += int(full.sum())
         tp += int((pred & true & valid).sum())
         fp += int((pred & ~true & valid).sum())
         fn += int((~pred & true & valid).sum())
-        pm = valid & item["trial"]["pose_valid"]
+        pm = item["valid"] & item["trial"]["pose_valid"]
         distances.extend(np.linalg.norm(item["position"][pm] - item["trial"]["position"][pm], axis=-1) * 100)
     result["holding_f1"] = 2 * tp / max(1, 2 * tp + fp + fn)
+    result["holding_boundary_excluded"] = any("holding_certain" in i["trial"] for i in predictions)
+    result["holding_f1_all_valid_frames"] = 2 * full_tp / max(1, 2 * full_tp + full_fp + full_fn)
+    result["holding_certain_fraction_of_valid"] = certain_frames / max(1, available_frames)
     result["position_cm"] = float(np.mean(distances)) if distances else None
     result["valid_pose_frames"] = len(distances)
     result["valid_wearable_fraction"] = float(np.mean(np.concatenate([i["valid"] for i in predictions])))
     return result
+
+
+def transition_predictions(predictions, parameters):
+    return [dict(item, detections=holding_transitions(item["trial"]["time"],
+        item["prob"][:, 0], item["valid"], **parameters)) for item in predictions]
+
+
+def choose_transition(predictions, tolerance):
+    candidates = [{"low": low, "high": high, "persistence_s": persistence}
+                  for low, high in [(.3, .7), (.4, .6)] for persistence in [.03, .06, .1]]
+    return max(candidates, key=lambda parameters: metrics(
+        transition_predictions(predictions, parameters), [.5, .5], tolerance)["event_macro_f1"])
+
+
+def tolerance_report(predictions, thresholds, transition):
+    decoded = transition_predictions(predictions, transition)
+    return {str(ms): {"event_heads": metrics(predictions, thresholds, ms / 1000),
+                     "holding_transitions": metrics(decoded, [.5, .5], ms / 1000)}
+            for ms in [100, 150, 200, 300]}
 
 
 def main():
@@ -161,13 +194,23 @@ def main():
     p.add_argument("--raw-rate-hz", type=float, default=1259.4)
     p.add_argument("--event-origin", choices=["auto", "start"], default="auto")
     p.add_argument("--patience", type=int, default=8)
+    p.add_argument("--annotation-aware", action="store_true")
+    p.add_argument("--uncertainty-ms", type=float, default=200.)
+    p.add_argument("--selection-tolerance-ms", type=float, default=200.)
     args = p.parse_args()
     if args.epochs < 1 or args.batch_size < 1 or args.patience < 1:
         p.error("epochs, batch size, patience must be positive")
+    if args.uncertainty_ms <= 0 or args.selection_tolerance_ms <= 0:
+        p.error("uncertainty and selection tolerance must be positive")
+    if args.annotation_aware and args.output_dir == Path("runs/reach_grasp_seed42"):
+        args.output_dir = Path("runs/reach_grasp_annotation_seed42")
+    tolerance = args.selection_tolerance_ms / 1000 if args.annotation_aware else .15
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         p.error("use an empty output directory")
     settings = {"raw_rate_hz": args.raw_rate_hz, "rate_hz": 100., "gap_s": .02,
                 "event_origin": args.event_origin, "event_pulse_s": .1}
+    if args.annotation_aware:
+        settings["annotation_uncertainty_s"] = args.uncertainty_ms / 1000
     files = sorted(Path(args.root).rglob("trial_*.csv"))
     if not files:
         p.error("no trial_*.csv under root")
@@ -179,7 +222,10 @@ def main():
             continue
         hashes[digest] = str(path)
         try:
-            trials.append(preprocess(path, settings))
+            trial = preprocess(path, settings)
+            if args.annotation_aware:
+                soften_events(trial, args.uncertainty_ms / 1000)
+            trials.append(trial)
         except (ValueError, KeyError) as exc:
             rejected[str(path)] = str(exc)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -196,7 +242,10 @@ def main():
         for k, v in [("train", train), ("validation", validation), ("test", test)]}, indent=2))
     print(f"Trials: train={len(train)}, validation={len(validation)}, test={len(test)}, rejected={len(rejected)}", flush=True)
     labels = np.concatenate([np.column_stack([t["holding"], t["event_labels"]]) for t in train])
-    weights = torch.tensor(np.clip((len(labels) - labels.sum(0)) / np.maximum(labels.sum(0), 1), 1, 50),
+    label_mask = np.concatenate([np.column_stack([t.get("holding_certain", np.ones(len(t["time"]))),
+                                                 np.ones((len(t["time"]), 2))]) for t in train])
+    positive = (labels * label_mask).sum(0)
+    weights = torch.tensor(np.clip((label_mask.sum(0) - positive) / np.maximum(positive, 1), 1, 50),
                            dtype=torch.float32, device=args.device)
     selected_paths = {}
     for modality in args.models:
@@ -216,7 +265,8 @@ def main():
                 optimizer.zero_grad(set_to_none=True)
                 out = model(b["emg"], b["imu"])
                 event_loss = F.binary_cross_entropy_with_logits(out["logits"], b["labels"], pos_weight=weights, reduction="none")
-                loss = event_loss[valid].mean()
+                loss_mask = valid.unsqueeze(-1) * b["label_mask"]
+                loss = (event_loss * loss_mask).sum() / loss_mask.sum().clamp_min(1)
                 pose_mask = valid & b["pose_mask"].squeeze(-1).bool()
                 if pose_mask.any():
                     loss = loss + .2 * F.smooth_l1_loss(out["position"][pose_mask], b["pose"][pose_mask])
@@ -230,17 +280,17 @@ def main():
                 raise ValueError(f"no usable training frames for {modality}")
             predictions = predict(model, validation, stats, args)
             thresholds = [max([.2, .35, .5, .65, .8], key=lambda threshold:
-                event_summary(predictions, e, threshold, .15)["f1"]) for e in range(2)]
-            report = metrics(predictions, thresholds, .15)
+                event_summary(predictions, e, threshold, tolerance)["f1"]) for e in range(2)]
+            report = metrics(predictions, thresholds, tolerance)
             # Primary task is interaction; pose is reported, not used to disguise event failures.
             selection = 1 - report["event_macro_f1"] + .05 * (1 - report["holding_f1"])
             print(modality, epoch, report, flush=True)
             history.append({"epoch": epoch, "validation": report, "thresholds": thresholds})
             if selection < best:
                 best, stale = selection, 0
-                torch.save({"format": "reach_grasp_v1", "model_args": {"modality": modality},
+                torch.save({"format": "reach_grasp_annotation_v1" if args.annotation_aware else "reach_grasp_v1", "model_args": {"modality": modality},
                     "state_dict": model.state_dict(), "normalization": stats, "preprocessing": settings,
-                    "event_thresholds": thresholds, "event_tolerance_s": .15, "epoch": epoch,
+                    "event_thresholds": thresholds, "event_tolerance_s": tolerance, "epoch": epoch,
                     "validation": report, "seed": args.seed}, path)
             else:
                 stale += 1
@@ -249,6 +299,14 @@ def main():
         selected_paths[modality] = path
         (args.output_dir / (modality.replace("+", "_") + "_history.json")).write_text(json.dumps(history, indent=2))
     results = {}
+    # Freeze decoder choices from validation before any test evaluation.
+    if args.annotation_aware:
+        for path in selected_paths.values():
+            state = torch.load(path, map_location=args.device, weights_only=False)
+            model = ReachGraspModel(**state["model_args"]).to(args.device)
+            model.load_state_dict(state["state_dict"])
+            state["holding_decoder"] = choose_transition(predict(model, validation, stats, args), tolerance)
+            torch.save(state, path)
     # Detect a protocol shortcut: fixed trial timing can predict events without
     # observing either wearable. Fit this baseline on training trials only.
     median_events = np.median(np.stack([t["events"] for t in train]), axis=0)
@@ -260,15 +318,30 @@ def main():
             (times >= median_events[0]) & (times < median_events[0] + .1),
             (times >= median_events[1]) & (times < median_events[1] + .1)]).astype(float)
         schedule.append({"trial": trial, "prob": prob})
-    results["schedule_only_baseline"] = {key: event_summary(schedule, e, .5, .15)
+    results["schedule_only_baseline"] = {key: event_summary(schedule, e, .5, tolerance)
         for e, key in enumerate(["grasp", "release"])}
+    if args.annotation_aware:
+        results["schedule_by_tolerance"] = {str(ms): {key: event_summary(schedule, e, .5, ms / 1000)
+            for e, key in enumerate(["grasp", "release"])} for ms in [100, 150, 200, 300]}
     for modality, path in selected_paths.items():
         state = torch.load(path, map_location=args.device, weights_only=False)
         model = ReachGraspModel(**state["model_args"]).to(args.device)
         model.load_state_dict(state["state_dict"])
-        results[modality] = metrics(predict(model, test, stats, args), state["event_thresholds"], .15)
+        predictions = predict(model, test, stats, args)
+        results[modality] = metrics(predictions, state["event_thresholds"], tolerance)
+        if args.annotation_aware:
+            results[modality]["by_tolerance_ms"] = tolerance_report(predictions,
+                state["event_thresholds"], state["holding_decoder"])
         if modality == "emg+imu":
-            results["fusion_zero_emg"] = metrics(predict(model, test, stats, args, True), state["event_thresholds"], .15)
+            removed = predict(model, test, stats, args, True)
+            results["fusion_zero_emg"] = metrics(removed, state["event_thresholds"], tolerance)
+            if args.annotation_aware:
+                results["fusion_zero_emg"]["by_tolerance_ms"] = tolerance_report(removed,
+                    state["event_thresholds"], state["holding_decoder"])
+    if args.annotation_aware:
+        results["protocol"] = {"uncertainty_ms": args.uncertainty_ms,
+            "selection_tolerance_ms": args.selection_tolerance_ms,
+            "note": "Timing is relative to manual annotations; matched timing error excludes missed events. Holding F1 excludes uncertain boundaries."}
     (args.output_dir / "results.json").write_text(json.dumps(results, indent=2))
     print("TEST RESULTS", json.dumps(results, indent=2))
 
