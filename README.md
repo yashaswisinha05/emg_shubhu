@@ -910,3 +910,12 @@ bash scripts/train_reach_grasp_future_intent.sh
 ```
 
 See `docs/reach_grasp_future_intent.md` for outputs, losses and ablations.
+
+Visualize rolling future intent controlling Franka on a random recorded trial:
+
+```bash
+python scripts/visualize_future_intent_franka.py \
+  --checkpoint runs/reach_grasp_future_intent_seed42/final.pt \
+  --trial-root /home/nahar3/shubham/emg_shubhu/data/184a6ef69b83 \
+  --device cuda --trial-seed 7 --speed 1
+```

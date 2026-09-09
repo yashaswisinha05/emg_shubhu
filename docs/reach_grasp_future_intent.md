@@ -18,3 +18,25 @@ metrics; future position/orientation error by horizon; grasp/release intent
 AUROC and average precision; time-to-event MAE; and without-EMG/without-IMU
 ablations. Both `best.pt` and the identical deployment alias `final.pt` are
 written. All splits are by complete trial.
+
+## Franka future-intent replay
+
+After training, replay any recorded trial causally in PyBullet:
+
+```bash
+python scripts/visualize_future_intent_franka.py \
+  --checkpoint runs/reach_grasp_future_intent_seed42/final.pt \
+  --trial-root /home/nahar3/shubham/emg_shubhu/data/184a6ef69b83 \
+  --device cuda --trial-seed 7 --speed 1
+```
+
+Black is withheld VIVE for visual comparison, cyan is the continuously
+recomputed 250 ms command, magenta is the complete rolling one-second forecast,
+and orange is the actual Franka end effector. The robot never consumes VIVE.
+Use `--control-horizon-ms 0` to follow the current estimate or choose one of
+`100 250 500 750 1000` for receding-horizon control.
+
+Grasp and release use probability mass within `--gripper-lookahead-ms` rather
+than the coarse “event anywhere in the next second” probability. This prevents
+the gripper from actuating a full second early. Both actuation thresholds default
+to 0.9 and the gripper state is latched until the opposite event fires.
