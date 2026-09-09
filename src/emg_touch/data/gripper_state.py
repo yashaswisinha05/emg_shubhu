@@ -12,6 +12,7 @@ def add_gripper_state(path, trial, max_gap_s=.02):
         raise ValueError("missing per-timestep gripper_state or time_perf_counter column")
     time = pd.to_numeric(frame["time_perf_counter"], errors="coerce").to_numpy()
     state = frame["gripper_state"].astype("string").str.strip().str.lower()
+    state = state.replace({"0": "open", "1": "close", "0.0": "open", "1.0": "close"})
     unknown = sorted(set(state.dropna()) - {"open", "close"})
     if unknown:
         raise ValueError("unknown gripper_state value(s): " + ", ".join(unknown[:5]))

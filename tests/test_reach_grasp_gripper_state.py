@@ -104,6 +104,22 @@ def test_gripper_state_alignment_and_unknown_label(tmp_path):
         assert "unknown gripper_state" in str(error)
 
 
+def test_gripper_state_accepts_numeric_open_close_convention(tmp_path):
+    """Some capture setups (e.g. shubham_open/shubham_close) log gripper_state
+    as 0/1 instead of the string labels -- 0 must resolve the same as "open"
+    and 1 the same as "close"."""
+    data = frame()
+    data = data.drop(columns=["t_grasp_perf", "t_release_perf"])
+    data["gripper_state"] = np.where(data.time_perf_counter < 100.3, 0,
+                              np.where(data.time_perf_counter < 100.7, 1, 0))
+    path = tmp_path / "trial.csv"
+    data.to_csv(path, index=False)
+    trial = add_gripper_state(path, preprocess(path, {**settings(), "require_events": False}))
+    assert trial["gripper_state"][10] == 0
+    assert trial["gripper_state"][40] == 1
+    assert trial["gripper_state"][80] == 0
+
+
 def test_too_few_trials_reports_why(tmp_path, monkeypatch):
     """A run that fails the '>= 20 valid trials' gate must still explain
     itself: which files were found, how many were rejected and why, with
