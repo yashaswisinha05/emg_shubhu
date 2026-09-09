@@ -862,3 +862,14 @@ At minimum, run these ablations with identical participant splits and seeds:
 9. Teacher without EMG-conditioned lookback gating.
 
 Primary selection metrics should be subject-aggregated median pixel error, 90th-percentile pixel error, target-box hit rate, and performance versus cue-relative cutoff.
+
+### EMG-only grasp onset
+
+To train the dedicated causal EMG grasp-onset detector (separate from the
+multitask pose/holding/release models), run:
+
+```bash
+bash scripts/train_emg_grasp_onset.sh
+```
+
+See `docs/emg_grasp_onset.md` for the architecture and mandatory controls.
