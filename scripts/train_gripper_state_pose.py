@@ -196,6 +196,11 @@ def main():
                 "require_events": False}
     trials, rejected, hashes = [], {}, {}
     paths = sorted({p for root in args.root for p in Path(root).rglob("trial_*.csv")})
+    if not paths:
+        raise ValueError(
+            "no files matched 'trial_*.csv' (recursively) under: "
+            + ", ".join(args.root)
+            + " -- check the directory paths and that trial files are named trial_*.csv")
     for path in paths:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if digest in hashes:
@@ -206,12 +211,27 @@ def main():
         except (ValueError, KeyError) as error:
             rejected[str(path)] = str(error)
     if len(trials) < 20:
-        raise ValueError("need at least 20 valid trials")
+        # Surface WHY, before raising -- data_audit.json previously was only
+        # written after this check, so a failed run gave zero diagnostic
+        # information beyond "need at least 20 valid trials".
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        (args.output_dir / "data_audit.json").write_text(json.dumps(
+            {"accepted": {t["path"]: t["audit"] for t in trials}, "rejected": rejected}, indent=2))
+        reasons = {}
+        for message in rejected.values():
+            reasons[message] = reasons.get(message, 0) + 1
+        summary = "\n".join(f"  {count:4d}x  {reason}" for reason, count in
+                            sorted(reasons.items(), key=lambda kv: -kv[1])[:10])
+        raise ValueError(
+            f"need at least 20 valid trials, found {len(trials)} valid out of "
+            f"{len(paths)} files matched under {', '.join(args.root)}\n"
+            f"rejection reasons (see {args.output_dir / 'data_audit.json'} for the full list):\n"
+            f"{summary or '  (no files were rejected -- fewer than 20 trial_*.csv files exist)'}")
     np.random.default_rng(args.seed).shuffle(trials)
     count = max(1, round(.2 * len(trials)))
     test, validation, train = trials[:count], trials[count:2*count], trials[2*count:]
     stats = base.normalization(train)
-    args.output_dir.mkdir(parents=True)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "data_audit.json").write_text(json.dumps(
         {"accepted": {t["path"]: t["audit"] for t in trials}, "rejected": rejected}, indent=2))
     (args.output_dir / "splits.json").write_text(json.dumps({k: [t["path"] for t in v]

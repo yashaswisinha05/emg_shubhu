@@ -104,6 +104,44 @@ def test_gripper_state_alignment_and_unknown_label(tmp_path):
         assert "unknown gripper_state" in str(error)
 
 
+def test_too_few_trials_reports_why(tmp_path, monkeypatch):
+    """A run that fails the '>= 20 valid trials' gate must still explain
+    itself: which files were found, how many were rejected and why, with
+    data_audit.json written out before raising, not only on success."""
+    root = tmp_path / "data"
+    root.mkdir()
+    for index in range(5):
+        data = frame()
+        data = data.drop(columns=["t_grasp_perf", "t_release_perf"])
+        data.to_csv(root / f"trial_{index:03}.csv", index=False)  # no gripper_state column
+    output = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", ["train", "--root", str(root), "--output-dir",
+        str(output), "--device", "cpu", "--epochs", "1", "--raw-rate-hz", "1000"])
+    try:
+        trainer.main()
+        assert False, "too few valid trials must raise"
+    except ValueError as error:
+        message = str(error)
+        assert "found 0 valid out of 5 files" in message
+        assert "data_audit.json" in message
+    audit = json.loads((output / "data_audit.json").read_text())
+    assert len(audit["rejected"]) == 5
+
+
+def test_no_matching_files_reports_the_searched_roots(tmp_path, monkeypatch):
+    empty_root = tmp_path / "empty"
+    empty_root.mkdir()
+    output = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", ["train", "--root", str(empty_root), "--output-dir",
+        str(output), "--device", "cpu", "--epochs", "1", "--raw-rate-hz", "1000"])
+    try:
+        trainer.main()
+        assert False, "no matching files must raise"
+    except ValueError as error:
+        assert str(empty_root) in str(error)
+        assert "trial_*.csv" in str(error)
+
+
 def test_training_smoke(tmp_path, monkeypatch):
     torch.set_num_threads(1)
     root = tmp_path / "data"
