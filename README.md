@@ -899,3 +899,14 @@ python scripts/visualize_model_output_franka.py \
 
 Here the EMG+IMU model supplies XYZ, orientation and release, while the
 dedicated EMG-only model supplies grasp onset. VIVE is comparison-only.
+
+### One-second trajectory and interaction intent
+
+Train the causal EMG+IMU model that forecasts SE(3) waypoints, endpoint,
+grasp and release intent through one second:
+
+```bash
+bash scripts/train_reach_grasp_future_intent.sh
+```
+
+See `docs/reach_grasp_future_intent.md` for outputs, losses and ablations.
