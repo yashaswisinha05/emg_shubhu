@@ -123,6 +123,23 @@ def usable(b, modality):
     return b[modality + "_usable"]
 
 
+def masked_emg_input(packed, ratio, span):
+    """Hide complete causal EMG time blocks and return valid hidden targets."""
+    features = packed.shape[-1] // 2
+    if packed.shape[-1] != 2 * features or features < 1:
+        raise ValueError("packed EMG must contain values followed by validity flags")
+    batch, frames, _ = packed.shape
+    blocks = (frames + span - 1) // span
+    selected = (torch.rand(batch, blocks, 1, device=packed.device) < ratio)
+    selected = selected.repeat_interleave(span, dim=1)[:, :frames]
+    observed = packed[..., features:] > .5
+    hidden = selected.expand(-1, -1, features) & observed
+    masked = packed.clone()
+    masked[..., :features] = masked[..., :features].masked_fill(hidden, 0.)
+    masked[..., features:] = masked[..., features:].masked_fill(hidden, 0.)
+    return masked, packed[..., :features].detach(), hidden
+
+
 def detect(times, probabilities, threshold, refractory=.4, valid=None):
     """Causal rising-threshold detector; unknown samples never rearm it.
 
@@ -321,14 +338,24 @@ def main():
                    help="Auxiliary grasp/release time-to-event distribution loss")
     p.add_argument("--pose-uncertainty-weight", type=float, default=0.,
                    help="Heteroscedastic position/orientation NLL weight")
+    p.add_argument("--masked-emg-reconstruction-weight", type=float, default=0.,
+                   help="Auxiliary MSE weight for causally reconstructing hidden EMG features")
+    p.add_argument("--emg-reconstruction-mask-ratio", type=float, default=.35)
+    p.add_argument("--emg-reconstruction-mask-span", type=int, default=5,
+                   help="Contiguous hidden EMG frames per mask block")
     args = p.parse_args()
     if args.epochs < 1 or args.batch_size < 1 or args.patience < 1:
         p.error("epochs, batch size, patience must be positive")
     if args.uncertainty_ms <= 0 or args.selection_tolerance_ms <= 0:
         p.error("uncertainty and selection tolerance must be positive")
     if min(args.orientation_weight, args.augmentation_strength,
-           args.event_time_weight, args.pose_uncertainty_weight) < 0:
+           args.event_time_weight, args.pose_uncertainty_weight,
+           args.masked_emg_reconstruction_weight) < 0:
         p.error("loss weights and augmentation strength cannot be negative")
+    if not 0 < args.emg_reconstruction_mask_ratio < 1:
+        p.error("EMG reconstruction mask ratio must be in (0, 1)")
+    if args.emg_reconstruction_mask_span < 1:
+        p.error("EMG reconstruction mask span must be positive")
     if args.annotation_aware and args.output_dir == Path("runs/reach_grasp_seed42"):
         args.output_dir = Path("runs/reach_grasp_annotation_seed42")
     tolerance = args.selection_tolerance_ms / 1000 if args.annotation_aware else .15
@@ -386,12 +413,15 @@ def main():
         torch.manual_seed(args.seed)
         model_args = {"modality": modality, **MODEL_EXTRA_ARGS}
         model = MODEL_CLASS(**model_args).to(args.device)
+        if (args.masked_emg_reconstruction_weight and modality != "imu"
+                and not hasattr(model, "emg_reconstruction")):
+            raise ValueError("masked EMG reconstruction requires a model reconstruction head")
         optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
         best, stale, history = float("inf"), 0, []
         path = args.output_dir / (modality.replace("+", "_") + "_best.pt")
         for epoch in range(1, args.epochs + 1):
             model.train()
-            losses = []
+            losses, reconstruction_losses = [], []
             for b in batches(train, stats, args.batch_size, args.device, True):
                 if augmenter is not None:
                     b = augmenter(b, stats, modality)
@@ -413,6 +443,18 @@ def main():
                     loss = loss + args.event_time_weight * (
                         horizon_loss * horizon_weight * horizon_mask).sum() / (
                         horizon_weight * horizon_mask).sum().clamp_min(1)
+                if (args.masked_emg_reconstruction_weight and modality != "imu"):
+                    masked_emg, emg_target, hidden = masked_emg_input(
+                        b["emg"], args.emg_reconstruction_mask_ratio,
+                        args.emg_reconstruction_mask_span)
+                    if hidden.any():
+                        reconstruction = model(masked_emg, b["imu"])[
+                            "emg_reconstruction"]
+                        reconstruction_loss = F.mse_loss(
+                            reconstruction[hidden], emg_target[hidden])
+                        loss = loss + (args.masked_emg_reconstruction_weight
+                                      * reconstruction_loss)
+                        reconstruction_losses.append(reconstruction_loss.item())
                 pose_mask = valid & b["pose_mask"].squeeze(-1).bool()
                 if pose_mask.any():
                     pose_loss = F.smooth_l1_loss(out["position"][pose_mask], b["pose"][pose_mask])
@@ -449,8 +491,13 @@ def main():
             selection = 1 - report["event_macro_f1"] + .05 * (1 - report["holding_f1"])
             if args.orientation_weight and "orientation_geodesic_deg" in report:
                 selection += .05 * report["orientation_geodesic_deg"] / 180
-            print(modality, epoch, report, flush=True)
-            history.append({"epoch": epoch, "validation": report, "thresholds": thresholds})
+            reconstruction_mean = (float(np.mean(reconstruction_losses))
+                                   if reconstruction_losses else None)
+            print(modality, epoch, report, "masked_emg_mse=", reconstruction_mean,
+                  flush=True)
+            history.append({"epoch": epoch, "validation": report,
+                "thresholds": thresholds, "training_loss": float(np.mean(losses)),
+                "masked_emg_reconstruction_mse": reconstruction_mean})
             if selection < best:
                 best, stale = selection, 0
                 torch.save({"format": MODEL_FORMAT if args.annotation_aware else "reach_grasp_v1", "model_args": model_args,
@@ -462,6 +509,9 @@ def main():
                         "augmentation_strength": args.augmentation_strength,
                         "event_time_weight": args.event_time_weight,
                         "pose_uncertainty_weight": args.pose_uncertainty_weight,
+                        "masked_emg_reconstruction_weight": args.masked_emg_reconstruction_weight,
+                        "emg_reconstruction_mask_ratio": args.emg_reconstruction_mask_ratio,
+                        "emg_reconstruction_mask_span": args.emg_reconstruction_mask_span,
                         "event_time_bin_centers_s": [0., .1, .2, .3, .4],
                         "no_event_bin": 5},
                     "orientation_representation": "6D first-two rotation-matrix columns; VIVE quaternion wxyz"}, path)

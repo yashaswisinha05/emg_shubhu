@@ -820,6 +820,13 @@ heads, and position/orientation uncertainty experiment is documented in
 [`docs/reach_grasp_robust.md`](docs/reach_grasp_robust.md). It creates a new
 checkpoint format and does not replace the previous orientation-hybrid model.
 
+### Masked-EMG representation learning
+
+The separate causal masked-reconstruction experiment is documented in
+[`docs/reach_grasp_masked_reconstruction.md`](docs/reach_grasp_masked_reconstruction.md).
+It adds a training-only decoder to the EMG branch and preserves the robust
+model's live EMG+IMU deployment interface.
+
 ## Switching from MDN to CVAE
 
 The recommended default is:

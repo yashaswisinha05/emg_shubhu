@@ -11,6 +11,8 @@ from scipy.signal import butter, sosfilt, sosfilt_zi
 from .data.hybrid_event_decoder import apply_decoder
 from .models.reach_grasp_orientation_hybrid import ReachGraspOrientationHybrid
 from .models.reach_grasp_robust import RobustReachGraspModel
+from .models.reach_grasp_masked_reconstruction import (
+    MaskedReconstructionReachGraspModel)
 from .physics.manipulator_ik import ThreeRManipulator
 from .physics.rotation_6d import (matrix_to_euler_zyx_degrees,
                                   matrix_to_quaternion_numpy,
@@ -144,6 +146,7 @@ class LiveReachGraspPredictor:
         model_classes = {
             "reach_grasp_orientation_hybrid_v1": ReachGraspOrientationHybrid,
             "reach_grasp_robust_v1": RobustReachGraspModel,
+            "reach_grasp_masked_reconstruction_v1": MaskedReconstructionReachGraspModel,
         }
         if state.get("format") not in model_classes:
             raise ValueError("checkpoint must come from the orientation or robust reach-grasp trainer")
