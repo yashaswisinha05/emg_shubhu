@@ -8,6 +8,7 @@ import torch
 
 from .live_reach_grasp import LiveReachGraspPreprocessor
 from .models.reach_grasp_future_intent import ReachGraspFutureIntentModel
+from .models.reach_grasp_react_intent import ReactFutureIntentModel
 from .physics.rotation_6d import (matrix_to_euler_zyx_degrees,
                                   matrix_to_quaternion_numpy,
                                   rotation_6d_to_matrix)
@@ -23,11 +24,13 @@ class LiveFutureIntentPredictor:
         self.device = torch.device(device)
         state = torch.load(self.checkpoint, map_location=self.device,
                            weights_only=False)
-        if state.get("format") != "reach_grasp_future_intent_v1":
-            raise ValueError("checkpoint must come from train_reach_grasp_future_intent.py")
+        models = {"reach_grasp_future_intent_v1": ReachGraspFutureIntentModel,
+                  "reach_grasp_react_intent_v1": ReactFutureIntentModel}
+        if state.get("format") not in models:
+            raise ValueError("checkpoint must be a supported reach-grasp future-intent model")
         if state["model_args"].get("modality") != "emg+imu":
             raise ValueError("future-intent deployment requires an EMG+IMU checkpoint")
-        self.model = ReachGraspFutureIntentModel(**state["model_args"]).to(self.device)
+        self.model = models[state["format"]](**state["model_args"]).to(self.device)
         self.model.load_state_dict(state["state_dict"])
         self.model.eval().requires_grad_(False)
         self.stats = state["normalization"]

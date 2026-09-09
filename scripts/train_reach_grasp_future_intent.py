@@ -203,7 +203,7 @@ def intent_metrics(predictions, horizons_ms, uncertainty_s=.5):
             inside = valid & target
             distribution = item["intent_time_probability"][:, event, :-1]
             conditional = distribution / np.maximum(distribution.sum(-1, keepdims=True), 1e-9)
-            expected = conditional @ centers
+            expected = (conditional * centers[None, :]).sum(-1)
             time_errors[event].extend(1000 * np.abs(expected[inside] - delta[inside]))
     result = {"future_position_cm": {str(ms): float(np.mean(value)) if value else None
                                      for ms, value in zip(horizons_ms, position)},
@@ -224,7 +224,8 @@ def intent_metrics(predictions, horizons_ms, uncertainty_s=.5):
     return result
 
 
-def main():
+def main(model_class=ReachGraspFutureIntentModel,
+         checkpoint_format="reach_grasp_future_intent_v1", extension=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True)
     parser.add_argument("--output-dir", type=Path,
@@ -244,6 +245,12 @@ def main():
     parser.add_argument("--future-event-weight", type=float, default=.75)
     parser.add_argument("--current-event-time-weight", type=float, default=.25)
     parser.add_argument("--intent-time-weight", type=float, default=.35)
+    parser.add_argument("--split-file", type=Path,
+                        help="Reuse train/validation/test trial paths from a previous run")
+    parser.add_argument("--split-by", choices=["trial", "recording"], default="trial",
+                        help="Recording holds out complete CSV parent directories")
+    if extension is not None:
+        extension.configure(parser)
     args = parser.parse_args()
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         parser.error("use an empty output directory")
@@ -272,6 +279,31 @@ def main():
     np.random.default_rng(args.seed).shuffle(trials)
     n = max(1, round(.2 * len(trials)))
     test, validation, train = trials[:n], trials[n:2*n], trials[2*n:]
+    if args.split_by == "recording":
+        recording_ids = sorted({str(Path(t["path"]).parent.resolve()) for t in trials})
+        if len(recording_ids) < 3:
+            raise ValueError("recording split requires at least three CSV parent directories")
+        np.random.default_rng(args.seed).shuffle(recording_ids)
+        count = max(1, round(.2 * len(recording_ids)))
+        test_ids, val_ids = set(recording_ids[:count]), set(recording_ids[count:2*count])
+        test = [t for t in trials if str(Path(t["path"]).parent.resolve()) in test_ids]
+        validation = [t for t in trials if str(Path(t["path"]).parent.resolve()) in val_ids]
+        train = [t for t in trials if str(Path(t["path"]).parent.resolve()) not in test_ids | val_ids]
+    if args.split_file is not None:
+        manifest = json.loads(args.split_file.read_text())
+        lookup = {str(Path(t["path"]).resolve()): t for t in trials}
+        groups = [[str(Path(p).resolve()) for p in manifest[k]]
+                  for k in ("train", "validation", "test")]
+        flat = sum(groups, [])
+        if any(not g for g in groups) or len(flat) != len(set(flat)):
+            raise ValueError("split file has empty or overlapping splits")
+        if set(flat) != set(lookup):
+            raise ValueError("split file must match all accepted trial paths exactly")
+        train, validation, test = [[lookup[p] for p in g] for g in groups]
+        if args.split_by == "recording":
+            parents = [{str(Path(p).parent) for p in g} for g in groups]
+            if any(parents[a] & parents[b] for a, b in ((0, 1), (0, 2), (1, 2))):
+                raise ValueError("split file shares recordings across splits")
     stats = base.normalization(train)
     args.output_dir.mkdir(parents=True)
     (args.output_dir / "data_audit.json").write_text(json.dumps(
@@ -285,7 +317,7 @@ def main():
     model_args = {"modality": "emg+imu", "width": 128, "patch": 16,
         "stride": 4, "layers": 4, "heads": 4, "dropout": .1,
         "event_time_bins": 6, "future_horizons_ms": HORIZONS_MS}
-    model = ReachGraspFutureIntentModel(**model_args).to(args.device)
+    model = model_class(**model_args).to(args.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
     labels = np.concatenate([np.column_stack([t["holding"], t["event_labels"]]) for t in train])
     positive = labels.sum(0)
@@ -321,6 +353,10 @@ def main():
                 output["orientation_6d"], batch["orientation"], orientation_mask)
             added, detail = future_loss(output, batch, usable, args)
             loss = loss + added
+            if extension is not None:
+                extra, extra_detail = extension.loss(model, output, batch, usable, args)
+                loss = loss + extra
+                detail.update(extra_detail)
             if not torch.isfinite(loss):
                 raise FloatingPointError("nonfinite loss")
             loss.backward()
@@ -346,16 +382,20 @@ def main():
         history.append({"epoch": epoch, "training_loss": float(np.mean(losses)),
                         "selection_score": selection, "validation": report,
                         "current_validation": current_report,
+                        "loss_components": {k: float(np.mean([c[k] for c in components]))
+                                            for k in components[0]},
                         "event_thresholds": thresholds})
         if selection < best:
             best, stale = selection, 0
-            torch.save({"format": "reach_grasp_future_intent_v1",
+            torch.save({"format": checkpoint_format,
                 "state_dict": model.state_dict(), "model_args": model_args,
                 "normalization": stats, "preprocessing": settings,
                 "future_horizons_ms": list(HORIZONS_MS), "validation": report,
                 "current_validation": current_report,
                 "event_thresholds": thresholds,
                 "event_tolerance_s": args.uncertainty_ms / 1000,
+                "training_options": {k: str(v) if isinstance(v, Path) else v
+                                     for k, v in vars(args).items()},
                 "seed": args.seed}, checkpoint)
         else:
             stale += 1
@@ -364,7 +404,7 @@ def main():
                 break
     (args.output_dir / "history.json").write_text(json.dumps(history, indent=2))
     state = torch.load(checkpoint, map_location=args.device, weights_only=False)
-    model = ReachGraspFutureIntentModel(**state["model_args"]).to(args.device)
+    model = model_class(**state["model_args"]).to(args.device)
     model.load_state_dict(state["state_dict"])
     full = predict(model, test, stats, args)
     without_emg = predict(model, test, stats, args, zero_emg=True)
@@ -382,9 +422,12 @@ def main():
                              state["event_tolerance_s"]),
                          "future": intent_metrics(without_imu, HORIZONS_MS)},
         "protocol": {"encoder_inputs": "EMG+IMU only", "vive_role": "training labels only",
-                     "split_unit": "trial", "future_horizons_ms": list(HORIZONS_MS),
+                     "split_unit": args.split_by, "future_horizons_ms": list(HORIZONS_MS),
                      "annotation_uncertainty_ms": args.uncertainty_ms}}
     (args.output_dir / "results.json").write_text(json.dumps(results, indent=2))
+    if extension is not None:
+        extra_results = extension.evaluate(full, args)
+        (args.output_dir / "stability.json").write_text(json.dumps(extra_results, indent=2))
     torch.save(state, args.output_dir / "final.pt")
     print("TEST RESULTS", json.dumps(results, indent=2))
     print("Checkpoint:", checkpoint)

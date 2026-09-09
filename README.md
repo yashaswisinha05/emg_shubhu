@@ -915,6 +915,17 @@ bash scripts/train_reach_grasp_future_intent.sh
 
 See `docs/reach_grasp_future_intent.md` for outputs, losses and ablations.
 
+ReactEMG-inspired extension: train masked EMG/holding alignment, maintenance
+stability and direct/integrated future-motion consistency on the same data:
+
+```bash
+bash scripts/train_reach_grasp_react_intent.sh
+```
+
+See [the experiment guide](docs/react_future_intent.md) for paper attribution,
+matched-split comparisons, limitations, and Franka commands. Its checkpoints
+also work with `visualize_future_intent_franka.py`.
+
 Visualize rolling future intent controlling Franka on a random recorded trial:
 
 ```bash
