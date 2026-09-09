@@ -40,3 +40,16 @@ Grasp and release use probability mass within `--gripper-lookahead-ms` rather
 than the coarse “event anywhere in the next second” probability. This prevents
 the gripper from actuating a full second early. Both actuation thresholds default
 to 0.9 and the gripper state is latched until the opposite event fires.
+
+Every emitted prediction contains three distinct error measurements:
+
+- `model_vs_vive_error_by_horizon`: model versus synchronized VIVE at the
+  current instant and each trained future horizon, in centimetres and degrees.
+- `control_horizon_model_vs_vive_error`: the selected command horizon only.
+- `franka.position_tracking_error_cm` and
+  `franka.orientation_tracking_error_deg`: Franka versus the model command.
+- `franka.vs_vive_future_euclidean_cm` and
+  `franka.vs_vive_future_angle_deg`: end-to-end Franka versus future VIVE.
+
+VIVE comparisons are attached only after inference and are never read by the
+model or used to generate the robot command.

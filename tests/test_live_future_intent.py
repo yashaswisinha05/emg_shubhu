@@ -1,9 +1,11 @@
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 
 from emg_touch.live_future_intent import LiveFutureIntentPredictor
 from emg_touch.models.reach_grasp_future_intent import ReachGraspFutureIntentModel
+from scripts.visualize_future_intent_franka import ReplayErrorEvaluator
 
 
 def checkpoint(tmp_path):
@@ -43,3 +45,30 @@ def test_live_future_predictor_rejects_untrained_horizon(tmp_path):
     with pytest.raises(ValueError, match="control horizon"):
         LiveFutureIntentPredictor(checkpoint(tmp_path), "cpu",
                                   control_horizon_ms=300)
+
+
+class FixedPrediction:
+    pipeline = None
+
+    def predict(self):
+        return {"time_s": 1., "valid": True, "control_horizon_ms": 250.,
+            "current_position_m": {"x": 0., "y": 0., "z": 0.},
+            "current_orientation_quaternion_wxyz": [1., 0., 0., 0.],
+            "future_horizons_ms": [100, 250],
+            "future_positions_m": [[.1, 0., 0.], [.25, 0., 0.]],
+            "future_orientations_wxyz": [[1., 0., 0., 0.], [1., 0., 0., 0.]]}
+
+
+def test_replay_error_evaluator_matches_each_future_timestamp(tmp_path):
+    path = tmp_path / "trial.csv"
+    frame = pd.DataFrame({"time_perf_counter": [1., 1.1, 1.25],
+        "VIVE_T0_pos_x_m": [0., .2, .30], "VIVE_T0_pos_y_m": 0.,
+        "VIVE_T0_pos_z_m": 0., "VIVE_T0_quat_w": 1.,
+        "VIVE_T0_quat_x": 0., "VIVE_T0_quat_y": 0., "VIVE_T0_quat_z": 0.})
+    frame.to_csv(path, index=False)
+    result = ReplayErrorEvaluator(FixedPrediction(), path).predict()
+    assert result["model_vs_vive_error_by_horizon"]["current"]["euclidean_cm"] == 0
+    assert result["model_vs_vive_error_by_horizon"]["100"]["euclidean_cm"] == pytest.approx(10)
+    assert result["control_horizon_model_vs_vive_error"]["euclidean_cm"] == pytest.approx(5)
+    assert result["control_horizon_model_vs_vive_error"]["angle_deg"] == 0
+    assert isinstance(result["control_horizon_vive_pose_comparison_only"]["position_m"], list)
