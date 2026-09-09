@@ -25,3 +25,8 @@ To visualize an unseen trial on Franka, use `visualize_emg_grasp_franka.py`.
 EMG alone controls grasp closure. The arm can either stay fixed (strict
 EMG-only actuation) or follow the recorded VIVE pose for demonstration; VIVE
 is never passed to the grasp detector.
+
+For a completely model-driven Franka replay, use
+`visualize_model_output_franka.py`: the full EMG+IMU model supplies XYZ,
+orientation, and release; the dedicated EMG model supplies grasp onset. VIVE
+is drawn only as a withheld black comparison trajectory.

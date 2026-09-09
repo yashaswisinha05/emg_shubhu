@@ -885,3 +885,15 @@ python scripts/visualize_emg_grasp_franka.py \
 `--arm-source fixed` keeps the arm at its home pose, making the actuation
 strictly EMG-only. With `--arm-source vive`, recorded VIVE pose drives only the
 demonstration arm trajectory; it is never an input to the grasp detector.
+
+For model output to drive every Franka command:
+
+```bash
+python scripts/visualize_model_output_franka.py \
+  --pose-checkpoint runs/reach_grasp_masked_reconstruction_seed42/emg_imu_best.pt \
+  --grasp-checkpoint runs/emg_grasp_onset_seed42/best.pt \
+  --device cuda --trial-seed 7 --speed 1
+```
+
+Here the EMG+IMU model supplies XYZ, orientation and release, while the
+dedicated EMG-only model supplies grasp onset. VIVE is comparison-only.
