@@ -1,0 +1,6 @@
+data/
+*.png
+_beeps/
+__pycache__/
+*.pyc
+.pytest_cache/

@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "_README": [
+    "MEASURE these properties before the session and replace the placeholder",
+    "values below. mass_g with a kitchen scale, aperture_mm with a ruler or",
+    "calipers at the point where the hand actually closes. These numbers are",
+    "the ANCHOR MODALITY -- they are what the cross-modal model aligns EMG to,",
+    "and they are what unseen-object zero-shot generalisation is measured in.",
+    "Guessed values will silently degrade every downstream result.",
+    "",
+    "compliance : 0.0 = rigid, 1.0 = fully deformable (foam)",
+    "friction   : 0.0 = slippery (glossy plastic), 1.0 = grippy (rubber, foam)",
+    "grasp_type : power | pinch | none",
+    "",
+    "'null' is the empty-hand pseudo-object used by every AIR trial. Its",
+    "aperture is the free-closure aperture: close your empty hand as if on the",
+    "cup and measure the gap between thumb pad and index pad. Do not set it to",
+    "zero -- the null object must sit at a real, measured point in the property",
+    "space, not at the origin."
+  ],
+  "property_fields": ["mass_g", "aperture_mm", "compliance", "friction", "grasp_type"],
+  "grasp_type_codes": {"none": 0, "power": 1, "pinch": 2},
+  "objects": {
+    "null": {
+      "display": "AIR",
+      "mass_g": 0.0,
+      "aperture_mm": 35.0,
+      "compliance": 0.0,
+      "friction": 0.0,
+      "grasp_type": "none",
+      "community": "null",
+      "measured": false,
+      "notes": "PLACEHOLDER -- measure free-closure aperture for each subject."
+    },
+    "cup": {
+      "display": "CUP",
+      "mass_g": 15.0,
+      "aperture_mm": 75.0,
+      "compliance": 0.3,
+      "friction": 0.2,
+      "grasp_type": "power",
+      "community": "power_wide",
+      "measured": false,
+      "notes": "PLACEHOLDER. Empty plastic/paper cup. Low EMG but genuinely loaded -- this is the object that breaks amplitude-only baselines."
+    },
+    "bottle": {
+      "display": "BOTTLE",
+      "mass_g": 530.0,
+      "aperture_mm": 68.0,
+      "compliance": 0.1,
+      "friction": 0.4,
+      "grasp_type": "power",
+      "community": "power_wide",
+      "measured": false,
+      "notes": "PLACEHOLDER. Full 500 ml bottle. High EMG, high load."
+    },
+    "pen": {
+      "display": "PEN",
+      "mass_g": 10.0,
+      "aperture_mm": 12.0,
+      "compliance": 0.0,
+      "friction": 0.3,
+      "grasp_type": "pinch",
+      "community": "precision_thin",
+      "measured": false,
+      "notes": "PLACEHOLDER. Light but a completely different synergy from the power grasps."
+    },
+    "foam": {
+      "display": "FOAM BALL",
+      "mass_g": 60.0,
+      "aperture_mm": 65.0,
+      "compliance": 0.9,
+      "friction": 0.9,
+      "grasp_type": "power",
+      "community": "compliant",
+      "measured": false,
+      "notes": "PLACEHOLDER. Compliant contact with no rigid arrest -- held out as the unseen object by default."
+    }
+  },
+  "held_out_objects": ["foam"],
+  "_held_out_note": "Objects listed here are excluded from training and used only for the unseen-object zero-shot evaluation. Add more novel objects (stapler, apple, tape roll) here as you acquire them; they still need measured properties."
+}
