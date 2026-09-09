@@ -1,5 +1,9 @@
 # EMG/IMU Touch-Location Prediction
 
+For the short chronological explanation of every major model family and why
+the project ended at causal future reach–grasp intent, read
+[`MODEL_HISTORY.md`](MODEL_HISTORY.md).
+
 This project contains two causal EMG/IMU research pipelines: the current
 tracked EMG+IMU+VIVE experiments documented below, and the earlier
 participant-safe screen-touch pipeline for recordings in `../MERGED DATA`.
