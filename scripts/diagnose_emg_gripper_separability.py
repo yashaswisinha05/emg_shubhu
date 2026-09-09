@@ -28,22 +28,39 @@ Reading the result:
   level high, pattern near chance  -> separation is overall gain. Artifact-flavoured.
   pattern stays high               -> real spatial structure across sensors.
 
+Two further checks probe the other artifact that survives gain removal: an
+electrode state that changes slowly over a recording (drying, gel settling,
+sweat, fatigue). Both work within a session, where the class is constant, so
+neither can be satisfied by the between-session difference.
+
+  drift           each share regressed against the trial's position in its own
+                  session, reported as the movement from first trial to last.
+                  Compare it against the between-class gap: comparable size
+                  means the shares wander on their own.
+  temporal split  train on one half of every session in recording order, test
+                  on the other half. A drop means the signature moves across a
+                  session instead of being a stable property of the condition.
+
 CAVEAT, and it matters. A rotated or shifted armband placement between the two
 sessions ALSO changes channel ratios, because each sensor then sits over a
-different muscle. So "pattern separates" is evidence for physiology, not proof
-of it. The decisive test remains one new session with both conditions
-interleaved, trained and tested within that session.
+different muscle, and no within-session check can see that -- placement is
+fixed for the whole session. So "pattern separates, and is stable within each
+session" is evidence for physiology, not proof of it. The decisive test remains
+one new session with both conditions interleaved, trained and tested within
+that session.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -75,6 +92,45 @@ def trial_features(trial):
     return {"level": level, "absolute": absolute, "pattern": pattern}
 
 
+def within_session(sessions, numbers, session):
+    """Mask of one session's trials, plus each trial's position within it."""
+    mask = sessions == session
+    order = np.argsort(numbers[mask], kind="stable")
+    position = np.empty(int(mask.sum()), dtype=float)
+    position[order] = np.arange(mask.sum(), dtype=float)
+    return mask, position
+
+
+def drift(values, position):
+    """Total movement of a feature from the session's first trial to its last."""
+    if len(position) < 3 or position.max() == position.min():
+        return 0., 0.
+    slope = float(np.polyfit(position, values, 1)[0])
+    return slope * (position.max() - position.min()), float(np.corrcoef(position, values)[0, 1])
+
+
+def temporal_split(features, labels, sessions, numbers, test_late):
+    """Train on one half of every session in recording order, test on the other.
+
+    Both classes stay present on both sides because the halves are taken
+    within each session, so this isolates drift across a session rather than
+    re-testing the between-session difference.
+    """
+    train = np.zeros(len(labels), dtype=bool)
+    for session in np.unique(sessions):
+        mask, position = within_session(sessions, numbers, session)
+        early = position < (position.max() + 1) / 2
+        train[np.flatnonzero(mask)[early if test_late else ~early]] = True
+    if min(len(np.unique(labels[train])), len(np.unique(labels[~train]))) < 2:
+        return None
+    model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=5000))
+    model.fit(features[train], labels[train])
+    predicted = model.predict(features[~train])
+    return {"accuracy": float(accuracy_score(labels[~train], predicted)),
+            "macro_f1": float(f1_score(labels[~train], predicted, average="macro")),
+            "train_trials": int(train.sum()), "test_trials": int((~train).sum())}
+
+
 def score(features, labels, seed, shuffle_labels=False):
     model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=5000))
     splits = min(5, int(np.bincount(labels).min()))
@@ -101,12 +157,16 @@ def main():
     settings = {"raw_rate_hz": args.raw_rate_hz, "rate_hz": 100., "gap_s": .02,
                 "event_origin": args.event_origin, "event_pulse_s": .1,
                 "require_events": False}
-    paths = sorted({p for root in args.root for p in Path(root).rglob("trial_*.csv")})
-    if not paths:
+    discovered = {}
+    for root in args.root:
+        for path in Path(root).rglob("trial_*.csv"):
+            discovered.setdefault(path, root)
+    if not discovered:
         raise ValueError("no files matched 'trial_*.csv' under: " + ", ".join(args.root))
 
-    rows, labels, rejected, hashes, transitions = [], [], {}, {}, 0
-    for path in paths:
+    rows, labels, sessions, numbers = [], [], [], []
+    rejected, hashes, transitions = {}, {}, 0
+    for path in sorted(discovered):
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if digest in hashes:
             rejected[str(path)] = "byte-identical duplicate of " + hashes[digest]
@@ -121,10 +181,15 @@ def main():
                 transitions += 1
             rows.append(trial_features(trial))
             labels.append(int(np.bincount(state, minlength=2).argmax()))
+            sessions.append(discovered[path])
+            match = re.search(r"(\d+)", path.stem)
+            numbers.append(int(match.group(1)) if match else -1)
         except (ValueError, KeyError) as error:
             rejected[str(path)] = str(error)
 
     labels = np.asarray(labels)
+    sessions = np.asarray(sessions)
+    numbers = np.asarray(numbers)
     if len(labels) < 20 or len(np.unique(labels)) < 2:
         raise ValueError(f"need >=20 trials spanning both classes, got {len(labels)} "
                          f"({len(rejected)} rejected)")
@@ -137,35 +202,69 @@ def main():
     results = {"trials": int(len(labels)), "open": int(counts[0]), "close": int(counts[1]),
                "trials_with_transition": transitions, "rejected": len(rejected),
                "majority_class_accuracy": float(counts.max() / counts.sum())}
+    sets = {name: np.stack([row[name] for row in rows]) for name in ("level", "absolute", "pattern")}
     print(f"{'feature set':<24}{'accuracy':>18}{'macro F1':>18}")
-    for name in ("level", "absolute", "pattern"):
-        matrix = np.stack([row[name] for row in rows])
+    for name, matrix in sets.items():
         results[name] = score(matrix, labels, args.seed)
         results[name]["features"] = int(matrix.shape[1])
         r = results[name]
         print(f"{name:<24}{r['accuracy_mean']:>10.3f} +-{r['accuracy_std']:<6.3f}"
               f"{r['macro_f1_mean']:>10.3f} +-{r['macro_f1_std']:<6.3f}")
-    matrix = np.stack([row["pattern"] for row in rows])
-    results["pattern_shuffled_control"] = score(matrix, labels, args.seed, shuffle_labels=True)
+    results["pattern_shuffled_control"] = score(sets["pattern"], labels, args.seed,
+                                                shuffle_labels=True)
     r = results["pattern_shuffled_control"]
     print(f"{'pattern (shuffled)':<24}{r['accuracy_mean']:>10.3f} +-{r['accuracy_std']:<6.3f}"
           f"{r['macro_f1_mean']:>10.3f} +-{r['macro_f1_std']:<6.3f}")
 
+    pattern = sets["pattern"]
     print("\nper-sensor share of its timescale total (mean over trials):")
-    print(f"{'':<10}{'sensor 0':>10}{'sensor 1':>10}{'sensor 2':>10}{'sensor 3':>10}")
+    print(f"{'':<16}{'sensor 0':>10}{'sensor 1':>10}{'sensor 2':>10}{'sensor 3':>10}")
     shares = {}
     for scale, columns in (("short", slice(0, 4)), ("long", slice(4, 8))):
         for name, target in (("open", 0), ("close", 1)):
-            mean = matrix[labels == target, columns].mean(0)
+            mean = pattern[labels == target, columns].mean(0)
             shares[f"{scale}_{name}"] = mean.tolist()
-            print(f"{scale + ' ' + name:<10}" + "".join(f"{v:>10.4f}" for v in mean))
+            print(f"{scale + ' ' + name:<16}" + "".join(f"{v:>10.4f}" for v in mean))
         delta = np.asarray(shares[f"{scale}_close"]) - np.asarray(shares[f"{scale}_open"])
         shares[f"{scale}_delta"] = delta.tolist()
-        print(f"{scale + ' delta':<10}" + "".join(f"{v:>+10.4f}" for v in delta))
+        print(f"{scale + ' delta':<16}" + "".join(f"{v:>+10.4f}" for v in delta))
     results["pattern_shares"] = shares
 
+    print("\nwithin-session drift of the same shares, against position in the session.")
+    print("drift = movement from the session's first trial to its last, so compare it")
+    print("against the between-session delta printed above: drift of similar size means")
+    print("the shares wander on their own and the class gap need not be physiological.")
+    drifts = {}
+    for scale, columns in (("short", slice(0, 4)), ("long", slice(4, 8))):
+        print(f"{'':<22}{'sensor 0':>10}{'sensor 1':>10}{'sensor 2':>10}{'sensor 3':>10}")
+        for session in np.unique(sessions):
+            mask, position = within_session(sessions, numbers, session)
+            block = pattern[mask, columns]
+            values = [drift(block[:, sensor], position) for sensor in range(4)]
+            name = Path(session).name or session
+            drifts[f"{scale}_{name}"] = {"drift": [v[0] for v in values],
+                                         "pearson_r": [v[1] for v in values]}
+            print(f"{scale + ' ' + name:<22}" + "".join(f"{v:>+10.4f}" for v, _ in values))
+            print(f"{'  pearson r':<22}" + "".join(f"{r:>+10.3f}" for _, r in values))
+        print(f"{scale + ' class gap':<22}"
+              + "".join(f"{v:>+10.4f}" for v in shares[f"{scale}_delta"]))
+    results["within_session_drift"] = drifts
+
+    print("\ntemporal split: train on one half of every session in recording order,")
+    print("test on the other half. Both classes are present on both sides, so a drop")
+    print("here means the signature moves across a session rather than being stable.")
+    print(f"{'feature set':<24}{'early -> late':>18}{'late -> early':>18}")
+    splits = {}
+    for name, matrix in sets.items():
+        late = temporal_split(matrix, labels, sessions, numbers, test_late=True)
+        early = temporal_split(matrix, labels, sessions, numbers, test_late=False)
+        splits[name] = {"train_early_test_late": late, "train_late_test_early": early}
+        print(f"{name:<24}{late['accuracy']:>18.3f}{early['accuracy']:>18.3f}"
+              if late and early else f"{name:<24}{'unavailable':>36}")
+    results["temporal_split"] = splits
+
     print("\nlog mean RMS pooled over sensors (level features):")
-    level = np.stack([row["level"] for row in rows])
+    level = sets["level"]
     for scale, column in (("short", 0), ("long", 1)):
         open_mean, close_mean = level[labels == 0, column].mean(), level[labels == 1, column].mean()
         results[f"level_{scale}"] = {"open": float(open_mean), "close": float(close_mean)}

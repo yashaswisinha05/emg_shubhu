@@ -115,7 +115,7 @@ def evaluate(model, trials, stats, args, zero_emg=False, zero_imu=False):
             "orientation_deg": float(np.mean(angle_error)) if angle_error else None}
 
 
-def train_one(modality, args, train, validation, stats, class_weight, settings):
+def train_one(modality, args, train, validation, stats, class_weight, settings, augmenter=None):
     """Train one dedicated model restricted to ``modality`` end to end.
 
     Mirrors train_reach_grasp.py's --models loop: each modality gets its own
@@ -136,6 +136,8 @@ def train_one(modality, args, train, validation, stats, class_weight, settings):
     for epoch in range(1, args.epochs + 1):
         model.train(); losses = []
         for batch in batches(train, stats, args.batch_size, args.device, True):
+            if augmenter is not None:
+                batch = augmenter(batch, stats, modality)
             optimizer.zero_grad(set_to_none=True)
             output = model(batch["emg"], batch["imu"])
             value = loss(model, output, batch, class_weight, args)
@@ -152,7 +154,9 @@ def train_one(modality, args, train, validation, stats, class_weight, settings):
             best, stale = score, 0
             torch.save({"format": "gripper_state_pose_v1", "state_dict": model.state_dict(),
                 "model_args": model_args, "normalization": stats, "preprocessing": settings,
-                "classes": ["open", "close"], "validation": report, "seed": args.seed}, checkpoint)
+                "classes": ["open", "close"], "validation": report, "seed": args.seed,
+                "augmentation": {"physiological": augmenter is not None,
+                                 "strength": args.augmentation_strength}}, checkpoint)
         else:
             stale += 1
             if stale >= args.patience: break
@@ -182,6 +186,13 @@ def main():
     parser.add_argument("--stability-weight", type=float, default=.03)
     parser.add_argument("--position-weight", type=float, default=.2)
     parser.add_argument("--orientation-weight", type=float, default=.5)
+    parser.add_argument("--physiological-augmentation", action="store_true",
+                        help="Apply causal EMG/IMU gain, mounting-rotation, noise, drift and "
+                             "dropout augmentation to training batches only (see "
+                             "emg_touch.data.wearable_augmentation). These are exactly the "
+                             "nuisance factors that differ between two donnings of the band, "
+                             "so this makes a session-constant shortcut harder to exploit")
+    parser.add_argument("--augmentation-strength", type=float, default=1.)
     parser.add_argument("--models", nargs="+", choices=["emg", "imu", "emg+imu"],
                         default=["emg", "imu", "emg+imu"],
                         help="Trains one dedicated model per entry (matches "
@@ -190,6 +201,8 @@ def main():
     args = parser.parse_args()
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         parser.error("use an empty output directory")
+    if args.augmentation_strength < 0:
+        parser.error("augmentation strength cannot be negative")
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     settings = {"raw_rate_hz": args.raw_rate_hz, "rate_hz": 100., "gap_s": .02,
                 "event_origin": args.event_origin, "event_pulse_s": .1,
@@ -241,12 +254,20 @@ def main():
     class_weight = torch.as_tensor(len(labels) / np.maximum(2 * frequency, 1),
                                    dtype=torch.float32, device=args.device)
 
+    augmenter = None
+    if args.physiological_augmentation:
+        from emg_touch.data.wearable_augmentation import PhysiologicalWearableAugmenter
+        augmenter = PhysiologicalWearableAugmenter(args.augmentation_strength)
+
     results = {"protocol": {"roots": args.root, "models": args.models,
                             "vive_role": "pose supervision only",
                             "gripper_state_role": "classification supervision only",
+                            "physiological_augmentation": args.physiological_augmentation,
+                            "augmentation_strength": args.augmentation_strength,
                             "preprocessing": settings}}
     for modality in args.models:
-        model, _ = train_one(modality, args, train, validation, stats, class_weight, settings)
+        model, _ = train_one(modality, args, train, validation, stats, class_weight,
+                             settings, augmenter)
         results[modality] = evaluate(model, test, stats, args)
         # Same jointly-trained model, but with one sensor stream zeroed at
         # test time -- a graceful-degradation check, distinct from (and
