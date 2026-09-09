@@ -89,7 +89,8 @@ class LiveFrankaPyBulletController:
                  grasp_probability_threshold=.9, release_probability_threshold=.9,
                  holding_close_threshold=.8, holding_open_threshold=.2,
                  holding_persistence_frames=2,
-                 bullet=None, data_path=None, motion_filter=None):
+                 bullet=None, data_path=None, motion_filter=None,
+                 debug_legend=None):
         if simulation_steps < 1:
             raise ValueError("simulation_steps must be positive")
         if not 0 <= closed_width_m < open_width_m <= .04:
@@ -128,6 +129,8 @@ class LiveFrankaPyBulletController:
         self.holding_thresholds = {"close": float(holding_close_threshold),
                                    "open": float(holding_open_threshold)}
         self.holding_persistence_frames = int(holding_persistence_frames)
+        self.debug_legend = (debug_legend or
+            "BLACK: withheld VIVE   CYAN: model request   ORANGE: Franka EE")
         self.debug_items = []
         self.reference_positions = None
         self._discover_joints()
@@ -194,7 +197,7 @@ class LiveFrankaPyBulletController:
             self.p.resetJointState(self.robot, joint, self.widths["open"],
                                    physicsClientId=self.client)
         self._update_status("OPEN", [0., .7, 0.])
-        self._debug_text("BLACK: withheld VIVE   CYAN: model request   ORANGE: Franka EE",
+        self._debug_text(self.debug_legend,
                          [-.35, 0., 1.15], [.1, .1, .1], 1.25)
 
     def set_reference_trajectory(self, positions):

@@ -186,8 +186,8 @@ def main():
     parser.add_argument("--raw-rate-hz", type=float, default=1259.4)
     parser.add_argument("--rate-hz", type=float, default=200.)
     parser.add_argument("--event-origin", choices=["auto", "start"], default="auto")
-    parser.add_argument("--uncertainty-ms", type=float, default=200.)
-    parser.add_argument("--selection-tolerance-ms", type=float, default=200.)
+    parser.add_argument("--uncertainty-ms", type=float, default=500.)
+    parser.add_argument("--selection-tolerance-ms", type=float, default=500.)
     parser.add_argument("--patience", type=int, default=12)
     parser.add_argument("--width", type=int, default=96)
     args = parser.parse_args()
@@ -283,7 +283,7 @@ def main():
                "by_tolerance_ms": {}, "protocol": {
                    "causal": True, "split_unit": "trial",
                    "annotation_uncertainty_ms": args.uncertainty_ms}}
-    for ms in [100, 150, 200, 300, 1500]:
+    for ms in [100, 150, 200, 300, 500, 1500]:
         results["by_tolerance_ms"][str(ms)] = {
             "emg": score(predictions, state["decoder"], ms / 1000),
             "zero_emg": score(zero, state["decoder"], ms / 1000),

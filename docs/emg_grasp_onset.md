@@ -16,7 +16,12 @@ bash scripts/train_emg_grasp_onset.sh
 ```
 
 The decoder threshold and persistence are selected on validation trials only.
-`results.json` reports held-out test performance at 100, 150, 200, 300 and
+`results.json` reports held-out test performance at 100, 150, 200, 300, 500 and
 1500 ms, including zero-EMG, trial-shuffled-EMG, and schedule-only controls.
-The 200 ms result is the primary result. A useful EMG claim requires the real
+The 500 ms result is the configured primary result. A useful EMG claim requires the real
 EMG result to beat all three controls; the 1500 ms result is only a sanity check.
+
+To visualize an unseen trial on Franka, use `visualize_emg_grasp_franka.py`.
+EMG alone controls grasp closure. The arm can either stay fixed (strict
+EMG-only actuation) or follow the recorded VIVE pose for demonstration; VIVE
+is never passed to the grasp detector.

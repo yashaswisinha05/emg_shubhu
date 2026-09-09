@@ -873,3 +873,15 @@ bash scripts/train_emg_grasp_onset.sh
 ```
 
 See `docs/emg_grasp_onset.md` for the architecture and mandatory controls.
+
+Visualize a random held-out test trial with EMG controlling grasp closure:
+
+```bash
+python scripts/visualize_emg_grasp_franka.py \
+  --checkpoint runs/emg_grasp_onset_seed42/best.pt \
+  --device cuda --arm-source vive --speed 1
+```
+
+`--arm-source fixed` keeps the arm at its home pose, making the actuation
+strictly EMG-only. With `--arm-source vive`, recorded VIVE pose drives only the
+demonstration arm trajectory; it is never an input to the grasp detector.
