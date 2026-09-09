@@ -115,13 +115,23 @@ def test_training_smoke(tmp_path, monkeypatch):
                                   np.where(data.time_perf_counter < 100.7, "close", "open"))
         data.to_csv(root / f"trial_{index:03}.csv", index=False)
     real = GripperStatePoseModel
-    monkeypatch.setattr(trainer, "GripperStatePoseModel", lambda **unused: real(
+    monkeypatch.setattr(trainer, "GripperStatePoseModel", lambda **kwargs: real(
+        modality=kwargs.get("modality", "emg+imu"),
         width=16, patch=4, stride=2, layers=1, heads=4, dropout=0.))
     output = tmp_path / "run"
     monkeypatch.setattr(sys, "argv", ["train", "--root", str(root), "--output-dir",
         str(output), "--device", "cpu", "--epochs", "1", "--raw-rate-hz", "1000"])
     trainer.main()
     result = json.loads((output / "results.json").read_text())
-    assert result["protocol"]["inputs"] == "EMG+IMU only"
-    assert set(result["emg_imu"]) >= {"gripper_macro_f1", "position_cm"}
-    assert torch.load(output / "best.pt", weights_only=False)["classes"] == ["open", "close"]
+    # Default --models trains all three: a real ablation (dedicated
+    # emg-only/imu-only models), not just the fused model probed with one
+    # input zeroed out.
+    assert result["protocol"]["models"] == ["emg", "imu", "emg+imu"]
+    for modality in ("emg", "imu", "emg+imu"):
+        assert set(result[modality]) >= {"gripper_macro_f1", "position_cm"}
+        checkpoint = torch.load(output / f"{modality.replace('+', '_')}_best.pt",
+                                weights_only=False)
+        assert checkpoint["classes"] == ["open", "close"]
+        assert checkpoint["model_args"]["modality"] == modality
+    assert set(result["fusion_zero_emg"]) >= {"gripper_macro_f1", "position_cm"}
+    assert set(result["fusion_zero_imu"]) >= {"gripper_macro_f1", "position_cm"}

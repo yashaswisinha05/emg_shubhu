@@ -115,9 +115,60 @@ def evaluate(model, trials, stats, args, zero_emg=False, zero_imu=False):
             "orientation_deg": float(np.mean(angle_error)) if angle_error else None}
 
 
+def train_one(modality, args, train, validation, stats, class_weight, settings):
+    """Train one dedicated model restricted to ``modality`` end to end.
+
+    Mirrors train_reach_grasp.py's --models loop: each modality gets its own
+    model instance (GripperStatePoseModel(modality=...) zeroes and one-hots
+    the fusion gate for the unused branch), its own optimizer, its own
+    checkpoint/history files, and the same reseeded init so the three runs
+    are a fair capacity-matched comparison rather than one model probed with
+    its inputs zeroed out at test time.
+    """
+    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
+    model_args = {"modality": modality, "width": 128, "patch": 16, "stride": 4,
+                  "layers": 4, "heads": 4, "dropout": .1, "react_context": 100}
+    model = GripperStatePoseModel(**model_args).to(args.device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    suffix = modality.replace("+", "_")
+    checkpoint = args.output_dir / f"{suffix}_best.pt"
+    best, stale, history = float("inf"), 0, []
+    for epoch in range(1, args.epochs + 1):
+        model.train(); losses = []
+        for batch in batches(train, stats, args.batch_size, args.device, True):
+            optimizer.zero_grad(set_to_none=True)
+            output = model(batch["emg"], batch["imu"])
+            value = loss(model, output, batch, class_weight, args)
+            if not torch.isfinite(value): raise FloatingPointError("nonfinite loss")
+            value.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.); optimizer.step()
+            losses.append(value.item())
+        report = evaluate(model, validation, stats, args)
+        score = report["position_cm"] + .1 * (report["orientation_deg"] or 0) + 5 * (1-report["gripper_macro_f1"])
+        history.append({"epoch": epoch, "training_loss": float(np.mean(losses)),
+                        "selection_score": score, "validation": report})
+        print(f"modality={modality} epoch={epoch} loss={np.mean(losses):.4f} score={score:.3f} "
+              f"state_f1={report['gripper_macro_f1']:.3f} pose={report['position_cm']:.2f}cm", flush=True)
+        if score < best:
+            best, stale = score, 0
+            torch.save({"format": "gripper_state_pose_v1", "state_dict": model.state_dict(),
+                "model_args": model_args, "normalization": stats, "preprocessing": settings,
+                "classes": ["open", "close"], "validation": report, "seed": args.seed}, checkpoint)
+        else:
+            stale += 1
+            if stale >= args.patience: break
+    (args.output_dir / f"{suffix}_history.json").write_text(json.dumps(history, indent=2))
+    state = torch.load(checkpoint, map_location=args.device, weights_only=False)
+    model.load_state_dict(state["state_dict"])
+    return model, state
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", required=True)
+    parser.add_argument("--root", nargs="+", required=True,
+                        help="One or more dataset directories, searched recursively "
+                             "for trial_*.csv; pass two or more to pool datasets into "
+                             "one training run (byte-identical trials across roots "
+                             "are still deduplicated by content hash)")
     parser.add_argument("--output-dir", type=Path, default=Path("runs/gripper_state_pose_seed42"))
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--epochs", type=int, default=60)
@@ -131,6 +182,11 @@ def main():
     parser.add_argument("--stability-weight", type=float, default=.03)
     parser.add_argument("--position-weight", type=float, default=.2)
     parser.add_argument("--orientation-weight", type=float, default=.5)
+    parser.add_argument("--models", nargs="+", choices=["emg", "imu", "emg+imu"],
+                        default=["emg", "imu", "emg+imu"],
+                        help="Trains one dedicated model per entry (matches "
+                             "train_reach_grasp.py's convention); pass a single "
+                             "value to skip the ablation and train only that one")
     args = parser.parse_args()
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         parser.error("use an empty output directory")
@@ -139,7 +195,8 @@ def main():
                 "event_origin": args.event_origin, "event_pulse_s": .1,
                 "require_events": False}
     trials, rejected, hashes = [], {}, {}
-    for path in sorted(Path(args.root).rglob("trial_*.csv")):
+    paths = sorted({p for root in args.root for p in Path(root).rglob("trial_*.csv")})
+    for path in paths:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if digest in hashes:
             rejected[str(path)] = "byte-identical duplicate of " + hashes[digest]; continue
@@ -163,44 +220,22 @@ def main():
     frequency = np.bincount(labels, minlength=2)
     class_weight = torch.as_tensor(len(labels) / np.maximum(2 * frequency, 1),
                                    dtype=torch.float32, device=args.device)
-    model_args = {"modality": "emg+imu", "width": 128, "patch": 16, "stride": 4,
-                  "layers": 4, "heads": 4, "dropout": .1, "react_context": 100}
-    model = GripperStatePoseModel(**model_args).to(args.device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
-    best, stale, checkpoint, history = float("inf"), 0, args.output_dir / "best.pt", []
-    for epoch in range(1, args.epochs + 1):
-        model.train(); losses = []
-        for batch in batches(train, stats, args.batch_size, args.device, True):
-            optimizer.zero_grad(set_to_none=True)
-            output = model(batch["emg"], batch["imu"])
-            value = loss(model, output, batch, class_weight, args)
-            if not torch.isfinite(value): raise FloatingPointError("nonfinite loss")
-            value.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.); optimizer.step()
-            losses.append(value.item())
-        report = evaluate(model, validation, stats, args)
-        score = report["position_cm"] + .1 * (report["orientation_deg"] or 0) + 5 * (1-report["gripper_macro_f1"])
-        history.append({"epoch": epoch, "training_loss": float(np.mean(losses)),
-                        "selection_score": score, "validation": report})
-        print(f"epoch={epoch} loss={np.mean(losses):.4f} score={score:.3f} "
-              f"state_f1={report['gripper_macro_f1']:.3f} pose={report['position_cm']:.2f}cm", flush=True)
-        if score < best:
-            best, stale = score, 0
-            torch.save({"format": "gripper_state_pose_v1", "state_dict": model.state_dict(),
-                "model_args": model_args, "normalization": stats, "preprocessing": settings,
-                "classes": ["open", "close"], "validation": report, "seed": args.seed}, checkpoint)
-        else:
-            stale += 1
-            if stale >= args.patience: break
-    (args.output_dir / "history.json").write_text(json.dumps(history, indent=2))
-    state = torch.load(checkpoint, map_location=args.device, weights_only=False)
-    model.load_state_dict(state["state_dict"])
-    results = {"emg_imu": evaluate(model, test, stats, args),
-               "without_emg": evaluate(model, test, stats, args, zero_emg=True),
-               "without_imu": evaluate(model, test, stats, args, zero_imu=True),
-               "protocol": {"inputs": "EMG+IMU only", "vive_role": "pose supervision only",
-                            "gripper_state_role": "classification supervision only"}}
+
+    results = {"protocol": {"roots": args.root, "models": args.models,
+                            "vive_role": "pose supervision only",
+                            "gripper_state_role": "classification supervision only",
+                            "preprocessing": settings}}
+    for modality in args.models:
+        model, _ = train_one(modality, args, train, validation, stats, class_weight, settings)
+        results[modality] = evaluate(model, test, stats, args)
+        # Same jointly-trained model, but with one sensor stream zeroed at
+        # test time -- a graceful-degradation check, distinct from (and
+        # complementary to) the dedicated emg-only/imu-only models above,
+        # which never had capacity allocated to the missing modality at all.
+        if modality == "emg+imu":
+            results["fusion_zero_emg"] = evaluate(model, test, stats, args, zero_emg=True)
+            results["fusion_zero_imu"] = evaluate(model, test, stats, args, zero_imu=True)
     (args.output_dir / "results.json").write_text(json.dumps(results, indent=2))
-    torch.save(state, args.output_dir / "final.pt")
     print("TEST RESULTS", json.dumps(results, indent=2))
 
 

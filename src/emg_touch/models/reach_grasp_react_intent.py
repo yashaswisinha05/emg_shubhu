@@ -26,7 +26,13 @@ class CausalEMGIntent(nn.Module):
         self.reconstruct = nn.Linear(width, 8)
         self.classify = nn.Linear(width, 2)
 
-    def forward(self, emg, actions=None, hidden=None):
+    def forward(self, emg, actions=None, hidden=None, block_intent_attention=False):
+        """``block_intent_attention`` implements ReactEMG's self-supervised-EMG
+        task: rather than only substituting the intent MASK embedding (which
+        still lets every EMG query attend to a token carrying learned MASK
+        content), EMG queries are architecturally forbidden from attending to
+        any intent-modality key, so masked-EMG reconstruction in that mode is
+        provably driven by EMG history alone."""
         batch, frames, _ = emg.shape
         if actions is None:
             actions = torch.full((batch, frames), 2, device=emg.device, dtype=torch.long)
@@ -52,6 +58,12 @@ class CausalEMGIntent(nn.Module):
             stamps = time[left:end].repeat_interleave(2)
             lag = stamps[:, None] - stamps[None, :]
             blocked = (lag < 0) | (lag >= self.context)
+            if block_intent_attention:
+                # Even local indices are EMG tokens, odd are intent tokens
+                # (matching the interleave order above): forbid EMG queries
+                # from attending to any intent key.
+                is_intent = torch.arange(stamps.shape[0], device=emg.device) % 2 == 1
+                blocked = blocked | (~is_intent[:, None] & is_intent[None, :])
             chunk = self.encoder(tokens[:, 2 * left:2 * end], mask=blocked)
             chunks.append(chunk[:, 2 * (start - left):])
         encoded = torch.cat(chunks, 1).reshape(batch, frames, 2, -1)
@@ -61,11 +73,18 @@ class CausalEMGIntent(nn.Module):
 
 
 class ReactFutureIntentModel(ReachGraspFutureIntentModel):
-    def __init__(self, **kwargs):
+    def __init__(self, react_context=100, **kwargs):
         super().__init__(**kwargs)
         width = kwargs.get("width", 128)
+        # The causal intent-alignment branch previously always received the
+        # class defaults (layers=2, heads=4, context=100) no matter what depth
+        # was requested for the rest of the network -- it now shares the same
+        # capacity as the EMG/IMU patch encoders it feeds into.
         self.react = CausalEMGIntent(width=width // 2,
-                                     dropout=kwargs.get("dropout", .1))
+                                     heads=kwargs.get("heads", 4),
+                                     layers=kwargs.get("layers", 4),
+                                     dropout=kwargs.get("dropout", .1),
+                                     context=react_context)
         self.react_to_context = nn.Linear(width // 2, width * 2)
         self.react_current = nn.Linear(width // 2, 3)
         self.motion_velocity = nn.Linear(width * 2, self.future_steps * 3)

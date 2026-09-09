@@ -249,6 +249,19 @@ def main(model_class=ReachGraspFutureIntentModel,
                         help="Reuse train/validation/test trial paths from a previous run")
     parser.add_argument("--split-by", choices=["trial", "recording"], default="trial",
                         help="Recording holds out complete CSV parent directories")
+    parser.add_argument("--width", type=int, default=128,
+                        help="Shared transformer width for the EMG/IMU patch encoders")
+    parser.add_argument("--layers", type=int, default=4,
+                        help="Transformer encoder depth, per modality branch")
+    parser.add_argument("--heads", type=int, default=4)
+    parser.add_argument("--patch", type=int, default=16)
+    parser.add_argument("--stride", type=int, default=4)
+    parser.add_argument("--dropout", type=float, default=.1)
+    parser.add_argument("--event-time-bins", type=int, default=6)
+    parser.add_argument("--warmup-epochs", type=int, default=4,
+                        help="Linear LR warmup then linear decay to 0 over the "
+                             "remaining epochs, matching ReactEMG's stated recipe "
+                             "(arXiv:2506.19815 sec 3.4); 0 disables the schedule")
     if extension is not None:
         extension.configure(parser)
     args = parser.parse_args()
@@ -314,11 +327,23 @@ def main(model_class=ReachGraspFutureIntentModel,
     print(f"Trials: train={len(train)}, validation={len(validation)}, "
           f"test={len(test)}, rejected={len(rejected)}", flush=True)
 
-    model_args = {"modality": "emg+imu", "width": 128, "patch": 16,
-        "stride": 4, "layers": 4, "heads": 4, "dropout": .1,
-        "event_time_bins": 6, "future_horizons_ms": HORIZONS_MS}
+    model_args = {"modality": "emg+imu", "width": args.width, "patch": args.patch,
+        "stride": args.stride, "layers": args.layers, "heads": args.heads,
+        "dropout": args.dropout, "event_time_bins": args.event_time_bins,
+        "future_horizons_ms": HORIZONS_MS}
+    if extension is not None and hasattr(extension, "model_kwargs"):
+        model_args.update(extension.model_kwargs(args))
     model = model_class(**model_args).to(args.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    warmup = max(0, min(args.warmup_epochs, args.epochs - 1))
+
+    def lr_lambda(epoch):
+        if warmup and epoch < warmup:
+            return (epoch + 1) / warmup
+        decay_span = max(1, args.epochs - warmup)
+        return max(0., (args.epochs - epoch) / decay_span)
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     labels = np.concatenate([np.column_stack([t["holding"], t["event_labels"]]) for t in train])
     positive = labels.sum(0)
     weights = torch.tensor(np.clip((len(labels) - positive) / np.maximum(positive, 1), 1, 50),
@@ -364,6 +389,7 @@ def main(model_class=ReachGraspFutureIntentModel,
             optimizer.step()
             losses.append(loss.item())
             components.append(detail)
+        scheduler.step()
         validation_predictions = predict(model, validation, stats, args)
         report = intent_metrics(validation_predictions, HORIZONS_MS)
         thresholds = [max([.2, .35, .5, .65, .8], key=lambda threshold:
@@ -375,7 +401,8 @@ def main(model_class=ReachGraspFutureIntentModel,
         selection = (report["mean_future_position_cm"]
                      + .1 * report["mean_future_orientation_deg"]
                      + 5 * (1 - report["intent_mean_average_precision"]))
-        print(f"epoch={epoch} loss={np.mean(losses):.4f} score={selection:.3f} "
+        print(f"epoch={epoch} lr={optimizer.param_groups[0]['lr']:.2e} "
+              f"loss={np.mean(losses):.4f} score={selection:.3f} "
               f"future={report['mean_future_position_cm']:.2f}cm "
               f"orientation={report['mean_future_orientation_deg']:.1f}deg "
               f"intent_mAP={report['intent_mean_average_precision']:.3f}", flush=True)

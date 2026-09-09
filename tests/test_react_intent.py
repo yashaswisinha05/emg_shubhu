@@ -28,6 +28,26 @@ def test_action_and_sensor_future_cannot_leak():
     torch.testing.assert_close(branch(x)["features"], branch(x, masked)["features"])
 
 
+def test_block_intent_attention_makes_reconstruction_action_independent():
+    """ReactEMG's self-supervised-EMG task (arXiv:2506.19815 sec 3.2): with
+    block_intent_attention set, changing the visible actions must not move
+    the EMG reconstruction at all -- not merely leave it numerically close,
+    since attention to every intent key is forbidden outright."""
+    torch.manual_seed(4)
+    branch = CausalEMGIntent(width=16, layers=2, dropout=0.).eval()
+    x = torch.randn(1, 20, 16)
+    actions = torch.full((1, 20), 2, dtype=torch.long)
+    masked = branch(x, actions=actions, block_intent_attention=True)
+    actions_changed = torch.zeros((1, 20), dtype=torch.long)
+    changed = branch(x, actions=actions_changed, block_intent_attention=True)
+    torch.testing.assert_close(masked["reconstruction"], changed["reconstruction"])
+    # Without the block, a different action embedding is at least free to move it.
+    unblocked_masked = branch(x, actions=actions, block_intent_attention=False)
+    unblocked_changed = branch(x, actions=actions_changed, block_intent_attention=False)
+    assert not torch.allclose(unblocked_masked["reconstruction"],
+                              unblocked_changed["reconstruction"])
+
+
 def test_chunked_attention_matches_full_receptive_field():
     branch = CausalEMGIntent(width=16, layers=2, dropout=0., context=10).eval()
     x = torch.randn(1, 43, 16)

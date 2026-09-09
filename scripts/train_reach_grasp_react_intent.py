@@ -34,6 +34,13 @@ class ReactTraining:
         parser.add_argument("--emg-holding-weight", type=float, default=.2)
         parser.add_argument("--stability-weight", type=float, default=.03)
         parser.add_argument("--motion-weight", type=float, default=.2)
+        parser.add_argument("--react-context", type=int, default=100,
+                            help="Causal attention chunk size (frames) for the "
+                                 "intent-alignment branch; 100 frames = 1s at 100 Hz")
+
+    @staticmethod
+    def model_kwargs(args):
+        return {"react_context": args.react_context}
 
     @staticmethod
     def loss(model, output, batch, usable, args):
@@ -47,18 +54,37 @@ class ReactTraining:
         if args.masked_weight:
             hidden = spans(target.shape, emg.device)
             action_hidden = spans(target.shape, emg.device, probability=.6)
-            mode = int(torch.randint(3, (), device=emg.device))
-            if mode == 0:  # no labels, reconstruct masked EMG
+            # Four masking regimes, cycled uniformly, exactly matching
+            # ReactEMG's stated pretraining recipe (arXiv:2506.19815 sec 3.2,
+            # https://github.com/roamlab/reactemg):
+            #   0 Self-supervised EMG -- every action token is MASK, and EMG
+            #     queries are additionally forbidden (via attention masking,
+            #     not just the MASK embedding) from attending to any intent
+            #     token, so reconstruction is provably EMG-only. Also the
+            #     deployment configuration.
+            #   1 Temporally Aligned Masking -- EMG and action spans masked
+            #     at the same timesteps.
+            #   2 Partial EMG Masking -- ground-truth actions stay visible
+            #     everywhere; only EMG spans are hidden and reconstructed.
+            #   3 Partial Intent Masking -- the ENTIRE EMG signal stays
+            #     visible; only a subset of action tokens is masked.
+            mode = int(torch.randint(4, (), device=emg.device))
+            if mode == 0:  # self-supervised EMG
                 action_hidden = torch.ones_like(action_hidden)
-            elif mode == 1:  # aligned masking of both modalities
+            elif mode == 1:  # temporally aligned masking
                 action_hidden = hidden.clone()
+            elif mode == 2:  # partial EMG masking: actions fully visible
+                action_hidden = torch.zeros_like(action_hidden)
+            elif mode == 3:  # partial intent masking: EMG fully visible
+                hidden = torch.zeros_like(hidden)
             # No uncertain annotation or invalid-frame label is visible.
             action_hidden |= ~certain
             actions = torch.where(action_hidden, 2, target)
             corrupted = emg.clone()
             # Apply small noise only on standardized values with valid evidence.
             corrupted[..., :8] += .03 * torch.randn_like(emg[..., :8]) * emg[..., 8:]
-            aux = model.react(corrupted, actions=actions, hidden=hidden)
+            aux = model.react(corrupted, actions=actions, hidden=hidden,
+                              block_intent_attention=(mode == 0))
             reconstruction_mask = hidden[..., None] & emg[..., 8:].bool()
             reconstruction = masked_mean((aux["reconstruction"] - emg[..., :8]).square(),
                                          reconstruction_mask)
