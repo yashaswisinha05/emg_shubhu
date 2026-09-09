@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""Train causal EMG+IMU pose regression and dense open/close classification."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import random
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+from sklearn.metrics import confusion_matrix, f1_score
+from torch.nn import functional as F
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT), str(ROOT / "src")]
+
+from emg_touch.data.gripper_state import add_gripper_state
+from emg_touch.data.reach_grasp import preprocess
+from emg_touch.models.reach_grasp_gripper_state import GripperStatePoseModel
+from emg_touch.physics.rotation_6d import orientation_errors_numpy
+from scripts import train_reach_grasp as base
+
+
+def batches(trials, stats, batch_size, device, shuffle=False):
+    for batch in base.batches(trials, stats, batch_size, device, shuffle):
+        shape = batch["emg"].shape[:2]
+        labels = np.zeros(shape, dtype="int64")
+        valid = np.zeros(shape, dtype=bool)
+        for row, trial in enumerate(batch["trials"]):
+            n = len(trial["time"])
+            labels[row, :n] = trial["gripper_state"]
+            valid[row, :n] = trial["gripper_state_valid"]
+        batch["gripper_state"] = torch.from_numpy(labels).to(device)
+        batch["gripper_state_valid"] = torch.from_numpy(valid).to(device)
+        yield batch
+
+
+def span_mask(shape, device, probability=.25, span=10):
+    blocks = (shape[1] + span - 1) // span
+    return (torch.rand(shape[0], blocks, device=device) < probability).repeat_interleave(
+        span, 1)[:, :shape[1]]
+
+
+def masked_mean(values, mask):
+    if mask.shape != values.shape:
+        mask = mask.expand_as(values)
+    return values[mask].mean() if mask.any() else values.sum() * 0
+
+
+def loss(model, output, batch, class_weight, args):
+    wearable = batch["emg_usable"] & batch["imu_usable"]
+    valid = wearable & batch["gripper_state_valid"]
+    labels = batch["gripper_state"]
+    state = masked_mean(F.cross_entropy(output["gripper_state_logits"].transpose(1, 2),
+                                        labels, weight=class_weight, reduction="none"), valid)
+    react = masked_mean(F.cross_entropy(output["react_gripper_state_logits"].transpose(1, 2),
+                                        labels, weight=class_weight, reduction="none"), valid)
+    hidden = span_mask(labels.shape, labels.device)
+    actions = torch.where(hidden & valid, torch.full_like(labels, 2), labels)
+    actions = torch.where(valid, actions, torch.full_like(labels, 2))
+    emg_hidden = span_mask(labels.shape, labels.device)
+    auxiliary = model.react(batch["emg"], actions=actions, hidden=emg_hidden)
+    reconstruct_mask = emg_hidden[..., None] & batch["emg"][..., 8:].bool()
+    reconstruction = masked_mean(
+        (auxiliary["reconstruction"] - batch["emg"][..., :8]).square(), reconstruct_mask)
+    hidden_valid = hidden & valid
+    masked_state = masked_mean(F.cross_entropy(auxiliary["holding_logits"].transpose(1, 2),
+                               labels, weight=class_weight, reduction="none"), hidden_valid)
+    pair = valid[:, 1:] & valid[:, :-1] & (labels[:, 1:] == labels[:, :-1])
+    probability = output["gripper_state_logits"].softmax(-1)[..., 1]
+    stability = masked_mean((probability[:, 1:] - probability[:, :-1]).square(), pair)
+    pose_valid = wearable & batch["pose_mask"].squeeze(-1).bool()
+    position = masked_mean(F.smooth_l1_loss(output["position"], batch["pose"],
+                                            reduction="none"), pose_valid[..., None])
+    orientation_valid = wearable & batch["orientation_mask"]
+    orientation = masked_mean(F.smooth_l1_loss(output["orientation_6d"], batch["orientation"],
+                                               reduction="none"), orientation_valid[..., None])
+    total = (state + args.react_weight * react + args.masked_weight * (masked_state + reconstruction)
+             + args.stability_weight * stability + args.position_weight * position
+             + args.orientation_weight * orientation)
+    return total
+
+
+@torch.no_grad()
+def evaluate(model, trials, stats, args, zero_emg=False, zero_imu=False):
+    model.eval()
+    predicted, target, position_error, angle_error = [], [], [], []
+    for batch in batches(trials, stats, args.batch_size, args.device):
+        emg = torch.zeros_like(batch["emg"]) if zero_emg else batch["emg"]
+        imu = torch.zeros_like(batch["imu"]) if zero_imu else batch["imu"]
+        output = model(emg, imu)
+        wearable = batch["emg_usable"] & batch["imu_usable"]
+        state_valid = wearable & batch["gripper_state_valid"]
+        predicted.extend(output["gripper_state_logits"].argmax(-1)[state_valid].cpu().tolist())
+        target.extend(batch["gripper_state"][state_valid].cpu().tolist())
+        pose_valid = wearable & batch["pose_mask"].squeeze(-1).bool()
+        p = output["position"] * torch.as_tensor(stats["position"]["std"], device=args.device)
+        p += torch.as_tensor(stats["position"]["mean"], device=args.device)
+        truth = batch["pose"] * torch.as_tensor(stats["position"]["std"], device=args.device)
+        truth += torch.as_tensor(stats["position"]["mean"], device=args.device)
+        position_error.extend((100 * torch.linalg.vector_norm(p - truth, dim=-1)[pose_valid]).cpu().tolist())
+        orientation_valid = wearable & batch["orientation_mask"]
+        if orientation_valid.any():
+            geodesic, _ = orientation_errors_numpy(
+                output["orientation_6d"][orientation_valid].cpu().numpy(),
+                batch["orientation"][orientation_valid].cpu().numpy())
+            angle_error.extend(geodesic.tolist())
+    return {"gripper_accuracy": float(np.mean(np.equal(predicted, target))),
+            "gripper_macro_f1": float(f1_score(target, predicted, average="macro")),
+            "confusion_open_close": confusion_matrix(target, predicted, labels=[0, 1]).tolist(),
+            "position_cm": float(np.mean(position_error)),
+            "orientation_deg": float(np.mean(angle_error)) if angle_error else None}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--output-dir", type=Path, default=Path("runs/gripper_state_pose_seed42"))
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--raw-rate-hz", type=float, default=1259.4)
+    parser.add_argument("--event-origin", choices=["auto", "start"], default="auto")
+    parser.add_argument("--patience", type=int, default=12)
+    parser.add_argument("--react-weight", type=float, default=.2)
+    parser.add_argument("--masked-weight", type=float, default=.15)
+    parser.add_argument("--stability-weight", type=float, default=.03)
+    parser.add_argument("--position-weight", type=float, default=.2)
+    parser.add_argument("--orientation-weight", type=float, default=.5)
+    args = parser.parse_args()
+    if args.output_dir.exists() and any(args.output_dir.iterdir()):
+        parser.error("use an empty output directory")
+    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
+    settings = {"raw_rate_hz": args.raw_rate_hz, "rate_hz": 100., "gap_s": .02,
+                "event_origin": args.event_origin, "event_pulse_s": .1,
+                "require_events": False}
+    trials, rejected, hashes = [], {}, {}
+    for path in sorted(Path(args.root).rglob("trial_*.csv")):
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest in hashes:
+            rejected[str(path)] = "byte-identical duplicate of " + hashes[digest]; continue
+        hashes[digest] = str(path)
+        try:
+            trials.append(add_gripper_state(path, preprocess(path, settings), settings["gap_s"]))
+        except (ValueError, KeyError) as error:
+            rejected[str(path)] = str(error)
+    if len(trials) < 20:
+        raise ValueError("need at least 20 valid trials")
+    np.random.default_rng(args.seed).shuffle(trials)
+    count = max(1, round(.2 * len(trials)))
+    test, validation, train = trials[:count], trials[count:2*count], trials[2*count:]
+    stats = base.normalization(train)
+    args.output_dir.mkdir(parents=True)
+    (args.output_dir / "data_audit.json").write_text(json.dumps(
+        {"accepted": {t["path"]: t["audit"] for t in trials}, "rejected": rejected}, indent=2))
+    (args.output_dir / "splits.json").write_text(json.dumps({k: [t["path"] for t in v]
+        for k, v in (("train", train), ("validation", validation), ("test", test))}, indent=2))
+    labels = np.concatenate([t["gripper_state"][t["gripper_state_valid"]] for t in train])
+    frequency = np.bincount(labels, minlength=2)
+    class_weight = torch.as_tensor(len(labels) / np.maximum(2 * frequency, 1),
+                                   dtype=torch.float32, device=args.device)
+    model_args = {"modality": "emg+imu", "width": 128, "patch": 16, "stride": 4,
+                  "layers": 4, "heads": 4, "dropout": .1, "react_context": 100}
+    model = GripperStatePoseModel(**model_args).to(args.device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    best, stale, checkpoint, history = float("inf"), 0, args.output_dir / "best.pt", []
+    for epoch in range(1, args.epochs + 1):
+        model.train(); losses = []
+        for batch in batches(train, stats, args.batch_size, args.device, True):
+            optimizer.zero_grad(set_to_none=True)
+            output = model(batch["emg"], batch["imu"])
+            value = loss(model, output, batch, class_weight, args)
+            if not torch.isfinite(value): raise FloatingPointError("nonfinite loss")
+            value.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.); optimizer.step()
+            losses.append(value.item())
+        report = evaluate(model, validation, stats, args)
+        score = report["position_cm"] + .1 * (report["orientation_deg"] or 0) + 5 * (1-report["gripper_macro_f1"])
+        history.append({"epoch": epoch, "training_loss": float(np.mean(losses)),
+                        "selection_score": score, "validation": report})
+        print(f"epoch={epoch} loss={np.mean(losses):.4f} score={score:.3f} "
+              f"state_f1={report['gripper_macro_f1']:.3f} pose={report['position_cm']:.2f}cm", flush=True)
+        if score < best:
+            best, stale = score, 0
+            torch.save({"format": "gripper_state_pose_v1", "state_dict": model.state_dict(),
+                "model_args": model_args, "normalization": stats, "preprocessing": settings,
+                "classes": ["open", "close"], "validation": report, "seed": args.seed}, checkpoint)
+        else:
+            stale += 1
+            if stale >= args.patience: break
+    (args.output_dir / "history.json").write_text(json.dumps(history, indent=2))
+    state = torch.load(checkpoint, map_location=args.device, weights_only=False)
+    model.load_state_dict(state["state_dict"])
+    results = {"emg_imu": evaluate(model, test, stats, args),
+               "without_emg": evaluate(model, test, stats, args, zero_emg=True),
+               "without_imu": evaluate(model, test, stats, args, zero_imu=True),
+               "protocol": {"inputs": "EMG+IMU only", "vive_role": "pose supervision only",
+                            "gripper_state_role": "classification supervision only"}}
+    (args.output_dir / "results.json").write_text(json.dumps(results, indent=2))
+    torch.save(state, args.output_dir / "final.pt")
+    print("TEST RESULTS", json.dumps(results, indent=2))
+
+
+if __name__ == "__main__": main()

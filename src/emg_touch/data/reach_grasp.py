@@ -79,9 +79,12 @@ def preprocess(path, settings):
     t = frame["time_perf_counter"].to_numpy()
     if len(t) < 64:
         raise ValueError("fewer than 64 timestamped rows")
-    events, label_source = event_times(frame, settings["event_origin"])
-    if events[0] < t[0] or events[1] > t[-1]:
-        raise ValueError("event timestamps outside recording; check clock/origin")
+    if settings.get("require_events", True):
+        events, label_source = event_times(frame, settings["event_origin"])
+        if events[0] < t[0] or events[1] > t[-1]:
+            raise ValueError("event timestamps outside recording; check clock/origin")
+    else:
+        events, label_source = np.array([np.inf, np.inf]), "not_required"
     rate = settings["raw_rate_hz"]
     declared = constant(frame, "sample_rate_hz_declared")
     if declared is not None and abs(declared / rate - 1) > .25:
@@ -143,7 +146,8 @@ def preprocess(path, settings):
     holding = ((grid >= events[0]) & (grid < events[1])).astype("float32")
     event_labels = ((grid[:, None] >= events) &
                     (grid[:, None] < events + settings["event_pulse_s"])).astype("float32")
-    return {"path": str(path), "time": grid - t[0], "events": events - t[0],
+    relative_events = events - t[0] if np.isfinite(events).all() else np.array([np.nan, np.nan])
+    return {"path": str(path), "time": grid - t[0], "events": relative_events,
             "emg": features.astype("float32"), "emg_valid": emg_valid,
             "imu": imu[index].astype("float32"), "imu_valid": iv,
             "position": position, "pose_valid": pose_valid,
