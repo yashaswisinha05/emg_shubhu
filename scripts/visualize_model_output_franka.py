@@ -115,11 +115,18 @@ def main():
                         default=(0., 1., 0., 0.))
     parser.add_argument("--simulation-steps", type=int, default=24)
     parser.add_argument("--final-settle-steps", type=int, default=240)
+    parser.add_argument("--grasp-probability-threshold", type=float,
+        help="Override the EMG checkpoint's validation-selected grasp threshold")
     parser.add_argument("--release-probability-threshold", type=float, default=.9)
     args = parser.parse_args()
     if (args.speed < 0 or min(args.interval_ms, args.warmup_ms,
                               args.simulation_steps, args.final_settle_steps) <= 0):
         parser.error("speed must be nonnegative; intervals and steps must be positive")
+    if (args.grasp_probability_threshold is not None
+            and not 0 <= args.grasp_probability_threshold <= 1):
+        parser.error("grasp probability threshold must be between 0 and 1")
+    if not 0 <= args.release_probability_threshold <= 1:
+        parser.error("release probability threshold must be between 0 and 1")
 
     grasp_state = torch.load(
         args.grasp_checkpoint, map_location=args.device, weights_only=False)
@@ -133,8 +140,11 @@ def main():
         parser.error(str(error))
     probability = grasp_probabilities(grasp_state, trial, args.device)
     usable = trial["emg_valid"].mean(1) >= .75
+    grasp_threshold = (grasp_state["decoder"]["threshold"]
+        if args.grasp_probability_threshold is None
+        else args.grasp_probability_threshold)
     detections = detect(trial["time"], probability, usable,
-        grasp_state["decoder"]["threshold"],
+        grasp_threshold,
         grasp_state["decoder"]["persistence_s"])
     grasp_time = detections[0] if detections else None
 
@@ -162,6 +172,9 @@ def main():
         "vive_role": "black comparison trajectory only",
         "pose_checkpoint": str(args.pose_checkpoint),
         "grasp_checkpoint": str(args.grasp_checkpoint),
+        "grasp_probability_threshold": grasp_threshold,
+        "grasp_persistence_s": grasp_state["decoder"]["persistence_s"],
+        "release_probability_threshold": args.release_probability_threshold,
         "predicted_grasp_s": grasp_time,
         "manual_grasp_s_comparison_only": float(trial["events"][0]),
         "all_robot_commands_are_model_outputs": True}, separators=(",", ":")),
@@ -183,4 +196,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

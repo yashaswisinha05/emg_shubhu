@@ -892,7 +892,9 @@ For model output to drive every Franka command:
 python scripts/visualize_model_output_franka.py \
   --pose-checkpoint runs/reach_grasp_masked_reconstruction_seed42/emg_imu_best.pt \
   --grasp-checkpoint runs/emg_grasp_onset_seed42/best.pt \
-  --device cuda --trial-seed 7 --speed 1
+  --device cuda --trial-seed 7 --speed 1 \
+  --grasp-probability-threshold 0.9 \
+  --release-probability-threshold 0.9
 ```
 
 Here the EMG+IMU model supplies XYZ, orientation and release, while the
