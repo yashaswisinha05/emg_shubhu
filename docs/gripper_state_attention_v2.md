@@ -24,3 +24,17 @@ Compare V2 against V1 on the identical saved split. The acceptance targets are
 gripper macro-F1 above 0.98, fourth-quarter pixel error below 68.9 px, current
 XYZ no worse than 3.02 cm, and 200 ms future XYZ no worse than 4.01 cm. Run
 multiple seeds before treating any improvement as evidence.
+
+## Inference
+
+Replay any unseen CSV. VIVE columns, if present, are ignored:
+
+```bash
+python scripts/infer_gripper_state_attention.py \
+  --checkpoint runs/gripper_state_attention_v2/emg_imu_best.pt \
+  --trial-csv data/unseen_subject/trial_001.csv --device cuda
+```
+
+For a live source, omit `--trial-csv` and pipe one JSON object per raw sample:
+`{"time_s": ..., "emg": [4 values], "imu": [24 values]}`. The API equivalent
+is `StateAttentionStream.update(time_s, emg_4, imu_24, canvas_px)`.
