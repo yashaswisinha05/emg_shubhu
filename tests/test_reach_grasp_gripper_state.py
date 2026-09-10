@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from emg_touch.data.click_target import add_click_target
+from emg_touch.data.final_pose import add_final_pose
 from emg_touch.data.gripper_state import add_gripper_state
 from emg_touch.data.reach_grasp import preprocess
 from emg_touch.models.reach_grasp_gripper_state import GripperStatePoseModel
@@ -144,12 +145,36 @@ def test_click_target_prefers_norm_and_falls_back_to_pixels(tmp_path):
         add_click_target(path, preprocess(path, state_settings))
 
 
-def test_click_head_is_absent_unless_requested():
-    assert GripperStatePoseModel(width=16, patch=4, stride=2, layers=1).click is None
-    model = GripperStatePoseModel(width=16, patch=4, stride=2, layers=1, predict_click=True)
+def test_final_pose_uses_a_trailing_window_not_one_sample(tmp_path):
+    """frame() ramps VIVE position linearly to 0.0999 m over a 1 s trial, so
+    the endpoint taken over the trailing 100 ms sits near 0.094, well past
+    mid-trial and below the very last sample."""
+    data = frame()
+    data = data.drop(columns=["t_grasp_perf", "t_release_perf"])
+    path = tmp_path / "trial.csv"
+    data.to_csv(path, index=False)
+    state_settings = {**settings(), "require_events": False}
+    trial = add_final_pose(preprocess(path, state_settings))
+    assert trial["final_position"] == pytest.approx([.094, .094, .094], abs=3e-3)
+    assert "final_orientation" not in trial  # frame() carries no quaternion columns
+    for axis in "xyz":
+        data[f"VIVE_T0_pos_{axis}_m"] = np.nan
+    data.to_csv(path, index=False)
+    with pytest.raises(ValueError, match="no valid VIVE samples"):
+        add_final_pose(preprocess(path, state_settings))
+
+
+def test_optional_heads_are_absent_unless_requested():
+    plain = GripperStatePoseModel(width=16, patch=4, stride=2, layers=1)
+    assert plain.click is None and plain.final_position is None
+    model = GripperStatePoseModel(width=16, patch=4, stride=2, layers=1,
+                                  predict_click=True, predict_final_pose=True)
     emg, imu = torch.randn(2, 30, 16), torch.randn(2, 30, 48)
     emg[..., 8:], imu[..., 24:] = 1, 1
-    assert model.eval()(emg, imu)["click"].shape == (2, 30, 2)
+    output = model.eval()(emg, imu)
+    assert output["click"].shape == (2, 30, 2)
+    assert output["final_position"].shape == (2, 30, 3)
+    assert output["final_orientation_6d"].shape == (2, 30, 6)
 
 
 def test_too_few_trials_reports_why(tmp_path, monkeypatch):

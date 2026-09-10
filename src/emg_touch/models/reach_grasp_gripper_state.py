@@ -58,7 +58,7 @@ class GripperStatePoseModel(nn.Module):
 
     def __init__(self, modality="emg+imu", width=128, patch=16, stride=4,
                  layers=4, heads=4, dropout=.1, react_context=100,
-                 predict_click=False):
+                 predict_click=False, predict_final_pose=False):
         super().__init__()
         self.modality = modality
         kwargs = dict(width=width, patch=patch, stride=stride, layers=layers,
@@ -94,6 +94,17 @@ class GripperStatePoseModel(nn.Module):
         if predict_click:
             self.click = nn.Sequential(nn.Linear(width * 2, width), nn.GELU(),
                                        nn.Linear(width, 2))
+
+        # The 3D counterpart of the click head: where this reach ends in the
+        # tracker's frame, again one value per trial predicted at every step.
+        # Separate from self.position/self.orientation, which track the hand
+        # as it is now rather than anticipating where it is going.
+        self.final_position = self.final_orientation = None
+        if predict_final_pose:
+            self.final_position = nn.Sequential(nn.Linear(width * 2, width), nn.GELU(),
+                                                nn.Linear(width, 3))
+            self.final_orientation = nn.Sequential(nn.Linear(width * 2, width), nn.GELU(),
+                                                   nn.Linear(width, 6))
 
         # Dense open/close state: same local-catches-transitions,
         # context-stabilizes-the-sustained-state split ReachGraspHybrid used
@@ -170,6 +181,10 @@ class GripperStatePoseModel(nn.Module):
             "position": self.position(context),
             "orientation_6d": self.orientation(context),
             "click": self.click(context) if self.click is not None else None,
+            "final_position": (self.final_position(context)
+                               if self.final_position is not None else None),
+            "final_orientation_6d": (self.final_orientation(context)
+                                     if self.final_orientation is not None else None),
             "gripper_state_logits": gripper_state_logits,
             "react_gripper_state_logits": branch["holding_logits"],
             "react_reconstruction": branch["reconstruction"],
