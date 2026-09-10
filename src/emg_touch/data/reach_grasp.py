@@ -123,24 +123,33 @@ def preprocess(path, settings):
     # Two trailing RMS scales, not decimated high-frequency raw EMG.
     features = np.concatenate([rms[index], long_rms[index]], 1)
     emg_valid = np.concatenate([ev, ev], 1)
-    position = numeric(frame, [f"VIVE_T0_pos_{a}_m" for a in "xyz"])
-    pv = np.isfinite(position).all(1)
-    for name, limit in [("VIVE_T0_sync_error_ms", 20.), ("VIVE_T0_tracking_age_us", 50000.)]:
-        if name in frame:
-            value = pd.to_numeric(frame[name], errors="coerce").to_numpy()
-            pv &= np.isfinite(value) & (np.abs(value) <= limit)
-    position = np.nan_to_num(position[index]).astype("float32")
-    pose_valid = pv[index] & recent
-    quaternion_names = [f"VIVE_T0_quat_{axis}" for axis in "wxyz"]
-    if all(name in frame for name in quaternion_names):
-        quaternion = numeric(frame, quaternion_names)
-        quaternion_norm = np.linalg.norm(quaternion, axis=1)
-        qv = np.isfinite(quaternion).all(1) & (quaternion_norm > .5) & (quaternion_norm < 1.5)
-        qv &= pv
-        rotation = quaternion_to_matrix_numpy(np.nan_to_num(quaternion[index], nan=0.))
-        orientation = matrix_to_rotation_6d_numpy(rotation).astype("float32")
-        orientation_valid = qv[index] & recent
+    if settings.get("load_pose", True):
+        position = numeric(frame, [f"VIVE_T0_pos_{a}_m" for a in "xyz"])
+        pv = np.isfinite(position).all(1)
+        for name, limit in [("VIVE_T0_sync_error_ms", 20.),
+                            ("VIVE_T0_tracking_age_us", 50000.)]:
+            if name in frame:
+                value = pd.to_numeric(frame[name], errors="coerce").to_numpy()
+                pv &= np.isfinite(value) & (np.abs(value) <= limit)
+        position = np.nan_to_num(position[index]).astype("float32")
+        pose_valid = pv[index] & recent
+        quaternion_names = [f"VIVE_T0_quat_{axis}" for axis in "wxyz"]
+        if all(name in frame for name in quaternion_names):
+            quaternion = numeric(frame, quaternion_names)
+            quaternion_norm = np.linalg.norm(quaternion, axis=1)
+            qv = (np.isfinite(quaternion).all(1) & (quaternion_norm > .5)
+                  & (quaternion_norm < 1.5) & pv)
+            rotation = quaternion_to_matrix_numpy(np.nan_to_num(quaternion[index], nan=0.))
+            orientation = matrix_to_rotation_6d_numpy(rotation).astype("float32")
+            orientation_valid = qv[index] & recent
+        else:
+            orientation = np.zeros((len(grid), 6), dtype="float32")
+            orientation_valid = np.zeros(len(grid), dtype=bool)
     else:
+        # Output placeholders retain the common batch schema. They are always
+        # invalid and therefore cannot enter a pose loss.
+        position = np.zeros((len(grid), 3), dtype="float32")
+        pose_valid = np.zeros(len(grid), dtype=bool)
         orientation = np.zeros((len(grid), 6), dtype="float32")
         orientation_valid = np.zeros(len(grid), dtype=bool)
     holding = ((grid >= events[0]) & (grid < events[1])).astype("float32")
@@ -155,5 +164,6 @@ def preprocess(path, settings):
             "holding": holding, "event_labels": event_labels,
             "audit": {"label_source": label_source, "frames": len(grid),
                       "emg_valid_fraction": float(ev.mean()), "imu_valid_fraction": float(iv.mean()),
+                      "vive_loaded": bool(settings.get("load_pose", True)),
                       "pose_valid_fraction": float(pose_valid.mean()),
                       "orientation_valid_fraction": float(orientation_valid.mean())}}

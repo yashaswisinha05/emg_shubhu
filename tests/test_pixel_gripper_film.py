@@ -81,6 +81,7 @@ def test_calibration_training_smoke(tmp_path, monkeypatch):
             data.time_perf_counter < 100.5, "open", "close")
         data["canvas_width_px"], data["canvas_height_px"] = 1440, 900
         data["click_x_norm"], data["click_y_norm"] = index / 18, .4
+        data = data.drop(columns=[name for name in data if name.startswith("VIVE_")])
         data.to_csv(root / f"trial_{index:03}.csv", index=False)
     base = model()
     checkpoint, output = tmp_path / "base.pt", tmp_path / "calibrated.pt"
@@ -104,3 +105,5 @@ def test_calibration_training_smoke(tmp_path, monkeypatch):
     saved = torch.load(output, weights_only=False)
     assert saved["format"] == "gripper_pixel_film_calibration_v1"
     assert saved["pose_and_future_frozen"] is True
+    assert saved["vive_required"] is False
+    assert saved["rejected"] == {}

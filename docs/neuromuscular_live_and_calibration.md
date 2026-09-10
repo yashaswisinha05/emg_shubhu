@@ -34,6 +34,10 @@ future trajectory, and the entire encoder. It learns only grouped FiLM for
 the pixel/gripper branches, a 2D pixel affine correction, and gripper
 temperature/bias.
 
+Calibration CSVs do **not** need any VIVE columns. Required data are the
+timestamp, four EMG channels, 24 IMU channels, `gripper_state`, canvas size,
+and either normalized or pixel click coordinates.
+
 ```bash
 python scripts/calibrate_pixel_gripper_film.py \
   --checkpoint runs/gripper_neuromuscular_future_fused/emg_imu_best.pt \

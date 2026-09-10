@@ -26,6 +26,7 @@ from scripts import train_gripper_state_pose as training
 
 def load_trials(roots, settings):
     trials, rejected = [], {}
+    settings = {**settings, "load_pose": False, "require_events": False}
     for path in sorted({p for root in roots for p in Path(root).rglob("trial_*.csv")}):
         try:
             trial = add_gripper_state(path, preprocess(path, settings), settings["gap_s"])
@@ -154,6 +155,8 @@ def main():
         "film_groups": args.film_groups,
         "calibration_state_dict": best_state,
         "calibration_scope": ["pixel", "gripper"],
+        "calibration_inputs": ["emg", "imu", "gripper_state", "pixel_target"],
+        "vive_required": False,
         "pose_and_future_frozen": True,
         "roots": args.root,
         "splits": {"train": [t["path"] for t in train],
