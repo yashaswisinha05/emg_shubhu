@@ -58,7 +58,7 @@ class GripperStatePoseModel(nn.Module):
 
     def __init__(self, modality="emg+imu", width=128, patch=16, stride=4,
                  layers=4, heads=4, dropout=.1, react_context=100,
-                 predict_click=False, predict_final_pose=False):
+                 predict_click=False, predict_final_pose=False, future_steps=0):
         super().__init__()
         self.modality = modality
         kwargs = dict(width=width, patch=patch, stride=stride, layers=layers,
@@ -84,6 +84,14 @@ class GripperStatePoseModel(nn.Module):
                                       nn.Linear(width, 3))
         self.orientation = nn.Sequential(
             nn.Linear(width * 2, width), nn.GELU(), nn.Linear(width, 6))
+        self.future_steps = future_steps
+        self.future_pose = None
+        if future_steps:
+            # Auxiliary pose decoder; no gripper/click outputs are its inputs.
+            # Preserve RNG so the baseline heads start identically in ablations.
+            with torch.random.fork_rng(devices=[]):
+                self.future_pose = nn.Sequential(
+                    nn.Linear(width * 2, width), nn.GELU(), nn.Linear(width, future_steps * 9))
 
         # Where on the canvas this reach is going to land, in normalized
         # canvas units. One target per trial, so this head predicts the same
@@ -177,7 +185,7 @@ class GripperStatePoseModel(nn.Module):
         branch = self.react(react_emg)  # every gripper_state token is MASK at inference
         gripper_state_logits = gripper_state_logits + self.react_current(branch["features"])
 
-        return {
+        result = {
             "position": self.position(context),
             "orientation_6d": self.orientation(context),
             "click": self.click(context) if self.click is not None else None,
@@ -194,3 +202,8 @@ class GripperStatePoseModel(nn.Module):
             "fusion_weights": context_weights,
             "local_fusion_weights": local_weights,
         }
+        if self.future_pose is not None:
+            future = self.future_pose(context).reshape(*context.shape[:2], self.future_steps, 9)
+            result["future_position"] = future[..., :3]
+            result["future_orientation_6d"] = future[..., 3:]
+        return result

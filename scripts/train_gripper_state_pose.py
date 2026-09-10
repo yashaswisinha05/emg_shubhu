@@ -23,6 +23,7 @@ from emg_touch.data.gripper_state import add_gripper_state
 from emg_touch.data.reach_grasp import preprocess
 from emg_touch.models.reach_grasp_gripper_state import GripperStatePoseModel
 from emg_touch.models.reach_grasp_gripper_pixel import GoalConsistentGripperPoseModel
+from emg_touch.models.gripper_future_loss import future_pairs, future_pose_loss
 from emg_touch.physics.rotation_6d import orientation_errors_numpy
 from scripts import train_reach_grasp as base
 
@@ -148,6 +149,8 @@ def loss(model, output, batch, class_weight, args):
                                             batch["final_orientation"],
                                             reduction="none"), turn_valid[..., None])
         total = total + args.final_pose_weight * (endpoint + turn)
+    if "future_position" in output:
+        total = total + args.future_pose_weight * future_pose_loss(output, batch)
     return total
 
 
@@ -172,10 +175,26 @@ def evaluate(model, trials, stats, args, zero_emg=False, zero_imu=False):
     predicted, target, position_error, angle_error = [], [], [], []
     pixel_error, pixel_error_xy, pixel_progress = [], [], []
     endpoint_error, endpoint_error_xyz, endpoint_progress, endpoint_angle = [], [], [], []
+    future_errors = {}
     for batch in batches(trials, stats, args.batch_size, args.device):
         emg = torch.zeros_like(batch["emg"]) if zero_emg else batch["emg"]
         imu = torch.zeros_like(batch["imu"]) if zero_imu else batch["imu"]
         output = model(emg, imu)
+        if "future_position" in output:
+            scale = torch.as_tensor(stats["position"]["std"], device=args.device)
+            for h, pred, truth, pmask, rpred, rtruth, rmask in future_pairs(output, batch):
+                item = future_errors.setdefault(h, {"position": [], "orientation": [], "hold": []})
+                item["position"].extend((100 * torch.linalg.vector_norm(
+                    (pred - truth) * scale, dim=-1))[pmask].cpu().tolist())
+                # Persistence using the current MODEL prediction, same targets.
+                hold = batch["pose"].shape[1] - h
+                item["hold"].extend((100 * torch.linalg.vector_norm(
+                    (output["position"][:, :hold] - truth) * scale,
+                    dim=-1))[pmask].cpu().tolist())
+                if rmask.any():
+                    angles, _ = orientation_errors_numpy(
+                        rpred[rmask].cpu().numpy(), rtruth[rmask].cpu().numpy())
+                    item["orientation"].extend(angles.tolist())
         wearable = batch["emg_usable"] & batch["imu_usable"]
         state_valid = wearable & batch["gripper_state_valid"]
         predicted.extend(output["gripper_state_logits"].argmax(-1)[state_valid].cpu().tolist())
@@ -235,6 +254,15 @@ def evaluate(model, trials, stats, args, zero_emg=False, zero_imu=False):
         report["final_position_cm_z"] = float(xyz[:, 2].mean())
     if endpoint_angle:
         report["final_orientation_deg"] = float(np.mean(endpoint_angle))
+    if future_errors:
+        report["future_pose_by_ms"] = {
+            str(h * 10): {
+                "position_cm": float(np.mean(v["position"])) if v["position"] else None,
+                "orientation_deg": float(np.mean(v["orientation"])) if v["orientation"] else None,
+                "hold_current_prediction_cm": float(np.mean(v["hold"])) if v["hold"] else None,
+                "valid_position_frames": len(v["position"]),
+                "valid_orientation_frames": len(v["orientation"]),
+            } for h, v in future_errors.items()}
     return report
 
 
@@ -253,6 +281,8 @@ def train_one(modality, args, train, validation, stats, class_weight, settings, 
                   "layers": 4, "heads": 4, "dropout": .1, "react_context": 100,
                   "predict_click": args.pixel_weight > 0,
                   "predict_final_pose": args.final_pose_weight > 0}
+    if args.future_pose_weight > 0:
+        model_args["future_steps"] = args.future_pose_ms // 10
     model_class = (GoalConsistentGripperPoseModel
                    if args.pixel_architecture == "goal-consistent"
                    else GripperStatePoseModel)
@@ -300,7 +330,11 @@ def train_one(modality, args, train, validation, stats, class_weight, settings, 
             checkpoint_format = ("gripper_state_pose_goal_pixel_v1"
                                  if args.pixel_architecture == "goal-consistent"
                                  else "gripper_state_pose_v2")
+            if args.future_pose_weight > 0:
+                checkpoint_format += "_future_pose_v1"
             torch.save({"format": checkpoint_format, "state_dict": model.state_dict(),
+                "future_pose": {"weight": args.future_pose_weight,
+                                "horizon_ms": args.future_pose_ms, "step_ms": 10},
                 "model_args": model_args, "normalization": stats, "preprocessing": settings,
                 "classes": ["open", "close"], "validation": report, "seed": args.seed,
                 "augmentation": {"physiological": augmenter is not None,
@@ -347,6 +381,10 @@ def main():
                         default="direct",
                         help="Keep the original direct head, or use real-pixel loss, "
                              "late-evidence weighting, and endpoint-consistent prediction")
+    parser.add_argument("--future-pose-weight", type=float, default=0.,
+                        help="Auxiliary withheld-future position/orientation loss; 0 disables")
+    parser.add_argument("--future-pose-ms", type=int, default=200,
+                        help="Predict every 10 ms through this horizon (100 Hz pose grid)")
     parser.add_argument("--physiological-augmentation", action="store_true",
                         help="Apply causal EMG/IMU gain, mounting-rotation, noise, drift and "
                              "dropout augmentation to training batches only (see "
@@ -360,6 +398,10 @@ def main():
                              "train_reach_grasp.py's convention); pass a single "
                              "value to skip the ablation and train only that one")
     args = parser.parse_args()
+    if not np.isfinite(args.future_pose_weight) or args.future_pose_weight < 0:
+        parser.error("future-pose weight must be finite and nonnegative")
+    if args.future_pose_ms <= 0 or args.future_pose_ms % 10:
+        parser.error("future-pose-ms must be a positive multiple of 10")
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         parser.error("use an empty output directory")
     if args.augmentation_strength < 0:
@@ -463,11 +505,16 @@ def main():
                             "augmentation_strength": args.augmentation_strength,
                             "pixel_weight": args.pixel_weight,
                             "pixel_architecture": args.pixel_architecture,
+                            "future_pose_weight": args.future_pose_weight,
+                            "future_pose_ms": args.future_pose_ms if args.future_pose_weight else None,
+                            "future_pose_role": "withheld VIVE supervision; no future inputs",
                             "final_pose_weight": args.final_pose_weight,
                             "click_target_role": "screen-target regression supervision",
                             "heads": ["gripper_state", "pose (current)", "click (pixels)",
                                       "final_pose (endpoint)"],
                             "preprocessing": settings}}
+    if args.future_pose_weight > 0:
+        results["protocol"]["heads"].append("future pose sequence (position + orientation)")
     for modality in args.models:
         model, _ = train_one(modality, args, train, validation, stats, class_weight,
                              settings, augmenter)
