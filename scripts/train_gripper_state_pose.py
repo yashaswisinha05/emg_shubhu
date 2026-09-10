@@ -354,6 +354,7 @@ def train_one(modality, args, train, validation, stats, class_weight, settings, 
                                           args.pixel_architecture == "goal-consistent"},
                 "model_args": model_args, "normalization": stats, "preprocessing": settings,
                 "classes": ["open", "close"], "validation": report, "seed": args.seed,
+                "split_seed": args.split_seed,
                 "augmentation": {"physiological": augmenter is not None,
                                  "strength": args.augmentation_strength}}, checkpoint)
         else:
@@ -377,6 +378,8 @@ def main():
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--split-seed", type=int,
+                        help="Trial-split seed; defaults to --seed for backward compatibility")
     parser.add_argument("--raw-rate-hz", type=float, default=1259.4)
     parser.add_argument("--event-origin", choices=["auto", "start"], default="auto")
     parser.add_argument("--patience", type=int, default=12)
@@ -488,7 +491,9 @@ def main():
             f"{len(paths)} files matched under {', '.join(args.root)}\n"
             f"rejection reasons (see {args.output_dir / 'data_audit.json'} for the full list):\n"
             f"{summary or '  (no files were rejected -- fewer than 20 trial_*.csv files exist)'}")
-    np.random.default_rng(args.seed).shuffle(trials)
+    split_seed = args.seed if args.split_seed is None else args.split_seed
+    args.split_seed = split_seed
+    np.random.default_rng(split_seed).shuffle(trials)
     count = max(1, round(.2 * len(trials)))
     test, validation, train = trials[:count], trials[count:2*count], trials[2*count:]
     stats = base.normalization(train)
@@ -525,6 +530,7 @@ def main():
         augmenter = PhysiologicalWearableAugmenter(args.augmentation_strength)
 
     results = {"protocol": {"roots": args.root, "models": args.models,
+                            "training_seed": args.seed, "split_seed": split_seed,
                             "vive_role": "pose supervision only",
                             "gripper_state_role": "classification supervision only",
                             "physiological_augmentation": args.physiological_augmentation,

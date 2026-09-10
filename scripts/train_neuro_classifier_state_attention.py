@@ -26,6 +26,7 @@ from scripts import train_gripper_state_pose as base
 
 
 active_normalization = None
+trained_parameter_count = None
 
 
 def main():
@@ -117,10 +118,14 @@ def main():
 
     def train_with_normalization(modality, args, train, validation, stats,
                                  class_weight, settings, augmenter=None):
-        global active_normalization
+        global active_normalization, trained_parameter_count
         active_normalization = stats
-        return old_train_one(modality, args, train, validation, stats,
-                             class_weight, settings, augmenter)
+        trained = old_train_one(modality, args, train, validation, stats,
+                                class_weight, settings, augmenter)
+        trained_parameter_count = sum(
+            parameter.numel() for parameter in trained[0].parameters()
+            if parameter.requires_grad)
+        return trained
 
     base.GripperStatePoseModel, base.loss = model_factory, hybrid_loss
     base.evaluate, base.train_one = position_only, train_with_normalization
@@ -157,6 +162,7 @@ def main():
             "classifier_normalization": teacher_state["normalization"],
             "classifier_preprocessing": teacher_state["preprocessing"],
             "classifier_source": str(options.classifier_checkpoint),
+            "parameter_count": int(trained_parameter_count),
         })
         torch.save(checkpoint, path)
     print(f"hybrid protocol written to {results_path}")
