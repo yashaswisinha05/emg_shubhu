@@ -149,8 +149,8 @@ def by_quarter(error, progress):
 def evaluate(model, trials, stats, args, zero_emg=False, zero_imu=False):
     model.eval()
     predicted, target, position_error, angle_error = [], [], [], []
-    pixel_error, pixel_progress = [], []
-    endpoint_error, endpoint_progress, endpoint_angle = [], [], []
+    pixel_error, pixel_error_xy, pixel_progress = [], [], []
+    endpoint_error, endpoint_error_xyz, endpoint_progress, endpoint_angle = [], [], [], []
     for batch in batches(trials, stats, args.batch_size, args.device):
         emg = torch.zeros_like(batch["emg"]) if zero_emg else batch["emg"]
         imu = torch.zeros_like(batch["imu"]) if zero_imu else batch["imu"]
@@ -177,6 +177,7 @@ def evaluate(model, trials, stats, args, zero_emg=False, zero_imu=False):
                 delta = (output["click"] - batch["click_target"]) * batch["canvas_px"][:, None, :]
                 distance = torch.linalg.vector_norm(delta, dim=-1)
                 pixel_error.extend(distance[click_valid].cpu().tolist())
+                pixel_error_xy.extend(delta.abs()[click_valid].cpu().tolist())
                 pixel_progress.extend(batch["trial_progress"][click_valid].cpu().tolist())
         if output["final_position"] is not None:
             endpoint_valid = wearable & batch["final_position_valid"]
@@ -185,6 +186,7 @@ def evaluate(model, trials, stats, args, zero_emg=False, zero_imu=False):
                 delta = (output["final_position"] - batch["final_position"]) * scale
                 distance = 100 * torch.linalg.vector_norm(delta, dim=-1)
                 endpoint_error.extend(distance[endpoint_valid].cpu().tolist())
+                endpoint_error_xyz.extend((100 * delta.abs())[endpoint_valid].cpu().tolist())
                 endpoint_progress.extend(batch["trial_progress"][endpoint_valid].cpu().tolist())
             turn_valid = wearable & batch["final_orientation_valid"]
             if turn_valid.any():
@@ -198,11 +200,18 @@ def evaluate(model, trials, stats, args, zero_emg=False, zero_imu=False):
               "position_cm": float(np.mean(position_error)),
               "orientation_deg": float(np.mean(angle_error)) if angle_error else None}
     if pixel_error:
+        xy = np.asarray(pixel_error_xy)
         report["click_pixel_error"] = float(np.mean(pixel_error))
         report["click_pixel_error_by_quarter"] = by_quarter(pixel_error, pixel_progress)
+        report["click_pixel_error_x"] = float(xy[:, 0].mean())
+        report["click_pixel_error_y"] = float(xy[:, 1].mean())
     if endpoint_error:
+        xyz = np.asarray(endpoint_error_xyz)
         report["final_position_cm"] = float(np.mean(endpoint_error))
         report["final_position_cm_by_quarter"] = by_quarter(endpoint_error, endpoint_progress)
+        report["final_position_cm_x"] = float(xyz[:, 0].mean())
+        report["final_position_cm_y"] = float(xyz[:, 1].mean())
+        report["final_position_cm_z"] = float(xyz[:, 2].mean())
     if endpoint_angle:
         report["final_orientation_deg"] = float(np.mean(endpoint_angle))
     return report
@@ -249,10 +258,14 @@ def train_one(modality, args, train, validation, stats, class_weight, settings, 
         history.append({"epoch": epoch, "training_loss": float(np.mean(losses)),
                         "selection_score": score, "validation": report})
         pixels, endpoint = report.get("click_pixel_error"), report.get("final_position_cm")
+        click_xy = (f" click={pixels:.1f}px(x={report['click_pixel_error_x']:.1f},"
+                   f"y={report['click_pixel_error_y']:.1f})" if pixels is not None else "")
+        final_xyz = (f" final={endpoint:.2f}cm(x={report['final_position_cm_x']:.2f},"
+                    f"y={report['final_position_cm_y']:.2f},"
+                    f"z={report['final_position_cm_z']:.2f})" if endpoint is not None else "")
         print(f"modality={modality} epoch={epoch} loss={np.mean(losses):.4f} score={score:.3f} "
               f"state_f1={report['gripper_macro_f1']:.3f} pose={report['position_cm']:.2f}cm"
-              + (f" click={pixels:.1f}px" if pixels is not None else "")
-              + (f" final={endpoint:.2f}cm" if endpoint is not None else ""), flush=True)
+              + click_xy + final_xyz, flush=True)
         if score < best:
             best, stale = score, 0
             torch.save({"format": "gripper_state_pose_v2", "state_dict": model.state_dict(),
