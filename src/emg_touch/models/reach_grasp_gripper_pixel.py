@@ -28,7 +28,11 @@ class GoalConsistentGripperPoseModel(GripperStatePoseModel):
     def forward(self, emg, imu):
         result = super().forward(emg, imu)
         direct = self.click_direct(result["context_features"]).sigmoid()
-        endpoint = self.endpoint_to_click(result["final_position"]).sigmoid()
+        # Screen supervision must not turn the metric 3D endpoint into a
+        # convenient screen-coordinate code. The projector still learns the
+        # 3D-to-2D association, while endpoint geometry is trained only by its
+        # VIVE pose objective.
+        endpoint = self.endpoint_to_click(result["final_position"].detach()).sigmoid()
         blend = self.click_blend_logit.sigmoid()
         result["click_direct"] = direct
         result["click_from_endpoint"] = endpoint

@@ -42,3 +42,29 @@ format suffix and timing metadata. Recreate GoalConsistentGripperPoseModel using
 those model_args for inference. Future positions use the saved position
 normalization; future orientations use the existing 6D representation. Existing
 visualizers need explicit support for these new future outputs.
+
+## Improving the final 3D endpoint
+
+The first goal-consistent screen model allowed click loss to backpropagate into
+the final 3D endpoint. On the six-dataset run this reduced late screen error but
+made the endpoint act like a screen-coordinate code: fused endpoint error rose
+from 9.75 cm to about 16.4 cm and stopped converging late in the trial.
+
+The protected endpoint experiment detaches that gradient, trains endpoint
+position in equal physical-axis units, increases only endpoint-position loss,
+and moderately emphasizes observations near the end. The screen projector still
+learns from endpoint values, but cannot change them. Future-pose loss stays on.
+
+```bash
+git pull origin main
+bash scripts/train_gripper_future_endpoint.sh \
+  --root data/shubham_open data/shubham_close \
+    data/shubham1_open data/shubham1_closed \
+    data/gazania_open data/gazania_closed \
+  --output-dir runs/gripper_future_endpoint
+```
+
+Compare overall and quarter-4 `final_position_cm` against the future run, while
+checking current pose, 200 ms future pose, late click error, and gripper F1. The
+expected direction is recovery toward the earlier 9.75 cm overall endpoint and
+2.74 cm late endpoint; the held-out result determines the actual improvement.

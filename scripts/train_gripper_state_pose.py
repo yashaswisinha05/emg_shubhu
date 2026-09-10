@@ -69,6 +69,8 @@ def batches(trials, stats, batch_size, device, shuffle=False):
         batch["final_position_valid"] = torch.from_numpy(final_position_valid).to(device)
         batch["final_orientation"] = torch.from_numpy(final_orientation).to(device)
         batch["final_orientation_valid"] = torch.from_numpy(final_orientation_valid).to(device)
+        batch["position_std"] = torch.as_tensor(
+            stats["position"]["std"], dtype=torch.float32, device=device)
         yield batch
 
 
@@ -142,13 +144,23 @@ def loss(model, output, batch, class_weight, args):
         total = total + args.pixel_weight * click
     if output["final_position"] is not None:
         endpoint_valid = wearable & batch["final_position_valid"]
-        endpoint = masked_mean(F.smooth_l1_loss(output["final_position"], batch["final_position"],
-                                                reduction="none"), endpoint_valid[..., None])
+        endpoint_delta = output["final_position"] - batch["final_position"]
+        if args.endpoint_loss_space == "physical":
+            # Ten centimetres is one loss unit. All physical axes therefore
+            # receive equal treatment regardless of training-set variance.
+            endpoint_delta = endpoint_delta * batch["position_std"] / .1
+        endpoint_frame = F.smooth_l1_loss(
+            endpoint_delta, torch.zeros_like(endpoint_delta), reduction="none").mean(-1)
+        endpoint_weight = 1 + args.endpoint_progress_weight * batch["trial_progress"].square()
+        endpoint_weight = endpoint_weight * endpoint_valid.float()
+        endpoint = ((endpoint_frame * endpoint_weight).sum()
+                    / endpoint_weight.sum().clamp_min(1.))
         turn_valid = wearable & batch["final_orientation_valid"]
         turn = masked_mean(F.smooth_l1_loss(output["final_orientation_6d"],
                                             batch["final_orientation"],
                                             reduction="none"), turn_valid[..., None])
-        total = total + args.final_pose_weight * (endpoint + turn)
+        total = total + args.final_pose_weight * (
+            args.final_position_multiplier * endpoint + turn)
     if "future_position" in output:
         total = total + args.future_pose_weight * future_pose_loss(output, batch)
     return total
@@ -335,6 +347,11 @@ def train_one(modality, args, train, validation, stats, class_weight, settings, 
             torch.save({"format": checkpoint_format, "state_dict": model.state_dict(),
                 "future_pose": {"weight": args.future_pose_weight,
                                 "horizon_ms": args.future_pose_ms, "step_ms": 10},
+                "endpoint_training": {"loss_space": args.endpoint_loss_space,
+                                      "position_multiplier": args.final_position_multiplier,
+                                      "progress_weight": args.endpoint_progress_weight,
+                                      "screen_gradient_detached":
+                                          args.pixel_architecture == "goal-consistent"},
                 "model_args": model_args, "normalization": stats, "preprocessing": settings,
                 "classes": ["open", "close"], "validation": report, "seed": args.seed,
                 "augmentation": {"physiological": augmenter is not None,
@@ -373,6 +390,13 @@ def main():
                              "-- where the reach finishes, as opposed to --position-weight/"
                              "--orientation-weight which track where the hand is now. Set to "
                              "0 to skip the heads entirely")
+    parser.add_argument("--endpoint-loss-space", choices=["standardized", "physical"],
+                        default="standardized",
+                        help="Train endpoint position in normalized axes or equal physical axes")
+    parser.add_argument("--final-position-multiplier", type=float, default=1.,
+                        help="Additional weight for endpoint position without changing orientation")
+    parser.add_argument("--endpoint-progress-weight", type=float, default=0.,
+                        help="Extra quadratic weight near trial end; 0 weights all frames equally")
     parser.add_argument("--pixel-weight", type=float, default=.2,
                         help="Weight on predicting the trial's click target in normalized "
                              "canvas units, reported back as pixel error. Set to 0 to skip "
@@ -408,6 +432,8 @@ def main():
         parser.error("augmentation strength cannot be negative")
     if min(args.pixel_weight, args.final_pose_weight) < 0:
         parser.error("pixel and final-pose weights cannot be negative")
+    if min(args.final_position_multiplier, args.endpoint_progress_weight) < 0:
+        parser.error("endpoint weighting values cannot be negative")
     if args.pixel_architecture == "goal-consistent" and (
             args.pixel_weight == 0 or args.final_pose_weight == 0):
         parser.error("goal-consistent pixels require positive --pixel-weight and "
@@ -509,6 +535,9 @@ def main():
                             "future_pose_ms": args.future_pose_ms if args.future_pose_weight else None,
                             "future_pose_role": "withheld VIVE supervision; no future inputs",
                             "final_pose_weight": args.final_pose_weight,
+                            "endpoint_loss_space": args.endpoint_loss_space,
+                            "final_position_multiplier": args.final_position_multiplier,
+                            "endpoint_progress_weight": args.endpoint_progress_weight,
                             "click_target_role": "screen-target regression supervision",
                             "heads": ["gripper_state", "pose (current)", "click (pixels)",
                                       "final_pose (endpoint)"],

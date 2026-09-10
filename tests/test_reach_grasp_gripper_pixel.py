@@ -33,3 +33,13 @@ def test_goal_consistent_pixel_shapes_bounds_and_causality():
 def test_goal_consistent_pixel_requires_both_targets():
     with pytest.raises(ValueError, match="click and final-pose"):
         GoalConsistentGripperPoseModel(predict_click=True, predict_final_pose=False)
+
+
+def test_click_loss_cannot_distort_final_3d_head():
+    model = GoalConsistentGripperPoseModel(
+        width=16, patch=4, stride=2, layers=1, heads=4, dropout=0.,
+        predict_click=True, predict_final_pose=True)
+    emg, imu = make_inputs()
+    model(emg, imu)["click"].sum().backward()
+    assert all(parameter.grad is None for parameter in model.final_position.parameters())
+    assert any(parameter.grad is not None for parameter in model.endpoint_to_click.parameters())
