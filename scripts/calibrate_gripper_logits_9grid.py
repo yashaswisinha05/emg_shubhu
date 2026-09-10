@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import f1_score
@@ -17,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 from emg_touch.data.click_target import add_click_target
-from emg_touch.data.reach_grasp import preprocess
+from emg_touch.data.reach_grasp import constant, preprocess
 from emg_touch.neuromuscular_inference import load_neuromuscular_model
 from scripts import train_gripper_state_pose as training
 
@@ -27,7 +28,17 @@ def load_class(roots, expected, settings):
     trials, rejected = [], {}
     for path in sorted({path for root in roots for path in Path(root).rglob("trial_*.csv")}):
         try:
-            trial = preprocess(path, settings)
+            # Calibration recordings may have been acquired at a different raw
+            # rate from the population checkpoint. Filtering and RMS window sizes
+            # must follow the recording metadata; the resulting representation is
+            # still resampled to the checkpoint's fixed feature rate.
+            metadata = pd.read_csv(
+                path, usecols=lambda name: name == "sample_rate_hz_declared")
+            declared_rate = constant(metadata, "sample_rate_hz_declared")
+            trial_settings = dict(settings)
+            if declared_rate is not None:
+                trial_settings["raw_rate_hz"] = declared_rate
+            trial = preprocess(path, trial_settings)
             add_click_target(path, trial)  # used only to identify the grid cell
             # The user explicitly supplies separate open/close roots. Those roots
             # are the calibration labels; a stale or absent CSV state column must
@@ -37,6 +48,8 @@ def load_class(roots, expected, settings):
             trial["gripper_state_valid"] = np.ones(len(trial["time"]), dtype=bool)
             trial["audit"]["calibration_label_source"] = (
                 "open_root" if expected == 0 else "close_root")
+            trial["audit"]["checkpoint_raw_rate_hz"] = settings["raw_rate_hz"]
+            trial["audit"]["effective_raw_rate_hz"] = trial_settings["raw_rate_hz"]
             trials.append(trial)
         except (KeyError, ValueError) as error:
             rejected[str(path)] = str(error)
@@ -73,6 +86,9 @@ def pair_grids(open_trials, close_trials, expected_grids, tolerance):
 
 def print_loading_summary(name, trials, rejected):
     print(f"{name}: accepted {len(trials)} trial(s), rejected {len(rejected)}")
+    rates = sorted({trial["audit"]["effective_raw_rate_hz"] for trial in trials})
+    if rates:
+        print(f"  acquisition rate(s): {rates} Hz; output feature rate unchanged")
     for path, reason in list(rejected.items())[:10]:
         print(f"  rejected {path}: {reason}")
     if len(rejected) > 10:

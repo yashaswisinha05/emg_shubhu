@@ -103,6 +103,10 @@ normalized distance of 0.08), performs
 nine-fold leave-one-grid-out evaluation, and then fits one deployment adapter
 on all 18 trials. It learns only a scalar temperature and one close-class
 bias. Every recording receives equal loss weight regardless of duration.
+Each CSV's `sample_rate_hz_declared` controls its raw filtering and RMS window
+sizes, so calibration recordings may use a different acquisition rate from
+the population checkpoint; model features remain resampled to the checkpoint's
+fixed output rate.
 The pixel coordinate is used only as the grid identifier; the pixel head is
 not trained. VIVE is not required.
 

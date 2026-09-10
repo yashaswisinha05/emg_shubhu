@@ -59,6 +59,8 @@ def test_nine_grid_calibration_without_vive(tmp_path, monkeypatch):
             # absent or stale. Close coordinates also have realistic small jitter.
             if state == "open":
                 data["gripper_state"] = "close"
+                # Calibration acquisition rate may differ from checkpoint data.
+                data["sample_rate_hz_declared"] = 1777.7777777777778
             data["canvas_width_px"], data["canvas_height_px"] = 1440, 900
             jitter = .002 if state == "close" else 0.
             data["click_x_norm"] = (index % 3 + 1) / 4 + jitter
