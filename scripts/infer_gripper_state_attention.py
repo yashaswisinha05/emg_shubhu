@@ -75,7 +75,7 @@ def main():
     parser.add_argument("--trial-csv", type=Path,
                         help="optional unseen CSV; omit to consume JSON lines on stdin")
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--canvas-px", type=int, nargs=2, default=(1440, 900),
+    parser.add_argument("--canvas-px", type=int, nargs=2, default=(1920, 1080),
                         metavar=("WIDTH", "HEIGHT"))
     parser.add_argument("--warmup-ms", type=float, default=200.)
     parser.add_argument("--context-ms", type=float, default=2000.)

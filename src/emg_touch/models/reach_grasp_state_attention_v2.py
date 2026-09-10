@@ -76,7 +76,7 @@ class StateConditionedAttentionV2(nn.Module):
             horizon, horizon.square(), torch.sin(math.pi * horizon),
             torch.cos(math.pi * horizon)), -1))
 
-    def forward(self, emg, imu):
+    def forward(self, emg, imu, conditioning_probability=None):
         ef, imf = self.emg(emg), self.imu.forward_features(imu)
         branch = self.react(torch.zeros_like(emg) if self.modality == "imu" else emg)
         if self.modality == "imu":
@@ -89,7 +89,14 @@ class StateConditionedAttentionV2(nn.Module):
                             + self.state_blend_logit.sigmoid() * local
                             + self.react_current(branch["features"]))
         state_probability = state_logits.softmax(-1)
-        state = self.state_embedding(state_probability)
+        if conditioning_probability is None:
+            conditioning_probability = state_probability
+        elif conditioning_probability.shape != state_probability.shape:
+            raise ValueError("conditioning_probability must match state logits")
+        # An external frozen classifier is a teacher/condition, never a route
+        # for pose gradients back into that classifier.
+        conditioning_probability = conditioning_probability.detach()
+        state = self.state_embedding(conditioning_probability)
 
         if self.modality == "emg":
             base, attended = ef["context"], ef["context"]
@@ -131,6 +138,7 @@ class StateConditionedAttentionV2(nn.Module):
             "react_gripper_state_logits": branch["holding_logits"],
             "react_reconstruction": branch["reconstruction"],
             "state_probability": state_probability,
+            "conditioning_state_probability": conditioning_probability,
             "position": position,
             "click": click,
             "click_direct": direct,

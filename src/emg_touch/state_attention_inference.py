@@ -7,17 +7,34 @@ import numpy as np
 import torch
 
 from .live_reach_grasp import LiveReachGraspPreprocessor
+from .models.reach_grasp_neuromuscular_future import (
+    NeuromuscularFutureGripperPoseModel,
+)
+from .models.reach_grasp_neuro_classifier_attention import (
+    NeuroClassifierConditionedAttention,
+)
 from .models.reach_grasp_state_attention_v2 import StateConditionedAttentionV2
 
 
 def load_state_attention_model(checkpoint, device="cuda"):
     device = torch.device(device)
     state = torch.load(Path(checkpoint), map_location=device, weights_only=False)
-    if state.get("format") != "gripper_state_attention_v2":
-        raise ValueError("checkpoint must come from train_gripper_state_attention_v2.py")
+    supported = {"gripper_state_attention_v2", "neuro_classifier_state_attention_v1"}
+    if state.get("format") not in supported:
+        raise ValueError("checkpoint must be a state-attention V2 or "
+                         "frozen-classifier state-attention checkpoint")
     if state["model_args"].get("modality") != "emg+imu":
         raise ValueError("streaming deployment requires the fused emg+imu checkpoint")
-    model = StateConditionedAttentionV2(**state["model_args"]).to(device)
+    motion = StateConditionedAttentionV2(**state["model_args"])
+    if state["format"] == "neuro_classifier_state_attention_v1":
+        classifier = NeuromuscularFutureGripperPoseModel(
+            **state["classifier_model_args"])
+        model = NeuroClassifierConditionedAttention(
+            classifier, motion, state["classifier_normalization"],
+            state["normalization"])
+    else:
+        model = motion
+    model = model.to(device)
     model.load_state_dict(state["state_dict"])
     return model.eval().requires_grad_(False), state
 
@@ -52,7 +69,7 @@ class StateAttentionStream:
         self.pipeline.add_sample(time_s, emg_4, imu_24)
 
     @torch.no_grad()
-    def predict(self, canvas_px=(1440, 900)):
+    def predict(self, canvas_px=(1920, 1080)):
         time, emg, imu, ev, iv = self.pipeline.arrays()
         if not len(time) or time[-1] - time[0] < self.warmup_s:
             return None
@@ -114,7 +131,7 @@ class StateAttentionStream:
             "normalization_diagnostics": diagnostics,
         }
 
-    def update(self, time_s, emg_4, imu_24, canvas_px=(1440, 900)):
+    def update(self, time_s, emg_4, imu_24, canvas_px=(1920, 1080)):
         """Add one raw sample; return at most one prediction per 100 Hz frame."""
         self.add_sample(time_s, emg_4, imu_24)
         if self.pipeline.frames == self.last_prediction_frame:
