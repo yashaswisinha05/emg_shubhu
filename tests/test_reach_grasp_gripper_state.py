@@ -189,7 +189,8 @@ def test_too_few_trials_reports_why(tmp_path, monkeypatch):
         data.to_csv(root / f"trial_{index:03}.csv", index=False)  # no gripper_state column
     output = tmp_path / "run"
     monkeypatch.setattr(sys, "argv", ["train", "--root", str(root), "--output-dir",
-        str(output), "--device", "cpu", "--epochs", "1", "--raw-rate-hz", "1000"])
+        str(output), "--device", "cpu", "--epochs", "1", "--raw-rate-hz", "1000",
+        "--pixel-weight", "0", "--final-pose-weight", "0"])
     try:
         trainer.main()
         assert False, "too few valid trials must raise"
@@ -231,7 +232,8 @@ def test_training_smoke(tmp_path, monkeypatch):
         width=16, patch=4, stride=2, layers=1, heads=4, dropout=0.))
     output = tmp_path / "run"
     monkeypatch.setattr(sys, "argv", ["train", "--root", str(root), "--output-dir",
-        str(output), "--device", "cpu", "--epochs", "1", "--raw-rate-hz", "1000"])
+        str(output), "--device", "cpu", "--epochs", "1", "--raw-rate-hz", "1000",
+        "--pixel-weight", "0", "--final-pose-weight", "0"])
     trainer.main()
     result = json.loads((output / "results.json").read_text())
     # Default --models trains all three: a real ablation (dedicated

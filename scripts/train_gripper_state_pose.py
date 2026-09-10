@@ -22,6 +22,7 @@ from emg_touch.data.final_pose import add_final_pose
 from emg_touch.data.gripper_state import add_gripper_state
 from emg_touch.data.reach_grasp import preprocess
 from emg_touch.models.reach_grasp_gripper_state import GripperStatePoseModel
+from emg_touch.models.reach_grasp_gripper_pixel import GoalConsistentGripperPoseModel
 from emg_touch.physics.rotation_6d import orientation_errors_numpy
 from scripts import train_reach_grasp as base
 
@@ -115,8 +116,28 @@ def loss(model, output, batch, class_weight, args):
              + args.orientation_weight * orientation)
     if output["click"] is not None:
         click_valid = wearable & batch["click_valid"]
-        click = masked_mean(F.smooth_l1_loss(output["click"], batch["click_target"],
-                                             reduction="none"), click_valid[..., None])
+        if args.pixel_architecture == "goal-consistent":
+            # Optimise the metric that is reported. Normalised-coordinate loss
+            # otherwise makes one x-unit and one y-unit equally costly even on
+            # a wide canvas, underweighting the dominant horizontal error.
+            canvas = batch["canvas_px"][:, None, :] / 100.0
+            target = batch["click_target"]
+            progress_weight = .25 + 2.75 * batch["trial_progress"].square()
+
+            def pixel_huber(prediction):
+                error = (prediction - target) * canvas
+                per_frame = F.smooth_l1_loss(
+                    error, torch.zeros_like(error), reduction="none").mean(-1)
+                weighted_valid = click_valid.float() * progress_weight
+                return ((per_frame * weighted_valid).sum()
+                        / weighted_valid.sum().clamp_min(1.0))
+
+            click = (pixel_huber(output["click"])
+                     + .2 * pixel_huber(output["click_direct"])
+                     + .2 * pixel_huber(output["click_from_endpoint"]))
+        else:
+            click = masked_mean(F.smooth_l1_loss(output["click"], batch["click_target"],
+                                                 reduction="none"), click_valid[..., None])
         total = total + args.pixel_weight * click
     if output["final_position"] is not None:
         endpoint_valid = wearable & batch["final_position_valid"]
@@ -232,7 +253,10 @@ def train_one(modality, args, train, validation, stats, class_weight, settings, 
                   "layers": 4, "heads": 4, "dropout": .1, "react_context": 100,
                   "predict_click": args.pixel_weight > 0,
                   "predict_final_pose": args.final_pose_weight > 0}
-    model = GripperStatePoseModel(**model_args).to(args.device)
+    model_class = (GoalConsistentGripperPoseModel
+                   if args.pixel_architecture == "goal-consistent"
+                   else GripperStatePoseModel)
+    model = model_class(**model_args).to(args.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
     suffix = modality.replace("+", "_")
     checkpoint = args.output_dir / f"{suffix}_best.pt"
@@ -252,7 +276,12 @@ def train_one(modality, args, train, validation, stats, class_weight, settings, 
         score = report["position_cm"] + .1 * (report["orientation_deg"] or 0) + 5 * (1-report["gripper_macro_f1"])
         # Pixels are a much larger number than centimetres, so scale it into
         # the same range as the other terms before it drives checkpointing.
-        score += .01 * report.get("click_pixel_error", 0.)
+        if args.pixel_architecture == "goal-consistent":
+            quarters = report.get("click_pixel_error_by_quarter", [None] * 4)
+            late = quarters[-1] if quarters[-1] is not None else report.get("click_pixel_error", 0.)
+            score += .005 * report.get("click_pixel_error", 0.) + .03 * late
+        else:
+            score += .01 * report.get("click_pixel_error", 0.)
         score += report.get("final_position_cm", 0.)
         score += .1 * (report.get("final_orientation_deg") or 0.)
         history.append({"epoch": epoch, "training_loss": float(np.mean(losses)),
@@ -268,7 +297,10 @@ def train_one(modality, args, train, validation, stats, class_weight, settings, 
               + click_xy + final_xyz, flush=True)
         if score < best:
             best, stale = score, 0
-            torch.save({"format": "gripper_state_pose_v2", "state_dict": model.state_dict(),
+            checkpoint_format = ("gripper_state_pose_goal_pixel_v1"
+                                 if args.pixel_architecture == "goal-consistent"
+                                 else "gripper_state_pose_v2")
+            torch.save({"format": checkpoint_format, "state_dict": model.state_dict(),
                 "model_args": model_args, "normalization": stats, "preprocessing": settings,
                 "classes": ["open", "close"], "validation": report, "seed": args.seed,
                 "augmentation": {"physiological": augmenter is not None,
@@ -311,6 +343,10 @@ def main():
                         help="Weight on predicting the trial's click target in normalized "
                              "canvas units, reported back as pixel error. Set to 0 to skip "
                              "the head entirely rather than instantiate an untrained one")
+    parser.add_argument("--pixel-architecture", choices=["direct", "goal-consistent"],
+                        default="direct",
+                        help="Keep the original direct head, or use real-pixel loss, "
+                             "late-evidence weighting, and endpoint-consistent prediction")
     parser.add_argument("--physiological-augmentation", action="store_true",
                         help="Apply causal EMG/IMU gain, mounting-rotation, noise, drift and "
                              "dropout augmentation to training batches only (see "
@@ -330,6 +366,10 @@ def main():
         parser.error("augmentation strength cannot be negative")
     if min(args.pixel_weight, args.final_pose_weight) < 0:
         parser.error("pixel and final-pose weights cannot be negative")
+    if args.pixel_architecture == "goal-consistent" and (
+            args.pixel_weight == 0 or args.final_pose_weight == 0):
+        parser.error("goal-consistent pixels require positive --pixel-weight and "
+                     "--final-pose-weight")
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     settings = {"raw_rate_hz": args.raw_rate_hz, "rate_hz": 100., "gap_s": .02,
                 "event_origin": args.event_origin, "event_pulse_s": .1,
@@ -422,6 +462,7 @@ def main():
                             "physiological_augmentation": args.physiological_augmentation,
                             "augmentation_strength": args.augmentation_strength,
                             "pixel_weight": args.pixel_weight,
+                            "pixel_architecture": args.pixel_architecture,
                             "final_pose_weight": args.final_pose_weight,
                             "click_target_role": "screen-target regression supervision",
                             "heads": ["gripper_state", "pose (current)", "click (pixels)",
