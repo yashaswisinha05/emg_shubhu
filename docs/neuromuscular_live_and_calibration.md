@@ -81,3 +81,28 @@ The split is stratified by complete trial: 14 open + 14 close for training,
 one feature centroid per class per trial and applies hardest-positive versus
 closest-negative cosine triplet loss. It therefore cannot inflate the sample
 count with overlapping frames from the same recording.
+
+## Nine-grid two-parameter calibration
+
+For exactly one open and one close recording at each of nine screen cells,
+keep the classifier itself frozen and calibrate only its probability output:
+
+```bash
+python scripts/calibrate_gripper_logits_9grid.py \
+  --checkpoint runs/gripper_neuromuscular_future_fused/emg_imu_best.pt \
+  --open-root data/candidate_open \
+  --close-root data/candidate_close \
+  --grid-count 9 --device cuda \
+  --output runs/candidate_gripper_logits.pt
+```
+
+The script pairs open/close recordings using their click coordinate, performs
+nine-fold leave-one-grid-out evaluation, and then fits one deployment adapter
+on all 18 trials. It learns only a scalar temperature and one close-class
+bias. Every recording receives equal loss weight regardless of duration.
+The pixel coordinate is used only as the grid identifier; the pixel head is
+not trained. VIVE is not required.
+
+Use `runs/candidate_gripper_logits.pt` with `NeuromuscularStream` exactly like
+the other checkpoints. Trust the adapter only if the aggregated
+leave-one-grid-out result improves over its printed baseline.

@@ -135,3 +135,29 @@ class GripperHardContrastiveFiLM(PixelGripperFiLM):
         ) / temperature + self.gripper_bias
         result["gripper_calibration_features"] = features
         return result
+
+
+class GripperLogitCalibration(nn.Module):
+    """Two-parameter post-hoc calibration; the base classifier stays frozen."""
+
+    def __init__(self, base_model, log_temperature=0., close_bias=0.):
+        super().__init__()
+        self.base = base_model.eval().requires_grad_(False)
+        self.log_temperature = nn.Parameter(torch.tensor(float(log_temperature)))
+        self.close_bias = nn.Parameter(torch.tensor(float(close_bias)))
+
+    def train(self, mode=True):
+        super().train(mode)
+        self.base.eval()
+        return self
+
+    def forward(self, emg, imu):
+        with torch.no_grad():
+            result = self.base(emg, imu)
+        temperature = self.log_temperature.exp().clamp(.05, 20.)
+        bias = torch.stack((-self.close_bias / 2, self.close_bias / 2))
+        result["gripper_state_logits_uncalibrated"] = result["gripper_state_logits"]
+        result["gripper_state_logits"] = result["gripper_state_logits"] / temperature + bias
+        result["gripper_temperature"] = temperature
+        result["gripper_close_bias"] = self.close_bias
+        return result
