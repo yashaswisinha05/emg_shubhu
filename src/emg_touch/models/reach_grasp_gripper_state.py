@@ -57,7 +57,8 @@ class GripperStatePoseModel(nn.Module):
     """
 
     def __init__(self, modality="emg+imu", width=128, patch=16, stride=4,
-                 layers=4, heads=4, dropout=.1, react_context=100):
+                 layers=4, heads=4, dropout=.1, react_context=100,
+                 predict_click=False):
         super().__init__()
         self.modality = modality
         kwargs = dict(width=width, patch=patch, stride=stride, layers=layers,
@@ -83,6 +84,16 @@ class GripperStatePoseModel(nn.Module):
                                       nn.Linear(width, 3))
         self.orientation = nn.Sequential(
             nn.Linear(width * 2, width), nn.GELU(), nn.Linear(width, 6))
+
+        # Where on the canvas this reach is going to land, in normalized
+        # canvas units. One target per trial, so this head predicts the same
+        # coordinate at every timestep and the useful question is how early in
+        # the reach it converges -- not instantiated at all when the pixel
+        # loss is switched off, matching this model's no-dead-parameters rule.
+        self.click = None
+        if predict_click:
+            self.click = nn.Sequential(nn.Linear(width * 2, width), nn.GELU(),
+                                       nn.Linear(width, 2))
 
         # Dense open/close state: same local-catches-transitions,
         # context-stabilizes-the-sustained-state split ReachGraspHybrid used
@@ -158,6 +169,7 @@ class GripperStatePoseModel(nn.Module):
         return {
             "position": self.position(context),
             "orientation_6d": self.orientation(context),
+            "click": self.click(context) if self.click is not None else None,
             "gripper_state_logits": gripper_state_logits,
             "react_gripper_state_logits": branch["holding_logits"],
             "react_reconstruction": branch["reconstruction"],

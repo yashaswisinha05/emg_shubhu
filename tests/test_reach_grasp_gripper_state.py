@@ -4,7 +4,9 @@ import sys
 
 import numpy as np
 import pandas as pd
+import pytest
 
+from emg_touch.data.click_target import add_click_target
 from emg_touch.data.gripper_state import add_gripper_state
 from emg_touch.data.reach_grasp import preprocess
 from emg_touch.models.reach_grasp_gripper_state import GripperStatePoseModel
@@ -118,6 +120,36 @@ def test_gripper_state_accepts_numeric_open_close_convention(tmp_path):
     assert trial["gripper_state"][10] == 0
     assert trial["gripper_state"][40] == 1
     assert trial["gripper_state"][80] == 0
+
+
+def test_click_target_prefers_norm_and_falls_back_to_pixels(tmp_path):
+    data = frame()
+    data = data.drop(columns=["t_grasp_perf", "t_release_perf"])
+    data["canvas_width_px"], data["canvas_height_px"] = 1920, 990
+    data["click_x_pos"], data["click_y_pos"] = 1609, 842
+    path = tmp_path / "trial.csv"
+    data.to_csv(path, index=False)
+    state_settings = {**settings(), "require_events": False}
+    trial = add_click_target(path, preprocess(path, state_settings))
+    assert trial["click_target"] == pytest.approx([1609 / 1920, 842 / 990], abs=1e-6)
+    assert trial["canvas_px"].tolist() == [1920, 990]
+    # An explicit norm column wins over recomputing it from the pixel columns.
+    data["click_x_norm"], data["click_y_norm"] = .25, .5
+    data.to_csv(path, index=False)
+    trial = add_click_target(path, preprocess(path, state_settings))
+    assert trial["click_target"] == pytest.approx([.25, .5], abs=1e-6)
+    data = data.drop(columns=["canvas_width_px", "canvas_height_px"])
+    data.to_csv(path, index=False)
+    with pytest.raises(ValueError, match="canvas"):
+        add_click_target(path, preprocess(path, state_settings))
+
+
+def test_click_head_is_absent_unless_requested():
+    assert GripperStatePoseModel(width=16, patch=4, stride=2, layers=1).click is None
+    model = GripperStatePoseModel(width=16, patch=4, stride=2, layers=1, predict_click=True)
+    emg, imu = torch.randn(2, 30, 16), torch.randn(2, 30, 48)
+    emg[..., 8:], imu[..., 24:] = 1, 1
+    assert model.eval()(emg, imu)["click"].shape == (2, 30, 2)
 
 
 def test_too_few_trials_reports_why(tmp_path, monkeypatch):

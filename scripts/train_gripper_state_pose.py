@@ -17,6 +17,7 @@ from torch.nn import functional as F
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
+from emg_touch.data.click_target import add_click_target
 from emg_touch.data.gripper_state import add_gripper_state
 from emg_touch.data.reach_grasp import preprocess
 from emg_touch.models.reach_grasp_gripper_state import GripperStatePoseModel
@@ -29,12 +30,25 @@ def batches(trials, stats, batch_size, device, shuffle=False):
         shape = batch["emg"].shape[:2]
         labels = np.zeros(shape, dtype="int64")
         valid = np.zeros(shape, dtype=bool)
+        click = np.zeros((*shape, 2), dtype="float32")
+        click_valid = np.zeros(shape, dtype=bool)
+        canvas = np.ones((shape[0], 2), dtype="float32")
+        progress = np.zeros(shape, dtype="float32")
         for row, trial in enumerate(batch["trials"]):
             n = len(trial["time"])
             labels[row, :n] = trial["gripper_state"]
             valid[row, :n] = trial["gripper_state_valid"]
+            progress[row, :n] = np.linspace(0., 1., n, dtype="float32")
+            if "click_target" in trial:
+                click[row, :n] = trial["click_target"]
+                click_valid[row, :n] = True
+                canvas[row] = trial["canvas_px"]
         batch["gripper_state"] = torch.from_numpy(labels).to(device)
         batch["gripper_state_valid"] = torch.from_numpy(valid).to(device)
+        batch["click_target"] = torch.from_numpy(click).to(device)
+        batch["click_valid"] = torch.from_numpy(click_valid).to(device)
+        batch["canvas_px"] = torch.from_numpy(canvas).to(device)
+        batch["trial_progress"] = torch.from_numpy(progress).to(device)
         yield batch
 
 
@@ -81,6 +95,11 @@ def loss(model, output, batch, class_weight, args):
     total = (state + args.react_weight * react + args.masked_weight * (masked_state + reconstruction)
              + args.stability_weight * stability + args.position_weight * position
              + args.orientation_weight * orientation)
+    if output["click"] is not None:
+        click_valid = wearable & batch["click_valid"]
+        click = masked_mean(F.smooth_l1_loss(output["click"], batch["click_target"],
+                                             reduction="none"), click_valid[..., None])
+        total = total + args.pixel_weight * click
     return total
 
 
@@ -88,6 +107,7 @@ def loss(model, output, batch, class_weight, args):
 def evaluate(model, trials, stats, args, zero_emg=False, zero_imu=False):
     model.eval()
     predicted, target, position_error, angle_error = [], [], [], []
+    pixel_error, pixel_progress = [], []
     for batch in batches(trials, stats, args.batch_size, args.device):
         emg = torch.zeros_like(batch["emg"]) if zero_emg else batch["emg"]
         imu = torch.zeros_like(batch["imu"]) if zero_imu else batch["imu"]
@@ -108,11 +128,29 @@ def evaluate(model, trials, stats, args, zero_emg=False, zero_imu=False):
                 output["orientation_6d"][orientation_valid].cpu().numpy(),
                 batch["orientation"][orientation_valid].cpu().numpy())
             angle_error.extend(geodesic.tolist())
-    return {"gripper_accuracy": float(np.mean(np.equal(predicted, target))),
-            "gripper_macro_f1": float(f1_score(target, predicted, average="macro")),
-            "confusion_open_close": confusion_matrix(target, predicted, labels=[0, 1]).tolist(),
-            "position_cm": float(np.mean(position_error)),
-            "orientation_deg": float(np.mean(angle_error)) if angle_error else None}
+        if output["click"] is not None:
+            click_valid = wearable & batch["click_valid"]
+            if click_valid.any():
+                delta = (output["click"] - batch["click_target"]) * batch["canvas_px"][:, None, :]
+                distance = torch.linalg.vector_norm(delta, dim=-1)
+                pixel_error.extend(distance[click_valid].cpu().tolist())
+                pixel_progress.extend(batch["trial_progress"][click_valid].cpu().tolist())
+    report = {"gripper_accuracy": float(np.mean(np.equal(predicted, target))),
+              "gripper_macro_f1": float(f1_score(target, predicted, average="macro")),
+              "confusion_open_close": confusion_matrix(target, predicted, labels=[0, 1]).tolist(),
+              "position_cm": float(np.mean(position_error)),
+              "orientation_deg": float(np.mean(angle_error)) if angle_error else None}
+    if pixel_error:
+        error, progress = np.asarray(pixel_error), np.asarray(pixel_progress)
+        report["click_pixel_error"] = float(error.mean())
+        # One target per trial, so the model predicts the same coordinate at
+        # every timestep: the quarters show how early in the reach it converges.
+        quarters = []
+        for low, high in ((0., .25), (.25, .5), (.5, .75), (.75, 1.001)):
+            window = (progress >= low) & (progress < high)
+            quarters.append(float(error[window].mean()) if window.any() else None)
+        report["click_pixel_error_by_quarter"] = quarters
+    return report
 
 
 def train_one(modality, args, train, validation, stats, class_weight, settings, augmenter=None):
@@ -127,7 +165,8 @@ def train_one(modality, args, train, validation, stats, class_weight, settings, 
     """
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     model_args = {"modality": modality, "width": 128, "patch": 16, "stride": 4,
-                  "layers": 4, "heads": 4, "dropout": .1, "react_context": 100}
+                  "layers": 4, "heads": 4, "dropout": .1, "react_context": 100,
+                  "predict_click": args.pixel_weight > 0}
     model = GripperStatePoseModel(**model_args).to(args.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
     suffix = modality.replace("+", "_")
@@ -146,13 +185,18 @@ def train_one(modality, args, train, validation, stats, class_weight, settings, 
             losses.append(value.item())
         report = evaluate(model, validation, stats, args)
         score = report["position_cm"] + .1 * (report["orientation_deg"] or 0) + 5 * (1-report["gripper_macro_f1"])
+        # Pixels are a much larger number than centimetres, so scale it into
+        # the same range as the other terms before it drives checkpointing.
+        score += .01 * report.get("click_pixel_error", 0.)
         history.append({"epoch": epoch, "training_loss": float(np.mean(losses)),
                         "selection_score": score, "validation": report})
+        pixels = report.get("click_pixel_error")
         print(f"modality={modality} epoch={epoch} loss={np.mean(losses):.4f} score={score:.3f} "
-              f"state_f1={report['gripper_macro_f1']:.3f} pose={report['position_cm']:.2f}cm", flush=True)
+              f"state_f1={report['gripper_macro_f1']:.3f} pose={report['position_cm']:.2f}cm"
+              + (f" click={pixels:.1f}px" if pixels is not None else ""), flush=True)
         if score < best:
             best, stale = score, 0
-            torch.save({"format": "gripper_state_pose_v1", "state_dict": model.state_dict(),
+            torch.save({"format": "gripper_state_pose_v2", "state_dict": model.state_dict(),
                 "model_args": model_args, "normalization": stats, "preprocessing": settings,
                 "classes": ["open", "close"], "validation": report, "seed": args.seed,
                 "augmentation": {"physiological": augmenter is not None,
@@ -186,6 +230,10 @@ def main():
     parser.add_argument("--stability-weight", type=float, default=.03)
     parser.add_argument("--position-weight", type=float, default=.2)
     parser.add_argument("--orientation-weight", type=float, default=.5)
+    parser.add_argument("--pixel-weight", type=float, default=.2,
+                        help="Weight on predicting the trial's click target in normalized "
+                             "canvas units, reported back as pixel error. Set to 0 to skip "
+                             "the head entirely rather than instantiate an untrained one")
     parser.add_argument("--physiological-augmentation", action="store_true",
                         help="Apply causal EMG/IMU gain, mounting-rotation, noise, drift and "
                              "dropout augmentation to training batches only (see "
@@ -203,6 +251,8 @@ def main():
         parser.error("use an empty output directory")
     if args.augmentation_strength < 0:
         parser.error("augmentation strength cannot be negative")
+    if args.pixel_weight < 0:
+        parser.error("pixel weight cannot be negative")
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     settings = {"raw_rate_hz": args.raw_rate_hz, "rate_hz": 100., "gap_s": .02,
                 "event_origin": args.event_origin, "event_pulse_s": .1,
@@ -220,7 +270,15 @@ def main():
             rejected[str(path)] = "byte-identical duplicate of " + hashes[digest]; continue
         hashes[digest] = str(path)
         try:
-            trials.append(add_gripper_state(path, preprocess(path, settings), settings["gap_s"]))
+            trial = add_gripper_state(path, preprocess(path, settings), settings["gap_s"])
+            if args.pixel_weight:
+                # A trial without click columns still trains everything else;
+                # the pixel term simply masks it out.
+                try:
+                    add_click_target(path, trial)
+                except (ValueError, KeyError) as error:
+                    trial["audit"]["click_target"] = f"unavailable: {error}"
+            trials.append(trial)
         except (ValueError, KeyError) as error:
             rejected[str(path)] = str(error)
     if len(trials) < 20:
@@ -253,6 +311,17 @@ def main():
     frequency = np.bincount(labels, minlength=2)
     class_weight = torch.as_tensor(len(labels) / np.maximum(2 * frequency, 1),
                                    dtype=torch.float32, device=args.device)
+    if args.pixel_weight:
+        targeted = [t for t in trials if "click_target" in t]
+        distinct = {tuple(np.round(t["click_target"], 4)) for t in targeted}
+        print(f"click targets: {len(targeted)}/{len(trials)} trials, "
+              f"{len(distinct)} distinct locations", flush=True)
+        if not targeted:
+            raise ValueError("--pixel-weight is set but no trial carried a click target; "
+                             "see data_audit.json for the per-trial reason")
+        if len(distinct) < 2:
+            raise ValueError("every trial shares one click target, so there is nothing "
+                             "to predict; pass --pixel-weight 0")
 
     augmenter = None
     if args.physiological_augmentation:
@@ -264,6 +333,8 @@ def main():
                             "gripper_state_role": "classification supervision only",
                             "physiological_augmentation": args.physiological_augmentation,
                             "augmentation_strength": args.augmentation_strength,
+                            "pixel_weight": args.pixel_weight,
+                            "click_target_role": "screen-target regression supervision",
                             "preprocessing": settings}}
     for modality in args.models:
         model, _ = train_one(modality, args, train, validation, stats, class_weight,
