@@ -87,5 +87,51 @@ class PixelGripperFiLM(nn.Module):
         result["gripper_state_logits"] = (
             result["gripper_state_logits"] + delta_logits
         ) / temperature + self.gripper_bias
+        result["gripper_calibration_features"] = adapted_gripper
         result["gripper_temperature"] = temperature
+        return result
+
+
+class GripperHardContrastiveFiLM(PixelGripperFiLM):
+    """Gripper-only FiLM plus a zero-initialized low-rank residual adapter."""
+
+    def __init__(self, base_model, groups=16, rank=8):
+        super().__init__(base_model, groups)
+        dimension = base_model.context_fusion[0].out_features
+        if rank <= 0 or rank > dimension:
+            raise ValueError("adapter rank must be in [1, feature dimension]")
+        self.gripper_residual = nn.Sequential(
+            nn.Linear(dimension, rank, bias=False), nn.GELU(),
+            nn.Linear(rank, dimension, bias=False))
+        nn.init.zeros_(self.gripper_residual[-1].weight)
+        # This variant must leave pixels exactly unchanged.
+        for parameter in (self.pixel_film.gamma_delta, self.pixel_film.beta,
+                          self.pixel_matrix_delta, self.pixel_bias):
+            parameter.requires_grad_(False)
+
+    def gripper_calibration_parameters(self):
+        names = ("gripper_film.", "gripper_residual.",
+                 "gripper_log_temperature", "gripper_bias")
+        return [parameter for name, parameter in self.named_parameters()
+                if not name.startswith("base.") and name.startswith(names)
+                and parameter.requires_grad]
+
+    def regularization(self):
+        values = [self.gripper_film.gamma_delta, self.gripper_film.beta,
+                  self.gripper_log_temperature, self.gripper_bias]
+        residual = self.gripper_residual[-1].weight
+        return sum(value.square().mean() for value in values) + residual.square().mean()
+
+    def forward(self, emg, imu):
+        result = super().forward(emg, imu)
+        context = result["context_features"].detach()
+        features = self.gripper_film(context)
+        features = features + self.gripper_residual(features)
+        delta_logits = (self.base.gripper_context(features)
+                        - self.base.gripper_context(context))
+        temperature = self.gripper_log_temperature.exp().clamp(.1, 10.)
+        result["gripper_state_logits"] = (
+            result["gripper_state_logits_uncalibrated"] + delta_logits
+        ) / temperature + self.gripper_bias
+        result["gripper_calibration_features"] = features
         return result

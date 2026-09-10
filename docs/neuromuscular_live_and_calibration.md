@@ -59,3 +59,25 @@ Calibration trials should cover the screen and include both open and closed
 states. Judge the adapter by the printed untouched-test comparison. If it
 does not improve late pixel error without preserving gripper F1, retain the
 uncalibrated checkpoint.
+
+## Gripper-only hard-contrastive calibration
+
+When 20 recordings are available for each static state, use the dedicated
+calibrator below. It needs no VIVE or pixel columns and leaves the pixel head
+as well as every pose/future output unchanged.
+
+```bash
+python scripts/calibrate_gripper_hard_contrastive.py \
+  --checkpoint runs/gripper_neuromuscular_future_fused/emg_imu_best.pt \
+  --open-root data/candidate_open \
+  --close-root data/candidate_close \
+  --trials-per-class 20 --device cuda --epochs 100 \
+  --contrastive-weight 0.5 --contrastive-margin 0.35 \
+  --output runs/candidate_gripper_contrastive.pt
+```
+
+The split is stratified by complete trial: 14 open + 14 close for training,
+3 + 3 for validation, and 3 + 3 for the untouched test. The loss constructs
+one feature centroid per class per trial and applies hardest-positive versus
+closest-negative cosine triplet loss. It therefore cannot inflate the sample
+count with overlapping frames from the same recording.

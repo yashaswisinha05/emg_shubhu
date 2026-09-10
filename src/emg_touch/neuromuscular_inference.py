@@ -7,7 +7,8 @@ import numpy as np
 import torch
 
 from .live_reach_grasp import LiveReachGraspPreprocessor
-from .models.pixel_gripper_film import PixelGripperFiLM
+from .models.pixel_gripper_film import (GripperHardContrastiveFiLM,
+                                        PixelGripperFiLM)
 from .models.reach_grasp_neuromuscular_future import (
     NeuromuscularFutureGripperPoseModel,
 )
@@ -19,12 +20,17 @@ def load_neuromuscular_model(checkpoint, device="cuda"):
     """Load either the original or participant-calibrated checkpoint."""
     device = torch.device(device)
     state = torch.load(Path(checkpoint), map_location=device, weights_only=False)
-    if state.get("format") == "gripper_pixel_film_calibration_v1":
+    if state.get("format") in {"gripper_pixel_film_calibration_v1",
+                               "gripper_hard_contrastive_calibration_v1"}:
         base_state = state["base_state_dict"]
         model = NeuromuscularFutureGripperPoseModel(
             **state["model_args"]).to(device)
         model.load_state_dict(base_state)
-        calibrated = PixelGripperFiLM(model, state["film_groups"]).to(device)
+        if state["format"] == "gripper_hard_contrastive_calibration_v1":
+            calibrated = GripperHardContrastiveFiLM(
+                model, state["film_groups"], state["adapter_rank"]).to(device)
+        else:
+            calibrated = PixelGripperFiLM(model, state["film_groups"]).to(device)
         calibrated.load_calibration_state_dict(state["calibration_state_dict"])
         model = calibrated
     elif state.get("format") == "gripper_neuromuscular_future_v1":
