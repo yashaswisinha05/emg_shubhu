@@ -96,7 +96,10 @@ python scripts/calibrate_gripper_logits_9grid.py \
   --output runs/candidate_gripper_logits.pt
 ```
 
-The script pairs open/close recordings using their click coordinate, performs
+The `--open-root` and `--close-root` arguments are the authoritative class
+labels; an absent or stale `gripper_state` CSV column is ignored. The script
+pairs open/close recordings using nearest click coordinates (within a default
+normalized distance of 0.08), performs
 nine-fold leave-one-grid-out evaluation, and then fits one deployment adapter
 on all 18 trials. It learns only a scalar temperature and one close-class
 bias. Every recording receives equal loss weight regardless of duration.

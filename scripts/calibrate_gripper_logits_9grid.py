@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import f1_score
 from torch.nn import functional as F
 
@@ -16,7 +17,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 from emg_touch.data.click_target import add_click_target
-from emg_touch.data.gripper_state import add_gripper_state
 from emg_touch.data.reach_grasp import preprocess
 from emg_touch.neuromuscular_inference import load_neuromuscular_model
 from scripts import train_gripper_state_pose as training
@@ -27,14 +27,16 @@ def load_class(roots, expected, settings):
     trials, rejected = [], {}
     for path in sorted({path for root in roots for path in Path(root).rglob("trial_*.csv")}):
         try:
-            trial = add_gripper_state(path, preprocess(path, settings), settings["gap_s"])
+            trial = preprocess(path, settings)
             add_click_target(path, trial)  # used only to identify the grid cell
-            labels = trial["gripper_state"][trial["gripper_state_valid"]]
-            if not len(labels):
-                raise ValueError("no valid gripper_state labels")
-            dominant = int(np.bincount(labels, minlength=2).argmax())
-            if dominant != expected:
-                raise ValueError(f"dominant state is {['open', 'close'][dominant]}")
+            # The user explicitly supplies separate open/close roots. Those roots
+            # are the calibration labels; a stale or absent CSV state column must
+            # not silently discard an entire class.
+            trial["gripper_state"] = np.full(len(trial["time"]), expected,
+                                               dtype=np.int64)
+            trial["gripper_state_valid"] = np.ones(len(trial["time"]), dtype=bool)
+            trial["audit"]["calibration_label_source"] = (
+                "open_root" if expected == 0 else "close_root")
             trials.append(trial)
         except (KeyError, ValueError) as error:
             rejected[str(path)] = str(error)
@@ -45,24 +47,36 @@ def grid_key(trial, decimals=3):
     return tuple(np.round(trial["click_target"], decimals).tolist())
 
 
-def pair_grids(open_trials, close_trials, expected_grids):
-    def unique(trials, name):
-        grouped = {}
-        for trial in trials:
-            key = grid_key(trial)
-            if key in grouped:
-                raise ValueError(f"multiple {name} trials matched grid {key}")
-            grouped[key] = trial
-        return grouped
-    opened, closed = unique(open_trials, "open"), unique(close_trials, "close")
-    missing_open, missing_close = sorted(set(closed) - set(opened)), sorted(set(opened) - set(closed))
-    if missing_open or missing_close:
-        raise ValueError(f"unpaired grids: missing_open={missing_open}, "
-                         f"missing_close={missing_close}")
-    keys = sorted(opened)
-    if len(keys) != expected_grids:
-        raise ValueError(f"expected {expected_grids} paired grids, found {len(keys)}")
-    return [(key, opened[key], closed[key]) for key in keys]
+def pair_grids(open_trials, close_trials, expected_grids, tolerance):
+    if len(open_trials) != expected_grids or len(close_trials) != expected_grids:
+        raise ValueError(
+            f"expected {expected_grids} trials per class, found "
+            f"open={len(open_trials)}, close={len(close_trials)}")
+    open_xy = np.stack([trial["click_target"] for trial in open_trials])
+    close_xy = np.stack([trial["click_target"] for trial in close_trials])
+    distances = np.linalg.norm(open_xy[:, None] - close_xy[None, :], axis=-1)
+    open_indices, close_indices = linear_sum_assignment(distances)
+    pairs = []
+    for open_index, close_index in zip(open_indices, close_indices):
+        distance = float(distances[open_index, close_index])
+        if distance > tolerance:
+            raise ValueError(
+                "open/close grid coordinates do not match within "
+                f"--grid-match-tolerance={tolerance}: open="
+                f"{grid_key(open_trials[open_index])}, close="
+                f"{grid_key(close_trials[close_index])}, distance={distance:.4f}")
+        midpoint = tuple(((open_xy[open_index] + close_xy[close_index]) / 2).tolist())
+        pairs.append((midpoint, open_trials[open_index], close_trials[close_index],
+                      distance))
+    return sorted(pairs, key=lambda pair: pair[0])
+
+
+def print_loading_summary(name, trials, rejected):
+    print(f"{name}: accepted {len(trials)} trial(s), rejected {len(rejected)}")
+    for path, reason in list(rejected.items())[:10]:
+        print(f"  rejected {path}: {reason}")
+    if len(rejected) > 10:
+        print(f"  ... and {len(rejected) - 10} more")
 
 
 @torch.no_grad()
@@ -134,10 +148,14 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--grid-count", type=int, default=9)
+    parser.add_argument("--grid-match-tolerance", type=float, default=.08,
+                        help="maximum normalized distance between paired click targets")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--maximum-iterations", type=int, default=100)
     parser.add_argument("--regularization", type=float, default=1e-3)
     args = parser.parse_args()
+    if args.grid_match_tolerance <= 0:
+        parser.error("--grid-match-tolerance must be positive")
     if args.output.exists():
         parser.error("--output already exists")
     base, state = load_neuromuscular_model(args.checkpoint, args.device)
@@ -145,13 +163,15 @@ def main():
         parser.error("--checkpoint must be the uncalibrated neuromuscular model")
     opened, rejected_open = load_class(args.open_root, 0, state["preprocessing"])
     closed, rejected_close = load_class(args.close_root, 1, state["preprocessing"])
-    pairs = pair_grids(opened, closed, args.grid_count)
-    flat = [trial for _, open_trial, close_trial in pairs
+    print_loading_summary("open", opened, rejected_open)
+    print_loading_summary("close", closed, rejected_close)
+    pairs = pair_grids(opened, closed, args.grid_count, args.grid_match_tolerance)
+    flat = [trial for _, open_trial, close_trial, _ in pairs
             for trial in (open_trial, close_trial)]
     extracted = extract_logits(base, flat, state["normalization"], args)
     by_path = {record["path"]: record for record in extracted}
     records_by_grid = [(key, [by_path[opened["path"]], by_path[closed["path"]]])
-                       for key, opened, closed in pairs]
+                       for key, opened, closed, _ in pairs]
 
     fold_outputs, raw_outputs, folds = [], [], []
     for fold, (held_key, held_records) in enumerate(records_by_grid):
@@ -184,7 +204,11 @@ def main():
         "close_bias": final_close_bias,
         "calibration_scope": ["gripper_logits"],
         "base_classifier_frozen": True, "pixel_pose_future_frozen": True,
-        "vive_required": False, "grid_pairs": [key for key, _, _ in pairs],
+        "vive_required": False,
+        "calibration_label_source": "open_root/close_root",
+        "grid_match_tolerance": args.grid_match_tolerance,
+        "grid_pairs": [key for key, _, _, _ in pairs],
+        "grid_match_distances": [distance for _, _, _, distance in pairs],
         "cross_validation": cross_validation,
         "rejected": {"open": rejected_open, "close": rejected_close}}, args.output)
     print("LEAVE-ONE-GRID-OUT", json.dumps(cross_validation, indent=2))

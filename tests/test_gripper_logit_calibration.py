@@ -55,10 +55,14 @@ def test_nine_grid_calibration_without_vive(tmp_path, monkeypatch):
     for state, root in (("open", open_root), ("close", close_root)):
         for index in range(9):
             data = frame()
-            data["gripper_state"] = state
+            # Root selection is authoritative even if this optional CSV field is
+            # absent or stale. Close coordinates also have realistic small jitter.
+            if state == "open":
+                data["gripper_state"] = "close"
             data["canvas_width_px"], data["canvas_height_px"] = 1440, 900
-            data["click_x_norm"] = (index % 3 + 1) / 4
-            data["click_y_norm"] = (index // 3 + 1) / 4
+            jitter = .002 if state == "close" else 0.
+            data["click_x_norm"] = (index % 3 + 1) / 4 + jitter
+            data["click_y_norm"] = (index // 3 + 1) / 4 - jitter
             data = data.drop(columns=[name for name in data if name.startswith("VIVE_")])
             data.to_csv(root / f"trial_{index:03}.csv", index=False)
     checkpoint, output = tmp_path / "base.pt", tmp_path / "calibrated.pt"
@@ -70,5 +74,7 @@ def test_nine_grid_calibration_without_vive(tmp_path, monkeypatch):
     state = torch.load(output, weights_only=False)
     assert state["format"] == "gripper_logit_calibration_v1"
     assert state["cross_validation"]["calibrated"]["trial_count"] == 18
+    assert state["calibration_label_source"] == "open_root/close_root"
+    assert max(state["grid_match_distances"]) < .01
     loaded, _ = load_neuromuscular_model(output, "cpu")
     assert isinstance(loaded, GripperLogitCalibration)
