@@ -1,5 +1,13 @@
 # Frozen-classifier state-attention hybrid
 
+![Causal neuromuscular state-conditioned attention pipeline](figures/neuro_classifier_state_attention_pipeline.png)
+
+The publication-ready LaTeX figure wrapper is in
+`docs/neuro_classifier_state_attention_pipeline.tex`; its vector artwork is
+`docs/figures/neuro_classifier_state_attention_pipeline.pdf`. Regenerate both
+the vector and PNG versions with
+`python scripts/make_neuro_classifier_state_attention_figure.py`.
+
 This model retains only the empirically reliable open/close classifier from
 `gripper_neuromuscular_future_v1`. That classifier is frozen and supplies both
 the deployed class result and the soft state condition used by the V2
