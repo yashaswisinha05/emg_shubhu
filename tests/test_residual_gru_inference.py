@@ -1,8 +1,18 @@
 import numpy as np
+import pandas as pd
 import torch
 
 from emg_touch.models.reach_grasp_residual_gru import NeuromuscularResidualGRU
 from emg_touch.residual_gru_inference import ResidualGRUStream
+from scripts.infer_neuromuscular_residual_gru import prepare_replay_frame
+
+
+def test_recorded_replay_sorts_and_deduplicates_timestamps():
+    frame = pd.DataFrame({"time_perf_counter": [2., 1., 1., np.nan],
+                          "sample": [20, 10, 11, 0]})
+    cleaned = prepare_replay_frame(frame)
+    assert cleaned["_inference_time"].tolist() == [1., 2.]
+    assert cleaned["sample"].tolist() == [11, 20]
 
 
 def test_live_residual_gru_returns_short_and_long_future(tmp_path):

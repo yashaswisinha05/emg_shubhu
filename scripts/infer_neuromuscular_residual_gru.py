@@ -34,19 +34,33 @@ def make_stream(args, raw_rate=None):
         args.close_threshold, args.open_threshold, raw_rate)
 
 
+def prepare_replay_frame(frame):
+    """Match training-time timestamp cleanup for imperfect recorded CSVs."""
+    frame = frame.copy()
+    frame["_inference_time"] = pd.to_numeric(
+        frame["time_perf_counter"], errors="coerce")
+    frame = frame.loc[np.isfinite(frame["_inference_time"])]
+    frame = frame.sort_values("_inference_time", kind="stable")
+    return frame.drop_duplicates("_inference_time", keep="last")
+
+
 def replay(args):
     frame = pd.read_csv(args.trial_csv)
     required = ["time_perf_counter", *EMG_COLUMNS, *IMU_COLUMNS]
     missing = [name for name in required if name not in frame]
     if missing:
         raise ValueError("missing wearable columns: " + ", ".join(missing))
+    original_rows = len(frame)
+    frame = prepare_replay_frame(frame)
+    removed = original_rows - len(frame)
+    if removed:
+        print(f"WARNING: removed {removed} invalid or duplicate timestamp rows from "
+              f"{args.trial_csv}", file=sys.stderr, flush=True)
     raw_rate = args.raw_rate_hz or constant(frame, "sample_rate_hz_declared")
     stream = make_stream(args, raw_rate)
     previous_stamp = previous_wall = None
     for _, row in frame.iterrows():
-        stamp = pd.to_numeric(row["time_perf_counter"], errors="coerce")
-        if not np.isfinite(stamp):
-            continue
+        stamp = float(row["_inference_time"])
         if args.speed > 0 and previous_stamp is not None:
             wait = (float(stamp) - previous_stamp) / args.speed
             elapsed = time.perf_counter() - previous_wall
