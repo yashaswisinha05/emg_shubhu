@@ -6,6 +6,7 @@ import numpy as np
 
 from emg_touch.models.reach_grasp_architecture_baselines import ArchitectureBaseline
 from scripts import train_architecture_baseline as trainer
+from scripts import run_gripper_pose_architecture_study as study
 from test_reach_grasp import frame
 
 
@@ -79,3 +80,26 @@ def test_lstm_comparison_training_entrypoint(tmp_path, monkeypatch):
     assert checkpoint["format"] == "reach_grasp_architecture_baseline_v1"
     assert checkpoint["architecture"] == "lstm"
     assert checkpoint["parameter_count"] > 0
+
+
+def test_architecture_study_resume_skips_only_complete_runs(tmp_path, monkeypatch):
+    complete = tmp_path / "complete"
+    complete.mkdir()
+    for name in study.REQUIRED_RUN_FILES:
+        (complete / name).write_text("done")
+    calls = []
+    monkeypatch.setattr(study, "run", lambda command, dry_run: calls.append(command))
+    study.run_or_resume(["train"], complete, resume=True, dry_run=False)
+    assert calls == []
+
+    missing = tmp_path / "missing"
+    study.run_or_resume(["train"], missing, resume=True, dry_run=False)
+    assert calls == [["train"]]
+
+
+def test_architecture_study_resume_rejects_partial_run(tmp_path):
+    partial = tmp_path / "partial"
+    partial.mkdir()
+    (partial / "results.json").write_text("{}")
+    with pytest.raises(RuntimeError, match="cannot resume incomplete run"):
+        study.run_or_resume(["train"], partial, resume=True, dry_run=False)

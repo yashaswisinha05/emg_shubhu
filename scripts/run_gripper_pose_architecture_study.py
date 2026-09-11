@@ -23,6 +23,12 @@ DISPLAY = {
 }
 METRICS = ["gripper_macro_f1", "position_cm", "pixel_error_px",
            "late_pixel_error_px", "future_200ms_cm", "hold_current_200ms_cm"]
+REQUIRED_RUN_FILES = ("results.json", "splits.json", "emg_imu_best.pt")
+
+
+def run_is_complete(directory: Path) -> bool:
+    """Return true only for a run that is safe to reuse in a comparison."""
+    return all((directory / name).is_file() for name in REQUIRED_RUN_FILES)
 
 
 def metric_row(name, seed, directory):
@@ -97,6 +103,19 @@ def run(command, dry_run):
         subprocess.run(command, check=True)
 
 
+def run_or_resume(command, directory, *, resume, dry_run):
+    if resume and run_is_complete(directory):
+        print(f"RESUME: keeping completed run {directory}", flush=True)
+        return
+    if resume and directory.exists() and any(directory.iterdir()):
+        missing = [name for name in REQUIRED_RUN_FILES
+                   if not (directory / name).is_file()]
+        raise RuntimeError(
+            f"cannot resume incomplete run {directory}; missing {', '.join(missing)}. "
+            "Move that one run directory aside, then rerun with --resume.")
+    run(command, dry_run)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", nargs="+", required=True)
@@ -113,10 +132,20 @@ def main():
     parser.add_argument("--patience", type=int, default=12)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--raw-rate-hz", type=float, default=1259.4)
+    parser.add_argument("--resume", action="store_true",
+                        help="Keep complete per-model runs and train only missing ones")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    if not args.dry_run and args.output_dir.exists() and any(args.output_dir.iterdir()):
-        parser.error("use an empty --output-dir so results cannot be mixed")
+    classifier_checkpoint = Path(args.classifier_checkpoint)
+    if not args.dry_run and not classifier_checkpoint.is_file():
+        parser.error(
+            f"classifier checkpoint not found: {classifier_checkpoint}. Train it first "
+            "with scripts/train_gripper_neuromuscular_future.py, or pass the existing "
+            "gripper_neuromuscular_future_v1 emg_imu_best.pt path. Completed baseline "
+            "runs can then be retained with --resume.")
+    if (not args.dry_run and not args.resume and args.output_dir.exists()
+            and any(args.output_dir.iterdir())):
+        parser.error("use an empty --output-dir, or pass --resume to retain complete runs")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     shared = ["--root", *args.root, "--device", args.device,
               "--epochs", str(args.epochs), "--batch-size", str(args.batch_size),
@@ -135,13 +164,15 @@ def main():
                        "--architecture", architecture, *shared,
                        "--seed", str(seed), "--split-seed", str(args.split_seed),
                        "--output-dir", str(directory)]
-            run(command, args.dry_run)
+            run_or_resume(command, directory, resume=args.resume,
+                          dry_run=args.dry_run)
         proposed = args.output_dir / "proposed" / f"seed{seed}"
         command = [python, "scripts/train_neuro_classifier_state_attention.py",
                    "--classifier-checkpoint", args.classifier_checkpoint,
                    *shared, "--seed", str(seed), "--split-seed", str(args.split_seed),
                    "--output-dir", str(proposed)]
-        run(command, args.dry_run)
+        run_or_resume(command, proposed, resume=args.resume,
+                      dry_run=args.dry_run)
         if args.dry_run:
             continue
 
