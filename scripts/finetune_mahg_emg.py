@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Subject-held-out MAHG-EMG transfer study for the causal GRU encoder."""
+"""Subject-held-out MAHG-EMG transfer for GRU or neuromuscular EMG encoders."""
 from __future__ import annotations
 
 import argparse
@@ -16,6 +16,10 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from emg_touch.data.mahg_emg import discover, make_windows, preprocess, subject_for
 from emg_touch.models.reach_grasp_architecture_baselines import ArchitectureBaseline
+from emg_touch.models.reach_grasp_neuromuscular_future import (
+    NeuromuscularFutureGripperPoseModel,
+)
+from emg_touch.models.reach_grasp_patch_transformer import CausalPatchBranch
 
 
 class TransferGRU(nn.Module):
@@ -34,15 +38,51 @@ class TransferGRU(nn.Module):
         return self.head(sequence[:, -1])
 
 
-def initialize_from_checkpoint(model, path):
-    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    if checkpoint.get("architecture") != "gru":
-        raise ValueError("--checkpoint must be the causal GRU row's emg_imu_best.pt")
+class TransferPatch(nn.Module):
+    """MAHG head over the pretrained neuromuscular model's EMG encoder only."""
+
+    def __init__(self, width=128, patch=16, stride=4, layers=4, heads=4,
+                 dropout=.1, classes=5):
+        super().__init__()
+        self.layers = layers
+        self.encoder = CausalPatchBranch(16, width, patch, stride, layers, heads, dropout)
+        self.head = nn.Sequential(nn.LayerNorm(width * 2), nn.Linear(width * 2, width),
+                                  nn.GELU(), nn.Dropout(dropout), nn.Linear(width, classes))
+
+    def forward(self, emg):
+        features = self.encoder.forward_features(emg)
+        return self.head(torch.cat((features["context"][:, -1],
+                                    features["local"][:, -1]), -1))
+
+
+def source_spec(checkpoint):
+    args = checkpoint.get("model_args", {})
+    if (checkpoint.get("format") == "reach_grasp_architecture_baseline_v1"
+            and checkpoint.get("architecture") == "gru"):
+        return "gru", {key: args[key] for key in ("width", "layers", "dropout")}
+    if checkpoint.get("format") == "gripper_neuromuscular_future_v1":
+        keys = ("width", "patch", "stride", "layers", "heads", "dropout")
+        return "neuromuscular_patch", {key: args[key] for key in keys}
+    raise ValueError("checkpoint must be a causal-GRU architecture baseline or "
+                     "gripper_neuromuscular_future_v1 checkpoint")
+
+
+def make_model(kind, model_args, classes):
+    constructor = TransferGRU if kind == "gru" else TransferPatch
+    return constructor(**model_args, classes=classes)
+
+
+def initialize_from_checkpoint(model, checkpoint, kind):
     args = checkpoint["model_args"]
-    source = ArchitectureBaseline("gru", **args)
-    source.load_state_dict(checkpoint["state_dict"])
-    model.input.load_state_dict(source.input.state_dict())
-    model.recurrent.load_state_dict(source.recurrent.state_dict())
+    if kind == "gru":
+        source = ArchitectureBaseline("gru", **args)
+        source.load_state_dict(checkpoint["state_dict"])
+        model.input.load_state_dict(source.input.state_dict())
+        model.recurrent.load_state_dict(source.recurrent.state_dict())
+    else:
+        source = NeuromuscularFutureGripperPoseModel(**args)
+        source.load_state_dict(checkpoint["state_dict"])
+        model.encoder.load_state_dict(source.emg.state_dict())
 
 
 def set_trainable(model, protocol):
@@ -51,9 +91,15 @@ def set_trainable(model, protocol):
     for parameter in model.head.parameters():
         parameter.requires_grad = True
     if protocol == "finetune":
-        suffix = f"_l{model.layers - 1}"
-        for name, parameter in model.recurrent.named_parameters():
-            parameter.requires_grad = name.endswith(suffix)
+        if isinstance(model, TransferGRU):
+            suffix = f"_l{model.layers - 1}"
+            for name, parameter in model.recurrent.named_parameters():
+                parameter.requires_grad = name.endswith(suffix)
+        else:
+            for parameter in model.encoder.transformer.layers[-1].parameters():
+                parameter.requires_grad = True
+            for parameter in model.encoder.output.parameters():
+                parameter.requires_grad = True
 
 
 def metrics(target, prediction, labels):
@@ -74,11 +120,11 @@ def evaluate(model, loader, device, labels):
     return metrics(truth, predicted, labels)
 
 
-def train_one(protocol, arrays, model_args, source_checkpoint, args, labels, device):
+def train_one(protocol, arrays, kind, model_args, source, args, labels, device):
     train_x, train_y, val_x, val_y, test_x, test_y = arrays
-    model = TransferGRU(**model_args, classes=len(labels)).to(device)
+    model = make_model(kind, model_args, len(labels)).to(device)
     if protocol != "scratch":
-        initialize_from_checkpoint(model, source_checkpoint)
+        initialize_from_checkpoint(model, source, kind)
     set_trainable(model, protocol)
     counts = np.bincount(train_y, minlength=len(labels))
     weights = counts.sum() / np.maximum(counts, 1) / len(labels)
@@ -122,7 +168,7 @@ def main():
     parser.add_argument("--root", type=Path, required=True,
                         help="Extracted MAHG-EMG directory containing EMGData1.csv ...")
     parser.add_argument("--checkpoint", type=Path, required=True,
-                        help="Causal-GRU emg_imu_best.pt from the architecture study")
+                        help="Neuromuscular-future or causal-GRU emg_imu_best.pt")
     parser.add_argument("--output-dir", type=Path, default=Path("runs/mahg_emg_transfer"))
     parser.add_argument("--protocols", nargs="+", choices=["scratch", "linear_probe", "finetune"],
                         default=["scratch", "linear_probe", "finetune"])
@@ -179,21 +225,23 @@ def main():
         packed[subset][0][..., :8] = (packed[subset][0][..., :8] - mean) / std
     arrays = (*packed["train"], *packed["validation"], *packed["test"])
     source = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    if source.get("architecture") != "gru":
-        parser.error("the source checkpoint is not a causal GRU architecture checkpoint")
-    source_args = source["model_args"]
-    model_args = {key: source_args[key] for key in ("width", "layers", "dropout")}
+    try:
+        kind, model_args = source_spec(source)
+    except ValueError as error:
+        parser.error(str(error))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     results = {"protocol": {"dataset": "MAHG-EMG", "root": str(args.root),
                "source_checkpoint": str(args.checkpoint), "labels": label_names,
+               "source_encoder": kind,
                "subject_split": split, "files_per_subject": args.files_per_subject,
                "causal_window_ms": args.window_ms, "normalization": "training-subjects-only"}}
     for protocol in args.protocols:
         model, validation, test = train_one(
-            protocol, arrays, model_args, args.checkpoint, args, label_names, device)
+            protocol, arrays, kind, model_args, source, args, label_names, device)
         results[protocol] = {"validation": validation, "test": test}
         torch.save({"format": "mahg_emg_transfer_v1", "protocol": protocol,
                     "state_dict": model.state_dict(), "model_args": model_args,
+                    "encoder_kind": kind, "source_format": source.get("format"),
                     "labels": label_names, "normalization": {"mean": mean, "std": std},
                     "preprocessing": {"raw_rate_hz": args.raw_rate_hz,
                                       "output_rate_hz": args.output_rate_hz,

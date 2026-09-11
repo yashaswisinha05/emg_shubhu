@@ -12,7 +12,7 @@ Run:
 ```bash
 python scripts/finetune_mahg_emg.py \
   --root /path/to/extracted/MAHG-EMG \
-  --checkpoint runs/gripper_pose_architecture_study_paper_final/gru/seed42/emg_imu_best.pt \
+  --checkpoint runs/gripper_neuromuscular_future_fused/emg_imu_best.pt \
   --protocols scratch linear_probe finetune \
   --device cuda \
   --epochs 50 \
@@ -26,9 +26,14 @@ overlapping windows.
 
 The three protocols isolate distinct claims:
 
-- `scratch`: identical GRU topology initialized randomly.
-- `linear_probe`: pretrained causal encoder frozen; only a new five-class head trains.
-- `finetune`: pretrained encoder plus a new head; only the last GRU layer and head train.
+- `scratch`: identical EMG encoder topology initialized randomly.
+- `linear_probe`: pretrained causal EMG encoder frozen; only a new five-class head trains.
+- `finetune`: pretrained encoder plus a new head; only its final temporal block and head train.
+
+Both the causal-GRU architecture-study checkpoint and the selected
+`gripper_neuromuscular_future_v1` checkpoint are supported. For the latter,
+transfer uses only its causal EMG patch encoder: MAHG has no matching IMU
+channels, and fabricating IMU inputs would invalidate the experiment.
 
 Preprocessing is causal and matches this project's EMG representation: a
 20–450 Hz band-pass, trailing 20 ms and 50 ms RMS features, bounded forward fill,
