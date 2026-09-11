@@ -9,6 +9,15 @@ at 200 ms and adds a separate training-only decoder at 100, 200, ..., 1000 ms.
 It reconstructs future XYZ displacement, low-rate IMU interval summaries and
 future gripper state. It does not attempt to reproduce noisy raw future EMG.
 
+The `frozen_classifier_residual_gru_1s` variant loads the best completed causal
+GRU classifier, freezes it in evaluation mode, and uses its detached soft
+open/close probability to condition the motion GRU. Pose, pixel and future
+losses therefore cannot degrade classification. Its intended checkpoint is:
+
+```text
+runs/gripper_pose_architecture_study_paper_final/gru/seed42/emg_imu_best.pt
+```
+
 IMU is the mechanical base representation. A bounded, zero-initialized EMG
 residual can correct that representation, conditioned on the detached soft
 open/close state. Thus pose losses cannot corrupt the EMG state classifier and
@@ -28,6 +37,8 @@ python scripts/run_gripper_pose_architecture_study.py \
          data/yashaswi_open data/yashaswi_close \
   --classifier-checkpoint \
     runs/gripper_neuromuscular_future_paper_split42/emg_imu_best.pt \
+  --best-classifier-checkpoint \
+    runs/gripper_pose_architecture_study_paper_final/gru/seed42/emg_imu_best.pt \
   --device cuda --epochs 60 --split-seed 42 --seeds 42 \
   --resume \
   --output-dir runs/gripper_pose_architecture_study_paper_final

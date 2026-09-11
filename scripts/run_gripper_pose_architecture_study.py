@@ -13,7 +13,8 @@ from pathlib import Path
 
 BASELINES = ["constant", "feature_mlp", "gru", "lstm", "tcn",
              "inceptiontime", "early_patch_transformer", "mult_cross_attention",
-             "residual_gru", "residual_gru_1s"]
+             "residual_gru", "residual_gru_1s",
+             "frozen_classifier_residual_gru_1s"]
 DISPLAY = {
     "constant": "Mean/majority", "feature_mlp": "Handcrafted + MLP",
     "gru": "Causal GRU", "lstm": "Causal LSTM", "tcn": "Causal TCN",
@@ -22,6 +23,8 @@ DISPLAY = {
     "mult_cross_attention": "MulT-style cross-attention",
     "residual_gru": "State-conditioned residual GRU (ours)",
     "residual_gru_1s": "Residual GRU + 1 s intent reconstruction (ours)",
+    "frozen_classifier_residual_gru_1s": (
+        "Frozen-classifier residual GRU + 1 s reconstruction (ours)"),
     "proposed": "Proposed model",
 }
 METRICS = ["gripper_macro_f1", "position_cm", "pixel_error_px",
@@ -123,6 +126,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", nargs="+", required=True)
     parser.add_argument("--classifier-checkpoint", required=True)
+    parser.add_argument(
+        "--best-classifier-checkpoint",
+        help="Optional causal-GRU checkpoint used only by the frozen-classifier GRU")
     parser.add_argument("--output-dir", type=Path,
                         default=Path("runs/gripper_pose_architecture_study"))
     parser.add_argument("--architectures", nargs="+", choices=BASELINES,
@@ -146,6 +152,10 @@ def main():
             "with scripts/train_gripper_neuromuscular_future.py, or pass the existing "
             "gripper_neuromuscular_future_v1 emg_imu_best.pt path. Completed baseline "
             "runs can then be retained with --resume.")
+    best_classifier_checkpoint = Path(
+        args.best_classifier_checkpoint or args.classifier_checkpoint)
+    if not args.dry_run and not best_classifier_checkpoint.is_file():
+        parser.error(f"best classifier checkpoint not found: {best_classifier_checkpoint}")
     if (not args.dry_run and not args.resume and args.output_dir.exists()
             and any(args.output_dir.iterdir())):
         parser.error("use an empty --output-dir, or pass --resume to retain complete runs")
@@ -163,17 +173,23 @@ def main():
     for seed in args.seeds:
         for architecture in args.architectures:
             directory = args.output_dir / architecture / f"seed{seed}"
-            if architecture in {"residual_gru", "residual_gru_1s"}:
+            if architecture in {"residual_gru", "residual_gru_1s",
+                                "frozen_classifier_residual_gru_1s"}:
                 command = [python, "scripts/train_neuromuscular_residual_gru.py",
                            *shared, "--seed", str(seed),
                            "--split-seed", str(args.split_seed),
                            "--output-dir", str(directory)]
-                if architecture == "residual_gru_1s":
+                if architecture in {"residual_gru_1s",
+                                    "frozen_classifier_residual_gru_1s"}:
                     command.extend((
                         "--reconstruction-horizon-ms", "1000",
                         "--reconstruction-step-ms", "100",
                         "--reconstruction-decay-ms", "500",
                         "--future-imu-weight", "0"))
+                if architecture == "frozen_classifier_residual_gru_1s":
+                    command.extend((
+                        "--classifier-checkpoint", str(best_classifier_checkpoint),
+                        "--long-state-weight", "0"))
             else:
                 command = [python, "scripts/train_architecture_baseline.py",
                            "--architecture", architecture, *shared,

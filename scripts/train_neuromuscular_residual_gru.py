@@ -14,6 +14,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 from emg_touch.models.reach_grasp_residual_gru import NeuromuscularResidualGRU
+from emg_touch.models.reach_grasp_architecture_baselines import ArchitectureBaseline
+from emg_touch.models.reach_grasp_neuro_classifier_attention import (
+    NeuroClassifierConditionedAttention,
+)
+from emg_touch.models.reach_grasp_neuromuscular_future import (
+    NeuromuscularFutureGripperPoseModel,
+)
 from emg_touch.models.state_attention_loss import future_position_losses, masked_mean
 from scripts import train_gripper_state_pose as base
 
@@ -21,6 +28,8 @@ from scripts import train_gripper_state_pose as base
 extra = None
 trained_parameter_count = None
 intent_horizons_steps = ()
+classifier_state = None
+active_normalization = None
 
 
 def future_imu_loss(output, batch, usable):
@@ -76,17 +85,21 @@ def long_intent_loss(model, output, batch, usable, class_weight):
         imu_total = imu_total + weight * masked_mean(F.smooth_l1_loss(
             imu_prediction, imu_target, reduction="none"), interval_valid[..., None])
 
-        state_valid = source_usable & target_usable & batch["gripper_state_valid"][:, horizon:]
-        state = F.cross_entropy(
-            output["intent_state_logits"][:, :-horizon, index].transpose(1, 2),
-            batch["gripper_state"][:, horizon:], weight=class_weight, reduction="none")
-        state_total = state_total + weight * masked_mean(state, state_valid)
+        if output["intent_state_logits"] is not None and extra.long_state_weight > 0:
+            state_valid = (source_usable & target_usable
+                           & batch["gripper_state_valid"][:, horizon:])
+            state = F.cross_entropy(
+                output["intent_state_logits"][:, :-horizon, index].transpose(1, 2),
+                batch["gripper_state"][:, horizon:], weight=class_weight,
+                reduction="none")
+            state_total = state_total + weight * masked_mean(state, state_valid)
         weight_total = weight_total + weight
     divisor = weight_total.clamp_min(1e-8)
     return position_total / divisor, imu_total / divisor, state_total / divisor
 
 
 def task_loss(model, output, batch, class_weight, args):
+    motion = model.motion if isinstance(model, NeuroClassifierConditionedAttention) else model
     usable = batch["emg_usable"] & batch["imu_usable"]
     labels = batch["gripper_state"]
     state_valid = usable & batch["gripper_state_valid"]
@@ -113,7 +126,7 @@ def task_loss(model, output, batch, class_weight, args):
         grid = masked_mean(grid, click_valid)
         selected_offset = output["grid_offsets"].gather(
             -2, target_grid[..., None, None].expand(*target_grid.shape, 1, 2)).squeeze(-2)
-        centers = model.grid_centers[target_grid]
+        centers = motion.grid_centers[target_grid]
         target_offset = batch["click_target"] - centers
         residual_error = (selected_offset - target_offset) * canvas
         residual = masked_mean(F.smooth_l1_loss(
@@ -127,7 +140,7 @@ def task_loss(model, output, batch, class_weight, args):
     total = total + extra.future_consistency_weight * consistency
     total = total + extra.future_imu_weight * future_imu_loss(output, batch, usable)
     long_position, long_imu, long_state = long_intent_loss(
-        model, output, batch, usable, class_weight)
+        motion, output, batch, usable, class_weight)
     total = total + extra.long_position_weight * long_position
     total = total + extra.long_imu_weight * long_imu
     total = total + extra.long_state_weight * long_state
@@ -160,9 +173,14 @@ def main():
     parser.add_argument("--long-position-weight", type=float, default=.05)
     parser.add_argument("--long-imu-weight", type=float, default=.03)
     parser.add_argument("--long-state-weight", type=float, default=.03)
+    parser.add_argument(
+        "--classifier-checkpoint", type=Path,
+        help="Freeze this proven classifier and use its detached probabilities")
     global extra
     extra, remaining = parser.parse_known_args()
-    if min(vars(extra).values()) < 0 or extra.reconstruction_decay_ms <= 0:
+    numeric = [value for name, value in vars(extra).items()
+               if name != "classifier_checkpoint"]
+    if min(numeric) < 0 or extra.reconstruction_decay_ms <= 0:
         parser.error("all auxiliary weights must be nonnegative")
     if extra.reconstruction_horizon_ms % 10 or extra.reconstruction_step_ms % 10:
         parser.error("reconstruction horizon and step must be multiples of 10 ms")
@@ -175,6 +193,24 @@ def main():
         extra.reconstruction_step_ms // 10,
         extra.reconstruction_horizon_ms // 10 + 1,
         extra.reconstruction_step_ms // 10)) if extra.reconstruction_horizon_ms else ()
+    global classifier_state
+    classifier_state = None
+    if extra.classifier_checkpoint is not None:
+        if not extra.classifier_checkpoint.is_file():
+            parser.error(f"classifier checkpoint not found: {extra.classifier_checkpoint}")
+        classifier_state = torch.load(
+            extra.classifier_checkpoint, map_location="cpu", weights_only=False)
+        supported = classifier_state.get("format") in {
+            "gripper_neuromuscular_future_v1",
+            "reach_grasp_architecture_baseline_v1",
+        }
+        if not supported:
+            parser.error("classifier must be a neuromuscular-future or architecture-baseline checkpoint")
+        if classifier_state.get("format") == "reach_grasp_architecture_baseline_v1" \
+                and classifier_state.get("architecture") != "gru":
+            parser.error("architecture-baseline classifier must be the causal GRU")
+        if classifier_state["model_args"].get("modality") != "emg+imu":
+            parser.error("classifier checkpoint must use modality emg+imu")
 
     sys.argv = [sys.argv[0], *remaining]
     defaults = {"--models": "emg+imu", "--pixel-architecture": "direct",
@@ -197,7 +233,8 @@ def main():
         return report
 
     def train_counted(*args, **kwargs):
-        global trained_parameter_count
+        global trained_parameter_count, active_normalization
+        active_normalization = args[4]
         trained = old_train_one(*args, **kwargs)
         trained_parameter_count = sum(
             parameter.numel() for parameter in trained[0].parameters()
@@ -205,8 +242,23 @@ def main():
         return trained
 
     def model_factory(**model_args):
-        return NeuromuscularResidualGRU(
-            **model_args, intent_horizons_steps=intent_horizons_steps)
+        motion = NeuromuscularResidualGRU(
+            **model_args, intent_horizons_steps=intent_horizons_steps,
+            predict_intent_state=classifier_state is None)
+        if classifier_state is None:
+            return motion
+        if active_normalization is None:
+            raise RuntimeError("motion normalization was not initialized")
+        classifier_args = classifier_state["model_args"]
+        if classifier_state["format"] == "gripper_neuromuscular_future_v1":
+            classifier = NeuromuscularFutureGripperPoseModel(**classifier_args)
+        else:
+            classifier = ArchitectureBaseline(
+                classifier_state["architecture"], **classifier_args)
+        classifier.load_state_dict(classifier_state["state_dict"])
+        return NeuroClassifierConditionedAttention(
+            classifier, motion, classifier_state["normalization"],
+            active_normalization)
 
     base.GripperStatePoseModel, base.loss = model_factory, task_loss
     base.evaluate, base.train_one = position_only, train_counted
@@ -223,12 +275,20 @@ def main():
     output_dir = Path(output_arg or "runs/neuromuscular_residual_gru")
     results_path = output_dir / "results.json"
     results = json.loads(results_path.read_text())
+    auxiliary_settings = {
+        name: value for name, value in vars(extra).items()
+        if name != "classifier_checkpoint"}
     results["protocol"].update({
-        "architecture": "state-conditioned-neuromuscular-residual-gru",
+        "architecture": ("frozen-classifier-conditioned-neuromuscular-residual-gru"
+                         if classifier_state is not None else
+                         "state-conditioned-neuromuscular-residual-gru"),
         "comparison_family": "causal-capacity-controlled-v1",
         "orientation_disabled": True,
         "pixel_axes": "x/width and y/height independently",
-        "auxiliary_weights": vars(extra),
+        "auxiliary_weights": auxiliary_settings,
+        "classifier_checkpoint": (str(extra.classifier_checkpoint)
+                                  if extra.classifier_checkpoint else None),
+        "classifier_frozen": classifier_state is not None,
         "heads": ["EMG-only gripper state", "current XYZ",
                   "3x3 grid + within-cell pixel residual", "future XYZ",
                   "training-only masked EMG", "training-only future IMU delta"],
@@ -237,12 +297,23 @@ def main():
     for path in output_dir.glob("*_best.pt"):
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         checkpoint.update({
-            "format": "neuromuscular_residual_gru_v1",
+            "format": ("frozen_classifier_residual_gru_v1"
+                       if classifier_state is not None else
+                       "neuromuscular_residual_gru_v1"),
             "architecture": results["protocol"]["architecture"],
             "parameter_count": int(trained_parameter_count),
-            "auxiliary_weights": vars(extra),
+            "auxiliary_weights": auxiliary_settings,
         })
         checkpoint["model_args"]["intent_horizons_steps"] = intent_horizons_steps
+        checkpoint["model_args"]["predict_intent_state"] = classifier_state is None
+        if classifier_state is not None:
+            checkpoint.update({
+                "classifier_source": str(extra.classifier_checkpoint),
+                "classifier_format": classifier_state["format"],
+                "classifier_model_args": classifier_state["model_args"],
+                "classifier_normalization": classifier_state["normalization"],
+                "classifier_frozen": True,
+            })
         torch.save(checkpoint, path)
     print(f"residual GRU protocol written to {results_path}")
 

@@ -6,6 +6,9 @@ import numpy as np
 
 from emg_touch.models.reach_grasp_architecture_baselines import ArchitectureBaseline
 from emg_touch.models.reach_grasp_residual_gru import NeuromuscularResidualGRU
+from emg_touch.models.reach_grasp_neuro_classifier_attention import (
+    NeuroClassifierConditionedAttention,
+)
 from scripts import train_architecture_baseline as trainer
 from scripts import train_neuromuscular_residual_gru as residual_trainer
 from scripts import run_gripper_pose_architecture_study as study
@@ -171,3 +174,35 @@ def test_residual_gru_training_entrypoint(tmp_path, monkeypatch):
     assert checkpoint["parameter_count"] > 0
     assert checkpoint["model_args"]["future_steps"] == 2
     assert checkpoint["model_args"]["intent_horizons_steps"] == (1, 2)
+
+
+def test_frozen_gru_classifier_is_authoritative_for_residual_gru():
+    classifier = ArchitectureBaseline(
+        "gru", width=16, layers=1, dropout=0., future_steps=2)
+    motion = NeuromuscularResidualGRU(
+        width=16, layers=1, dropout=0., future_steps=2,
+        intent_horizons_steps=(10, 20))
+    normalization = {
+        "emg": {"mean": np.zeros(8), "std": np.ones(8)},
+        "imu": {"mean": np.zeros(24), "std": np.ones(24)},
+        "position": {"mean": np.zeros(3), "std": np.ones(3)},
+    }
+    model = NeuroClassifierConditionedAttention(
+        classifier, motion, normalization, normalization).train()
+    assert classifier.training is False
+    assert all(not parameter.requires_grad for parameter in classifier.parameters())
+    emg, imu = torch.randn(2, 24, 16), torch.randn(2, 24, 48)
+    output = model(emg, imu)
+    with torch.no_grad():
+        expected = classifier(emg, imu)["gripper_state_logits"]
+    torch.testing.assert_close(output["gripper_state_logits"], expected)
+    torch.testing.assert_close(output["conditioning_state_probability"],
+                               expected.softmax(-1))
+    assert output["student_gripper_state_logits"].shape == (2, 24, 2)
+    assert output["intent_position_delta"].shape == (2, 24, 2, 3)
+
+    motion_without_state_future = NeuromuscularResidualGRU(
+        width=16, layers=1, future_steps=2, intent_horizons_steps=(10, 20),
+        predict_intent_state=False)
+    without_state = motion_without_state_future(emg, imu)
+    assert without_state["intent_state_logits"] is None

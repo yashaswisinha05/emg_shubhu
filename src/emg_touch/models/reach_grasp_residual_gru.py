@@ -12,7 +12,7 @@ class NeuromuscularResidualGRU(nn.Module):
 
     def __init__(self, modality="emg+imu", width=128, layers=4, dropout=.1,
                  future_steps=20, predict_click=True, predict_final_pose=False,
-                 intent_horizons_steps=None,
+                 intent_horizons_steps=None, predict_intent_state=True,
                  **_unused):
         super().__init__()
         if modality not in {"emg", "imu", "emg+imu"}:
@@ -83,8 +83,9 @@ class NeuromuscularResidualGRU(nn.Module):
                 nn.Linear(intent_width, width), nn.GELU(), nn.Linear(width, 3))
             self.intent_imu_head = nn.Sequential(
                 nn.Linear(intent_width, width), nn.GELU(), nn.Linear(width, 24))
-            self.intent_state_head = nn.Sequential(
-                nn.Linear(intent_width, width), nn.GELU(), nn.Linear(width, 2))
+            if predict_intent_state:
+                self.intent_state_head = nn.Sequential(
+                    nn.Linear(intent_width, width), nn.GELU(), nn.Linear(width, 2))
             intent_tau = torch.as_tensor(horizons, dtype=torch.float32) / max(horizons)
             intent_basis = torch.stack((
                 intent_tau, intent_tau.square(), torch.sin(math.pi * intent_tau),
@@ -100,7 +101,7 @@ class NeuromuscularResidualGRU(nn.Module):
         imu_features = self.imu_gru(self.imu_input(imu))[0]
         return emg_features, imu_features
 
-    def forward(self, emg, imu):
+    def forward(self, emg, imu, conditioning_probability=None):
         emg_features, imu_features = self._encode(emg, imu)
         if self.modality == "imu":
             state_logits = self.imu_state_prior.view(1, 1, 2).expand(
@@ -108,7 +109,11 @@ class NeuromuscularResidualGRU(nn.Module):
         else:
             state_logits = self.state_head(emg_features)
         state_probability = state_logits.softmax(-1)
-        state = self.state_embedding(state_probability.detach())
+        if conditioning_probability is None:
+            conditioning_probability = state_probability
+        elif conditioning_probability.shape != state_probability.shape:
+            raise ValueError("conditioning_probability must match state logits")
+        state = self.state_embedding(conditioning_probability.detach())
 
         if self.modality == "emg":
             base = torch.zeros_like(emg_features)
@@ -143,10 +148,12 @@ class NeuromuscularResidualGRU(nn.Module):
                 intent_basis.expand(*fused.shape[:2], -1, -1)), -1)
             intent_position = self.intent_position_head(intent_input)
             intent_imu = self.intent_imu_head(intent_input)
-            intent_state = self.intent_state_head(intent_input)
+            if self.intent_state_head is not None:
+                intent_state = self.intent_state_head(intent_input)
         return {
             "gripper_state_logits": state_logits,
             "state_probability": state_probability,
+            "conditioning_state_probability": conditioning_probability.detach(),
             "position": self.position_head(fused),
             "click": click,
             "grid_logits": grid_logits,
