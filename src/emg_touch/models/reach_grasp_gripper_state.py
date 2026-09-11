@@ -199,6 +199,7 @@ class GripperStatePoseModel(nn.Module):
             "context_features": context,
             "local_features": local,
             "emg_context_features": ef["context"],
+            "imu_context_features": inf["context"],
             "fusion_weights": context_weights,
             "local_fusion_weights": local_weights,
         }

@@ -107,7 +107,8 @@ def task_loss(model, output, batch, class_weight, args):
                             labels, weight=class_weight, reduction="none")
     pose_valid = usable & batch["pose_mask"][..., 0].bool()
     position = F.smooth_l1_loss(output["position"], batch["pose"], reduction="none")
-    state_weight = (0. if isinstance(model, NeuroClassifierConditionedAttention)
+    state_weight = (0. if (isinstance(model, NeuroClassifierConditionedAttention)
+                           or getattr(model, "classifier_frozen", False))
                     else extra.state_weight)
     total = (state_weight * masked_mean(state, state_valid)
              + args.position_weight * masked_mean(position, pose_valid[..., None]))
@@ -140,21 +141,26 @@ def task_loss(model, output, batch, class_weight, args):
     future, consistency = future_position_losses(output, batch, usable)
     total = total + args.future_pose_weight * future
     total = total + extra.future_consistency_weight * consistency
-    total = total + extra.future_imu_weight * future_imu_loss(output, batch, usable)
+    if extra.future_imu_weight > 0:
+        total = total + extra.future_imu_weight * future_imu_loss(output, batch, usable)
     long_position, long_imu, long_state = long_intent_loss(
         motion, output, batch, usable, class_weight)
     total = total + extra.long_position_weight * long_position
     total = total + extra.long_imu_weight * long_imu
     total = total + extra.long_state_weight * long_state
 
-    hidden = base.span_mask(labels.shape, labels.device) & batch["emg_usable"]
-    masked_emg = batch["emg"].clone()
-    masked_emg[..., :8] = torch.where(
-        hidden[..., None], torch.zeros_like(masked_emg[..., :8]), masked_emg[..., :8])
-    reconstructed = model(masked_emg, batch["imu"])["emg_reconstruction"]
-    reconstruction_valid = hidden[..., None] & batch["emg"][..., 8:].bool()
-    reconstruction = masked_mean(
-        (reconstructed - batch["emg"][..., :8]).square(), reconstruction_valid)
+    reconstruction = total * 0
+    if extra.masked_emg_weight > 0:
+        hidden = base.span_mask(labels.shape, labels.device) & batch["emg_usable"]
+        masked_emg = batch["emg"].clone()
+        masked_emg[..., :8] = torch.where(
+            hidden[..., None], torch.zeros_like(masked_emg[..., :8]), masked_emg[..., :8])
+        reconstructed = model(masked_emg, batch["imu"])["emg_reconstruction"]
+        if reconstructed is None:
+            raise ValueError("masked EMG loss requires an emg_reconstruction output")
+        reconstruction_valid = hidden[..., None] & batch["emg"][..., 8:].bool()
+        reconstruction = masked_mean(
+            (reconstructed - batch["emg"][..., :8]).square(), reconstruction_valid)
     correction_penalty = masked_mean(output["emg_correction"].square(), usable[..., None])
     return (total + extra.masked_emg_weight * reconstruction
             + extra.correction_weight * correction_penalty)

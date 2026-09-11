@@ -15,18 +15,27 @@ from .models.reach_grasp_neuromuscular_future import (
     NeuromuscularFutureGripperPoseModel,
 )
 from .models.reach_grasp_residual_gru import NeuromuscularResidualGRU
+from .models.reach_grasp_shared_encoder_adapter import SharedEncoderResidualGRU
 
 
 def load_residual_gru(checkpoint, device="cuda"):
     device = torch.device(device)
     state = torch.load(Path(checkpoint), map_location=device, weights_only=False)
-    supported = {"neuromuscular_residual_gru_v1", "frozen_classifier_residual_gru_v1"}
+    supported = {"neuromuscular_residual_gru_v1", "frozen_classifier_residual_gru_v1",
+                 "shared_encoder_residual_gru_v1"}
     if state.get("format") not in supported:
         raise ValueError(
             "checkpoint must come from scripts/train_neuromuscular_residual_gru.py")
     if state["model_args"].get("modality") != "emg+imu":
         raise ValueError("live inference requires an emg+imu checkpoint")
-    motion = NeuromuscularResidualGRU(**state["model_args"])
+    if state["format"] == "shared_encoder_residual_gru_v1":
+        classifier_args = state["classifier_model_args"]
+        classifier = NeuromuscularFutureGripperPoseModel(**classifier_args)
+        model = SharedEncoderResidualGRU(
+            classifier, state["classifier_normalization"], state["normalization"],
+            **state["shared_model_args"])
+    else:
+        motion = NeuromuscularResidualGRU(**state["model_args"])
     if state["format"] == "frozen_classifier_residual_gru_v1":
         classifier_format = state["classifier_format"]
         classifier_args = state["classifier_model_args"]
@@ -40,7 +49,7 @@ def load_residual_gru(checkpoint, device="cuda"):
         model = NeuroClassifierConditionedAttention(
             classifier, motion, state["classifier_normalization"],
             state["normalization"])
-    else:
+    elif state["format"] == "neuromuscular_residual_gru_v1":
         model = motion
     model = model.to(device)
     model.load_state_dict(state["state_dict"])
