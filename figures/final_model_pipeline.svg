@@ -1,187 +1,113 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="930" viewBox="0 0 1600 930" role="img" aria-labelledby="title desc">
-  <title id="title">Two-stage causal neuromuscular intent model</title>
-  <desc id="desc">Scientific architecture diagram showing causal preprocessing, frozen gripper classifier training, a normalization bridge, state-conditioned residual GRU fusion, current position and pixel heads, and short- and long-horizon future prediction.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="690" viewBox="0 0 1900 690" role="img" aria-labelledby="title desc">
+  <title id="title">Causal shared-encoder neuromuscular intent model</title>
+  <desc id="desc">A compact left-to-right scientific model diagram with straight arrows.</desc>
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
-    </marker>
-    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2563EB"/>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#334155"/>
     </marker>
     <style>
-      .title { font: 700 29px Arial, Helvetica, sans-serif; fill: #0F172A; }
-      .stage { font: 700 20px Arial, Helvetica, sans-serif; fill: #0F172A; letter-spacing: .3px; }
-      .head { font: 700 17px Arial, Helvetica, sans-serif; fill: #0F172A; }
-      .body { font: 15px Arial, Helvetica, sans-serif; fill: #334155; }
-      .small { font: 13px Arial, Helvetica, sans-serif; fill: #475569; }
-      .tiny { font: 12px Arial, Helvetica, sans-serif; fill: #64748B; }
-      .box { stroke-width: 1.7; rx: 12; ry: 12; }
-      .arrow { fill: none; stroke: #334155; stroke-width: 2.1; marker-end: url(#arrow); }
-      .arrow-blue { fill: none; stroke: #2563EB; stroke-width: 2.3; marker-end: url(#arrowBlue); }
-      .dashed { fill: none; stroke: #64748B; stroke-width: 1.8; stroke-dasharray: 7 6; marker-end: url(#arrow); }
-      .divider { stroke: #CBD5E1; stroke-width: 1.5; }
+      .column{font:700 17px Arial,sans-serif;fill:#5B616B}
+      .verb{font:700 20px Arial,sans-serif;fill:#111827}
+      .input{font:700 19px Arial,sans-serif}
+      .tensor{font:italic 14px Arial,sans-serif;fill:#475569}
+      .output{font:700 17px Arial,sans-serif;fill:#111827}
+      .loss{font:700 13px Arial,sans-serif;fill:#D97706}
+      .note{font:13px Arial,sans-serif;fill:#64748B}
+      .box{stroke-width:2;rx:10;ry:10}
+      .arrow{fill:none;stroke:#334155;stroke-width:2.2;marker-end:url(#arrow)}
+      .frozen{stroke-dasharray:7 5}
     </style>
   </defs>
 
-  <rect width="1600" height="930" fill="#FFFFFF"/>
-  <text x="800" y="42" text-anchor="middle" class="title">Frozen-State Neuromuscular Residual GRU for Causal Motion Intent</text>
-  <text x="800" y="68" text-anchor="middle" class="small">4-channel sEMG + four 6-axis IMUs → gripper state, current pose, screen target, and future trajectory</text>
+  <rect width="1900" height="690" fill="#FFFFFF"/>
 
-  <!-- Inputs and preprocessing -->
-  <rect x="34" y="112" width="188" height="93" class="box" fill="#E8F1FF" stroke="#2563EB"/>
-  <text x="128" y="141" text-anchor="middle" class="head">Raw sEMG</text>
-  <text x="128" y="166" text-anchor="middle" class="body">4 channels</text>
-  <text x="128" y="188" text-anchor="middle" class="small">forearm activation</text>
+  <!-- column headings -->
+  <text x="95" y="48" text-anchor="middle" class="column">Input</text>
+  <text x="265" y="48" text-anchor="middle" class="column">Preprocess</text>
+  <text x="475" y="48" text-anchor="middle" class="column">Shared Encoding</text>
+  <text x="700" y="48" text-anchor="middle" class="column">Adaptation</text>
+  <text x="930" y="48" text-anchor="middle" class="column">Conditioning</text>
+  <text x="1170" y="48" text-anchor="middle" class="column">Fusion</text>
+  <text x="1430" y="48" text-anchor="middle" class="column">Projection</text>
+  <text x="1745" y="48" text-anchor="middle" class="column">Output</text>
 
-  <rect x="34" y="228" width="188" height="93" class="box" fill="#FFF1DF" stroke="#D97706"/>
-  <text x="128" y="257" text-anchor="middle" class="head">Raw IMU</text>
-  <text x="128" y="282" text-anchor="middle" class="body">4 × (ACC + GYRO)</text>
-  <text x="128" y="304" text-anchor="middle" class="small">24 channels</text>
+  <!-- inputs -->
+  <rect x="28" y="120" width="135" height="76" class="box" fill="#E7F2FF" stroke="#087DBD"/>
+  <text x="95" y="153" text-anchor="middle" class="input" fill="#087DBD">sEMG</text>
+  <text x="95" y="177" text-anchor="middle" class="tensor">4 ch</text>
+  <rect x="28" y="450" width="135" height="76" class="box" fill="#FFF3E4" stroke="#D97706"/>
+  <text x="95" y="483" text-anchor="middle" class="input" fill="#D97706">IMU</text>
+  <text x="95" y="507" text-anchor="middle" class="tensor">24 ch</text>
 
-  <rect x="278" y="112" width="244" height="93" class="box" fill="#F3F7FF" stroke="#2563EB"/>
-  <text x="400" y="138" text-anchor="middle" class="head">Causal sEMG processing</text>
-  <text x="400" y="163" text-anchor="middle" class="body">20–450 Hz band-pass</text>
-  <text x="400" y="186" text-anchor="middle" class="body">trailing RMS: 20 / 50 ms</text>
+  <!-- one verb per action box -->
+  <rect x="205" y="120" width="120" height="76" class="box" fill="#EDF5FF" stroke="#087DBD"/>
+  <text x="265" y="166" text-anchor="middle" class="verb">Filter</text>
+  <rect x="205" y="450" width="120" height="76" class="box" fill="#FFF7EA" stroke="#D97706"/>
+  <text x="265" y="496" text-anchor="middle" class="verb">Filter</text>
 
-  <rect x="278" y="228" width="244" height="93" class="box" fill="#FFF8EC" stroke="#D97706"/>
-  <text x="400" y="254" text-anchor="middle" class="head">Causal IMU processing</text>
-  <text x="400" y="279" text-anchor="middle" class="body">trailing median (3 samples)</text>
-  <text x="400" y="302" text-anchor="middle" class="body">15 Hz low-pass; retain DC</text>
+  <rect x="405" y="120" width="140" height="76" class="box frozen" fill="#EDF5FF" stroke="#2563EB"/>
+  <text x="475" y="166" text-anchor="middle" class="verb">Encode</text>
+  <rect x="405" y="450" width="140" height="76" class="box frozen" fill="#FFF7EA" stroke="#D97706"/>
+  <text x="475" y="496" text-anchor="middle" class="verb">Encode</text>
 
-  <path d="M222 158 H278" class="arrow-blue"/>
-  <path d="M222 274 H278" class="arrow" stroke="#D97706"/>
+  <rect x="635" y="120" width="130" height="76" class="box" fill="#EDF5FF" stroke="#2563EB"/>
+  <text x="700" y="166" text-anchor="middle" class="verb">Adapt</text>
+  <rect x="635" y="450" width="130" height="76" class="box" fill="#FFF7EA" stroke="#D97706"/>
+  <text x="700" y="496" text-anchor="middle" class="verb">Adapt</text>
 
-  <rect x="566" y="149" width="225" height="135" class="box" fill="#F8FAFC" stroke="#64748B"/>
-  <text x="678" y="178" text-anchor="middle" class="head">100 Hz causal grid</text>
-  <text x="678" y="204" text-anchor="middle" class="body">past-fill ≤ 20 ms</text>
-  <text x="678" y="228" text-anchor="middle" class="body">checkpoint-specific normalization</text>
-  <text x="678" y="252" text-anchor="middle" class="small">8 EMG + 24 IMU values</text>
-  <text x="678" y="271" text-anchor="middle" class="small">+ per-channel validity flags</text>
-  <path d="M522 158 H545 Q566 158 566 179" class="arrow"/>
-  <path d="M522 274 H545 Q566 274 566 253" class="arrow"/>
+  <rect x="630" y="284" width="140" height="76" class="box frozen" fill="#F2ECFF" stroke="#7C3AED"/>
+  <text x="700" y="330" text-anchor="middle" class="verb">Classify</text>
 
-  <!-- Stage I -->
-  <rect x="835" y="98" width="731" height="238" rx="18" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.7"/>
-  <text x="861" y="126" class="stage">STAGE I · TRAIN GRIPPER CLASSIFIER</text>
-  <rect x="867" y="153" width="183" height="112" class="box" fill="#E8F1FF" stroke="#2563EB"/>
-  <text x="958" y="181" text-anchor="middle" class="head">Causal patch</text>
-  <text x="958" y="204" text-anchor="middle" class="head">encoders</text>
-  <text x="958" y="228" text-anchor="middle" class="small">separate EMG / IMU</text>
-  <text x="958" y="248" text-anchor="middle" class="small">local + context paths</text>
+  <rect x="855" y="120" width="150" height="76" class="box" fill="#EAF8F3" stroke="#0F8B6D"/>
+  <text x="930" y="166" text-anchor="middle" class="verb">Condition</text>
 
-  <rect x="1090" y="153" width="178" height="112" class="box" fill="#E9F8F2" stroke="#0F8B6D"/>
-  <text x="1179" y="181" text-anchor="middle" class="head">Gated fusion</text>
-  <text x="1179" y="207" text-anchor="middle" class="body">weighted features</text>
-  <text x="1179" y="229" text-anchor="middle" class="small">difference + product</text>
-  <text x="1179" y="249" text-anchor="middle" class="small">causal at every frame</text>
+  <rect x="1095" y="284" width="150" height="76" class="box" fill="#EAF8F3" stroke="#0F8B6D"/>
+  <text x="1170" y="330" text-anchor="middle" class="verb">Fuse</text>
 
-  <rect x="1308" y="137" width="224" height="144" class="box" fill="#F2ECFF" stroke="#7C3AED"/>
-  <text x="1420" y="166" text-anchor="middle" class="head">Open / close head</text>
-  <text x="1420" y="191" text-anchor="middle" class="body">context logits</text>
-  <text x="1420" y="214" text-anchor="middle" class="body">+ local transition logits</text>
-  <text x="1420" y="237" text-anchor="middle" class="body">+ masked-EMG branch</text>
-  <text x="1420" y="261" text-anchor="middle" class="small">class-balanced cross-entropy</text>
-  <path d="M1050 209 H1090" class="arrow"/>
-  <path d="M1268 209 H1308" class="arrow"/>
+  <rect x="1360" y="284" width="140" height="76" class="box" fill="#F8FAFC" stroke="#475569"/>
+  <text x="1430" y="330" text-anchor="middle" class="verb">Project</text>
 
-  <text x="1190" y="310" text-anchor="middle" class="small">Multitask training: state + pose + pixel + endpoint + 200 ms future motion</text>
-  <path d="M791 216 H835" class="arrow"/>
+  <!-- straight arrows with compact payload labels -->
+  <line x1="163" y1="158" x2="205" y2="158" class="arrow"/><text x="184" y="146" text-anchor="middle" class="tensor">e<tspan baseline-shift="sub">t</tspan></text>
+  <line x1="163" y1="488" x2="205" y2="488" class="arrow"/><text x="184" y="476" text-anchor="middle" class="tensor">i<tspan baseline-shift="sub">t</tspan></text>
+  <line x1="325" y1="158" x2="405" y2="158" class="arrow"/><text x="365" y="146" text-anchor="middle" class="tensor">x<tspan baseline-shift="sub">e</tspan></text>
+  <line x1="325" y1="488" x2="405" y2="488" class="arrow"/><text x="365" y="476" text-anchor="middle" class="tensor">x<tspan baseline-shift="sub">i</tspan></text>
+  <line x1="545" y1="158" x2="635" y2="158" class="arrow"/><text x="590" y="146" text-anchor="middle" class="tensor">z<tspan baseline-shift="sub">e</tspan></text>
+  <line x1="545" y1="488" x2="635" y2="488" class="arrow"/><text x="590" y="476" text-anchor="middle" class="tensor">z<tspan baseline-shift="sub">i</tspan></text>
+  <line x1="545" y1="184" x2="630" y2="298" class="arrow"/><text x="575" y="235" text-anchor="middle" class="tensor">z<tspan baseline-shift="sub">e</tspan></text>
+  <line x1="545" y1="462" x2="630" y2="346" class="arrow"/><text x="575" y="412" text-anchor="middle" class="tensor">z<tspan baseline-shift="sub">i</tspan></text>
+  <line x1="765" y1="158" x2="855" y2="158" class="arrow"/><text x="810" y="146" text-anchor="middle" class="tensor">h<tspan baseline-shift="sub">e</tspan></text>
+  <line x1="770" y1="309" x2="855" y2="181" class="arrow"/><text x="811" y="244" text-anchor="middle" class="tensor">p<tspan baseline-shift="sub">g</tspan></text>
+  <line x1="1005" y1="181" x2="1095" y2="298" class="arrow"/><text x="1041" y="235" text-anchor="middle" class="tensor">c<tspan baseline-shift="sub">t</tspan>, γ<tspan baseline-shift="sub">t</tspan></text>
+  <line x1="765" y1="488" x2="1095" y2="346" class="arrow"/><text x="930" y="410" text-anchor="middle" class="tensor">h<tspan baseline-shift="sub">i</tspan></text>
+  <line x1="1245" y1="322" x2="1360" y2="322" class="arrow"/><text x="1302" y="310" text-anchor="middle" class="tensor">f<tspan baseline-shift="sub">t</tspan></text>
 
-  <!-- Freeze separator -->
-  <line x1="34" y1="374" x2="1566" y2="374" class="divider"/>
-  <rect x="650" y="352" width="300" height="43" rx="21" fill="#0F172A"/>
-  <text x="800" y="379" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="700" fill="#FFFFFF">FREEZE WEIGHTS + DETACH PROBABILITIES</text>
+  <!-- integrated output and training objectives -->
+  <rect x="1600" y="78" width="260" height="105" class="box" fill="#E7F2FF" stroke="#2563EB"/>
+  <text x="1730" y="111" text-anchor="middle" class="output">Gripper State</text>
+  <text x="1730" y="138" text-anchor="middle" class="tensor">open / close</text>
+  <text x="1730" y="164" text-anchor="middle" class="loss">CE</text>
 
-  <!-- Stage II -->
-  <text x="34" y="432" class="stage">STAGE II · TRAIN MOTION AND FUTURE-INTENT MODEL</text>
+  <rect x="1600" y="211" width="260" height="105" class="box" fill="#E7F2FF" stroke="#2563EB"/>
+  <text x="1730" y="244" text-anchor="middle" class="output">Current</text>
+  <text x="1730" y="271" text-anchor="middle" class="tensor">XYZ<tspan baseline-shift="sub">t</tspan> · Pixel<tspan baseline-shift="sub">t</tspan></text>
+  <text x="1730" y="297" text-anchor="middle" class="loss">L<tspan baseline-shift="sub">pos</tspan> + L<tspan baseline-shift="sub">px</tspan></text>
 
-  <rect x="34" y="466" width="228" height="102" class="box" fill="#F8FAFC" stroke="#64748B"/>
-  <text x="148" y="495" text-anchor="middle" class="head">Shared frozen features</text>
-  <text x="148" y="520" text-anchor="middle" class="small">EMG / IMU patch contexts</text>
-  <text x="148" y="543" text-anchor="middle" class="small">computed once in Stage I</text>
+  <rect x="1600" y="344" width="260" height="105" class="box" fill="#EAF8F3" stroke="#0F8B6D"/>
+  <text x="1730" y="377" text-anchor="middle" class="output">Motion</text>
+  <text x="1730" y="404" text-anchor="middle" class="tensor">XYZ<tspan baseline-shift="sub">t+10:200 ms</tspan></text>
+  <text x="1730" y="430" text-anchor="middle" class="loss">L<tspan baseline-shift="sub">future</tspan></text>
 
-  <rect x="309" y="447" width="218" height="84" class="box" fill="#E8F1FF" stroke="#2563EB"/>
-  <text x="418" y="477" text-anchor="middle" class="head">EMG GRU adapter</text>
-  <text x="418" y="502" text-anchor="middle" class="body">2 layers · residual output</text>
+  <rect x="1600" y="477" width="260" height="105" class="box" fill="#F2ECFF" stroke="#7C3AED"/>
+  <text x="1730" y="510" text-anchor="middle" class="output">Intent</text>
+  <text x="1730" y="537" text-anchor="middle" class="tensor">XYZ<tspan baseline-shift="sub">t+0.1:1.0 s</tspan></text>
+  <text x="1730" y="563" text-anchor="middle" class="loss">L<tspan baseline-shift="sub">intent</tspan> + L<tspan baseline-shift="sub">EMG→IMU</tspan></text>
 
-  <rect x="309" y="550" width="218" height="84" class="box" fill="#FFF1DF" stroke="#D97706"/>
-  <text x="418" y="580" text-anchor="middle" class="head">IMU GRU adapter</text>
-  <text x="418" y="605" text-anchor="middle" class="body">2 layers · mechanical base</text>
+  <line x1="770" y1="322" x2="1600" y2="130" class="arrow"/><text x="1178" y="216" text-anchor="middle" class="tensor">p<tspan baseline-shift="sub">g</tspan></text>
+  <line x1="1500" y1="304" x2="1600" y2="263" class="arrow"/><text x="1548" y="271" text-anchor="middle" class="tensor">ŷ<tspan baseline-shift="sub">t</tspan></text>
+  <line x1="1500" y1="325" x2="1600" y2="397" class="arrow"/><text x="1548" y="348" text-anchor="middle" class="tensor">ŷ<tspan baseline-shift="sub">short</tspan></text>
+  <line x1="1500" y1="345" x2="1600" y2="529" class="arrow"/><text x="1545" y="424" text-anchor="middle" class="tensor">ŷ<tspan baseline-shift="sub">long</tspan></text>
 
-  <rect x="572" y="461" width="239" height="181" class="box" fill="#E9F8F2" stroke="#0F8B6D"/>
-  <text x="691" y="491" text-anchor="middle" class="head">State-conditioned</text>
-  <text x="691" y="514" text-anchor="middle" class="head">EMG correction</text>
-  <text x="691" y="545" text-anchor="middle" class="body">cₜ = tanh MLP(hᵉₜ, state)</text>
-  <text x="691" y="571" text-anchor="middle" class="body">γₜ = sigmoid MLP(hⁱₜ,hᵉₜ,state)</text>
-  <line x1="603" y1="589" x2="780" y2="589" class="divider"/>
-  <text x="691" y="614" text-anchor="middle" class="head">fₜ = LN(hⁱₜ + γₜcₜ)</text>
-  <text x="691" y="634" text-anchor="middle" class="tiny">zero-initialized, bounded residual</text>
-
-  <path d="M262 517 H284 Q298 517 309 497" class="arrow"/>
-  <path d="M527 489 H572" class="arrow-blue"/>
-  <path d="M527 592 H552 Q572 592 572 572" class="arrow" stroke="#D97706"/>
-  <path d="M262 536 H285 Q298 536 309 580" class="arrow"/>
-  <path d="M958 265 V398 H18 V517 H34" class="arrow"/>
-  <path d="M1500 281 V397 H800 Q786 397 786 411 V461" class="dashed"/>
-  <text x="1110" y="391" text-anchor="middle" class="tiny">frozen, detached P(open / close)</text>
-
-  <!-- Output heads -->
-  <rect x="860" y="433" width="706" height="225" rx="18" fill="#FCFCFD" stroke="#CBD5E1" stroke-width="1.7"/>
-  <text x="886" y="462" class="stage">DEPLOYED OUTPUT HEADS</text>
-
-  <rect x="889" y="490" width="151" height="112" class="box" fill="#EAF2FF" stroke="#2563EB"/>
-  <text x="964" y="520" text-anchor="middle" class="head">Current XYZ</text>
-  <text x="964" y="546" text-anchor="middle" class="body">position at t</text>
-  <text x="964" y="575" text-anchor="middle" class="small">Smooth-L1</text>
-
-  <rect x="1066" y="490" width="151" height="112" class="box" fill="#FFF6E8" stroke="#D97706"/>
-  <text x="1141" y="520" text-anchor="middle" class="head">Pixel XY</text>
-  <text x="1141" y="545" text-anchor="middle" class="body">3×3 grid</text>
-  <text x="1141" y="568" text-anchor="middle" class="body">+ local offset</text>
-  <text x="1141" y="590" text-anchor="middle" class="tiny">x/W and y/H</text>
-
-  <rect x="1243" y="490" width="151" height="112" class="box" fill="#E9F8F2" stroke="#0F8B6D"/>
-  <text x="1318" y="516" text-anchor="middle" class="head">Future XYZ</text>
-  <text x="1318" y="541" text-anchor="middle" class="body">10–200 ms</text>
-  <text x="1318" y="566" text-anchor="middle" class="small">20 dense points</text>
-  <text x="1318" y="588" text-anchor="middle" class="tiny">arrival consistency</text>
-
-  <rect x="1420" y="490" width="119" height="112" class="box" fill="#F2ECFF" stroke="#7C3AED"/>
-  <text x="1479" y="516" text-anchor="middle" class="head">Intent</text>
-  <text x="1479" y="541" text-anchor="middle" class="body">0.1–1.0 s</text>
-  <text x="1479" y="566" text-anchor="middle" class="small">10 future</text>
-  <text x="1479" y="585" text-anchor="middle" class="small">positions</text>
-
-  <path d="M811 552 H840 V476 H1479" fill="none" stroke="#334155" stroke-width="2.1"/>
-  <path d="M964 476 V490" class="arrow"/>
-  <path d="M1141 476 V490" class="arrow"/>
-  <path d="M1318 476 V490" class="arrow"/>
-  <path d="M1479 476 V490" class="arrow"/>
-
-  <!-- Training-only supervision -->
-  <rect x="34" y="703" width="1532" height="155" rx="18" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.7" stroke-dasharray="7 5"/>
-  <text x="60" y="735" class="stage">TRAINING-ONLY SELF-SUPERVISION AND REGULARIZATION</text>
-
-  <rect x="78" y="760" width="288" height="66" class="box" fill="#E8F1FF" stroke="#2563EB"/>
-  <text x="222" y="787" text-anchor="middle" class="head">200 ms future-position loss</text>
-  <text x="222" y="811" text-anchor="middle" class="small">20 withheld VIVE targets</text>
-
-  <rect x="418" y="760" width="306" height="66" class="box" fill="#E9F8F2" stroke="#0F8B6D"/>
-  <text x="571" y="787" text-anchor="middle" class="head">1 s displacement reconstruction</text>
-  <text x="571" y="811" text-anchor="middle" class="small">exponential horizon weight, τ = 500 ms</text>
-
-  <rect x="776" y="760" width="306" height="66" class="box" fill="#FFF1DF" stroke="#D97706"/>
-  <text x="929" y="787" text-anchor="middle" class="head">EMG → future IMU summaries</text>
-  <text x="929" y="811" text-anchor="middle" class="small">no direct IMU shortcut to this decoder</text>
-
-  <rect x="1134" y="760" width="354" height="66" class="box" fill="#F2ECFF" stroke="#7C3AED"/>
-  <text x="1311" y="787" text-anchor="middle" class="head">Small-correction regularization</text>
-  <text x="1311" y="811" text-anchor="middle" class="small">preserve the strong IMU mechanical prior</text>
-
-  <path d="M1318 602 V675 Q1318 693 222 693 V760" class="dashed"/>
-  <path d="M1479 602 V680 Q1479 703 571 703 V760" class="dashed"/>
-  <path d="M418 531 V684 Q418 714 929 714 V760" class="dashed"/>
-  <path d="M691 642 V682 Q691 724 1311 724 V760" class="dashed"/>
-
-  <text x="800" y="895" text-anchor="middle" class="body">All filters, encoders, recurrent states, and attention masks are causal · future measurements supervise training only</text>
+  <text x="475" y="558" text-anchor="middle" class="note">dashed border = frozen</text>
+  <text x="1730" y="624" text-anchor="middle" class="note">orange terms apply during training</text>
 </svg>

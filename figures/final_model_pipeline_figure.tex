@@ -3,19 +3,10 @@
 \begin{figure*}[t]
     \centering
     \includesvg[width=\textwidth]{figures/final_model_pipeline}
-    \caption{Overview of the proposed two-stage causal neuromuscular intent
-    model. Raw four-channel sEMG and four six-axis IMU streams undergo causal
-    filtering, validity-aware resampling, and training-only normalization. In
-    Stage~I, a causal multiscale patch-transformer is trained for dense
-    open/close recognition under auxiliary pose, screen-target, endpoint, and
-    future-motion supervision. Its modality encoders and selected gripper
-    classifier are then frozen. In Stage~II, two-layer causal GRU adapters reuse
-    these shared features; detached state probabilities condition a bounded,
-    zero-initialized sEMG correction to the adapted IMU mechanical
-    representation. An EMG-only auxiliary decoder predicts future IMU interval
-    summaries without a direct inertial shortcut. Separate heads estimate current Cartesian position,
-    screen target, a dense 10--200~ms trajectory, and a low-rate 0.1--1.0~s
-    intent trajectory. Dashed paths denote training-only objectives or frozen
-    conditioning; no future measurement is used as an inference input.}
+    \caption{Proposed causal shared-encoder model. Frozen modality features and
+    gripper state condition a bounded sEMG correction to the inertial motion
+    representation. The decoder estimates current position, screen location,
+    and short- and long-horizon motion. Future targets are used only during
+    training.}
     \label{fig:final-neuromuscular-model}
 \end{figure*}
