@@ -12,6 +12,7 @@ class NeuromuscularResidualGRU(nn.Module):
 
     def __init__(self, modality="emg+imu", width=128, layers=4, dropout=.1,
                  future_steps=20, predict_click=True, predict_final_pose=False,
+                 intent_horizons_steps=None,
                  **_unused):
         super().__init__()
         if modality not in {"emg", "imu", "emg+imu"}:
@@ -21,6 +22,10 @@ class NeuromuscularResidualGRU(nn.Module):
         if future_steps <= 0:
             raise ValueError("future_steps must be positive")
         self.modality, self.future_steps = modality, future_steps
+        horizons = tuple(intent_horizons_steps or ())
+        if any(step <= 0 for step in horizons) or tuple(sorted(set(horizons))) != horizons:
+            raise ValueError("intent_horizons_steps must be positive, sorted and unique")
+        self.intent_horizons_steps = horizons
         recurrent_dropout = dropout if layers > 1 else 0.
         self.emg_input = nn.Sequential(
             nn.Linear(16, width), nn.LayerNorm(width), nn.GELU())
@@ -71,6 +76,22 @@ class NeuromuscularResidualGRU(nn.Module):
         self.register_buffer("horizon_basis", torch.stack((
             tau, tau.square(), torch.sin(math.pi * tau),
             torch.cos(math.pi * tau)), -1))
+        self.intent_position_head = self.intent_imu_head = self.intent_state_head = None
+        if horizons:
+            intent_width = width * 2 + 4
+            self.intent_position_head = nn.Sequential(
+                nn.Linear(intent_width, width), nn.GELU(), nn.Linear(width, 3))
+            self.intent_imu_head = nn.Sequential(
+                nn.Linear(intent_width, width), nn.GELU(), nn.Linear(width, 24))
+            self.intent_state_head = nn.Sequential(
+                nn.Linear(intent_width, width), nn.GELU(), nn.Linear(width, 2))
+            intent_tau = torch.as_tensor(horizons, dtype=torch.float32) / max(horizons)
+            intent_basis = torch.stack((
+                intent_tau, intent_tau.square(), torch.sin(math.pi * intent_tau),
+                torch.cos(math.pi * intent_tau)), -1)
+        else:
+            intent_basis = torch.empty(0, 4)
+        self.register_buffer("intent_horizon_basis", intent_basis)
 
     def _encode(self, emg, imu):
         self.emg_gru.flatten_parameters()
@@ -112,6 +133,17 @@ class NeuromuscularResidualGRU(nn.Module):
             fused.unsqueeze(2).expand(-1, -1, self.future_steps, -1),
             basis.expand(*fused.shape[:2], -1, -1)), -1)
         identity = fused.new_tensor([1., 0., 0., 0., 1., 0.])
+        intent_position = intent_imu = intent_state = None
+        if self.intent_position_head is not None:
+            count = len(self.intent_horizons_steps)
+            intent_basis = self.intent_horizon_basis.view(1, 1, count, 4)
+            intent_input = torch.cat((
+                fused.unsqueeze(2).expand(-1, -1, count, -1),
+                emg_features.unsqueeze(2).expand(-1, -1, count, -1),
+                intent_basis.expand(*fused.shape[:2], -1, -1)), -1)
+            intent_position = self.intent_position_head(intent_input)
+            intent_imu = self.intent_imu_head(intent_input)
+            intent_state = self.intent_state_head(intent_input)
         return {
             "gripper_state_logits": state_logits,
             "state_probability": state_probability,
@@ -124,6 +156,9 @@ class NeuromuscularResidualGRU(nn.Module):
             "emg_reconstruction": self.emg_reconstruction_head(emg_features),
             "emg_correction": correction,
             "emg_correction_gate": gate,
+            "intent_position_delta": intent_position,
+            "intent_imu_delta": intent_imu,
+            "intent_state_logits": intent_state,
             "orientation_6d": identity.view(1, 1, 6).expand(*fused.shape[:2], 6),
             "future_orientation_6d": identity.view(1, 1, 1, 6).expand(
                 *fused.shape[:2], self.future_steps, 6),

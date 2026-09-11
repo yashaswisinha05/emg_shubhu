@@ -4,6 +4,10 @@ This model extends the strongest causal GRU comparison without changing the
 dataset protocol. It has separate heads for EMG-only open/close state, current
 XYZ, 3x3 screen-cell plus within-cell pixel offset, and 200 ms future XYZ.
 Training-only heads reconstruct masked EMG spans and future IMU changes.
+The `residual_gru_1s` comparison variant keeps the deployed future-pose head
+at 200 ms and adds a separate training-only decoder at 100, 200, ..., 1000 ms.
+It reconstructs future XYZ displacement, low-rate IMU interval summaries and
+future gripper state. It does not attempt to reproduce noisy raw future EMG.
 
 IMU is the mechanical base representation. A bounded, zero-initialized EMG
 residual can correct that representation, conditioned on the detached soft
@@ -43,6 +47,9 @@ python scripts/train_neuromuscular_residual_gru.py \
   --grid-weight .15 --grid-residual-weight .1 \
   --masked-emg-weight .05 --future-imu-weight .05 \
   --future-consistency-weight .1 --correction-weight .01 \
+  --reconstruction-horizon-ms 1000 --reconstruction-step-ms 100 \
+  --reconstruction-decay-ms 500 \
+  --long-position-weight .05 --long-imu-weight .03 --long-state-weight .03 \
   --output-dir runs/neuromuscular_residual_gru_seed42
 ```
 

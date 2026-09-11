@@ -132,11 +132,16 @@ def test_residual_gru_heads_are_causal_and_state_is_emg_only():
 
 
 def test_residual_gru_emg_motion_branch_starts_as_no_op():
-    model = NeuromuscularResidualGRU(width=16, layers=1, future_steps=2).eval()
+    model = NeuromuscularResidualGRU(
+        width=16, layers=1, future_steps=2,
+        intent_horizons_steps=(10, 20)).eval()
     with torch.no_grad():
         output = model(torch.randn(1, 8, 16), torch.randn(1, 8, 48))
     torch.testing.assert_close(output["emg_correction"],
                                torch.zeros_like(output["emg_correction"]))
+    assert output["intent_position_delta"].shape == (1, 8, 2, 3)
+    assert output["intent_imu_delta"].shape == (1, 8, 2, 24)
+    assert output["intent_state_logits"].shape == (1, 8, 2, 2)
 
 
 def test_residual_gru_training_entrypoint(tmp_path, monkeypatch):
@@ -157,9 +162,12 @@ def test_residual_gru_training_entrypoint(tmp_path, monkeypatch):
         "train", "--root", str(root), "--output-dir", str(output),
         "--device", "cpu", "--epochs", "1", "--batch-size", "4",
         "--raw-rate-hz", "1000", "--future-pose-ms", "20",
+        "--reconstruction-horizon-ms", "20",
+        "--reconstruction-step-ms", "10",
         "--final-pose-weight", "0", "--models", "emg+imu"])
     residual_trainer.main()
     checkpoint = torch.load(output / "emg_imu_best.pt", weights_only=False)
     assert checkpoint["format"] == "neuromuscular_residual_gru_v1"
     assert checkpoint["parameter_count"] > 0
     assert checkpoint["model_args"]["future_steps"] == 2
+    assert checkpoint["model_args"]["intent_horizons_steps"] == (1, 2)

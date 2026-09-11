@@ -20,6 +20,7 @@ from scripts import train_gripper_state_pose as base
 
 extra = None
 trained_parameter_count = None
+intent_horizons_steps = ()
 
 
 def future_imu_loss(output, batch, usable):
@@ -35,6 +36,54 @@ def future_imu_loss(output, batch, usable):
             prediction[valid], target[valid], reduction="sum")
         count = count + valid.sum() * target.shape[-1]
     return total / count.clamp_min(1)
+
+
+def long_intent_loss(model, output, batch, usable, class_weight):
+    """Reconstruct low-rate motion summaries, not noisy raw future samples."""
+    zero = output["position"].sum() * 0
+    if output["intent_position_delta"] is None:
+        return zero, zero, zero
+    position_total = imu_total = state_total = zero
+    weight_total = output["position"].new_zeros(())
+    for index, horizon in enumerate(model.intent_horizons_steps):
+        if horizon >= usable.shape[1]:
+            continue
+        horizon_ms = horizon * 10
+        weight = torch.exp(output["position"].new_tensor(
+            -horizon_ms / extra.reconstruction_decay_ms))
+        source_usable = usable[:, :-horizon]
+        target_usable = usable[:, horizon:]
+        pose_valid = (source_usable & target_usable
+                      & batch["pose_mask"][:, :-horizon, 0].bool()
+                      & batch["pose_mask"][:, horizon:, 0].bool())
+        position_target = batch["pose"][:, horizon:] - batch["pose"][:, :-horizon]
+        position_prediction = output["intent_position_delta"][:, :-horizon, index]
+        position_total = position_total + weight * masked_mean(F.smooth_l1_loss(
+            position_prediction, position_target, reduction="none"),
+            pose_valid[..., None])
+
+        previous = 0 if index == 0 else model.intent_horizons_steps[index - 1]
+        interval = horizon - previous
+        length = usable.shape[1] - horizon
+        interval_valid = source_usable & target_usable
+        interval_sum = torch.zeros_like(batch["imu"][:, :length, :24])
+        for offset in range(previous + 1, horizon + 1):
+            interval_sum = interval_sum + batch["imu"][:, offset:offset + length, :24]
+            interval_valid = interval_valid & usable[:, offset:offset + length]
+        interval_mean = interval_sum / interval
+        imu_target = interval_mean - batch["imu"][:, :length, :24]
+        imu_prediction = output["intent_imu_delta"][:, :length, index]
+        imu_total = imu_total + weight * masked_mean(F.smooth_l1_loss(
+            imu_prediction, imu_target, reduction="none"), interval_valid[..., None])
+
+        state_valid = source_usable & target_usable & batch["gripper_state_valid"][:, horizon:]
+        state = F.cross_entropy(
+            output["intent_state_logits"][:, :-horizon, index].transpose(1, 2),
+            batch["gripper_state"][:, horizon:], weight=class_weight, reduction="none")
+        state_total = state_total + weight * masked_mean(state, state_valid)
+        weight_total = weight_total + weight
+    divisor = weight_total.clamp_min(1e-8)
+    return position_total / divisor, imu_total / divisor, state_total / divisor
 
 
 def task_loss(model, output, batch, class_weight, args):
@@ -77,6 +126,11 @@ def task_loss(model, output, batch, class_weight, args):
     total = total + args.future_pose_weight * future
     total = total + extra.future_consistency_weight * consistency
     total = total + extra.future_imu_weight * future_imu_loss(output, batch, usable)
+    long_position, long_imu, long_state = long_intent_loss(
+        model, output, batch, usable, class_weight)
+    total = total + extra.long_position_weight * long_position
+    total = total + extra.long_imu_weight * long_imu
+    total = total + extra.long_state_weight * long_state
 
     hidden = base.span_mask(labels.shape, labels.device) & batch["emg_usable"]
     masked_emg = batch["emg"].clone()
@@ -100,10 +154,27 @@ def main():
     parser.add_argument("--future-imu-weight", type=float, default=.05)
     parser.add_argument("--future-consistency-weight", type=float, default=.1)
     parser.add_argument("--correction-weight", type=float, default=.01)
+    parser.add_argument("--reconstruction-horizon-ms", type=int, default=0)
+    parser.add_argument("--reconstruction-step-ms", type=int, default=100)
+    parser.add_argument("--reconstruction-decay-ms", type=float, default=500.)
+    parser.add_argument("--long-position-weight", type=float, default=.05)
+    parser.add_argument("--long-imu-weight", type=float, default=.03)
+    parser.add_argument("--long-state-weight", type=float, default=.03)
     global extra
     extra, remaining = parser.parse_known_args()
-    if min(vars(extra).values()) < 0:
+    if min(vars(extra).values()) < 0 or extra.reconstruction_decay_ms <= 0:
         parser.error("all auxiliary weights must be nonnegative")
+    if extra.reconstruction_horizon_ms % 10 or extra.reconstruction_step_ms % 10:
+        parser.error("reconstruction horizon and step must be multiples of 10 ms")
+    if (extra.reconstruction_horizon_ms and
+            (extra.reconstruction_step_ms <= 0
+             or extra.reconstruction_horizon_ms % extra.reconstruction_step_ms)):
+        parser.error("reconstruction horizon must be divisible by its positive step")
+    global intent_horizons_steps
+    intent_horizons_steps = tuple(range(
+        extra.reconstruction_step_ms // 10,
+        extra.reconstruction_horizon_ms // 10 + 1,
+        extra.reconstruction_step_ms // 10)) if extra.reconstruction_horizon_ms else ()
 
     sys.argv = [sys.argv[0], *remaining]
     defaults = {"--models": "emg+imu", "--pixel-architecture": "direct",
@@ -133,7 +204,11 @@ def main():
             if parameter.requires_grad)
         return trained
 
-    base.GripperStatePoseModel, base.loss = NeuromuscularResidualGRU, task_loss
+    def model_factory(**model_args):
+        return NeuromuscularResidualGRU(
+            **model_args, intent_horizons_steps=intent_horizons_steps)
+
+    base.GripperStatePoseModel, base.loss = model_factory, task_loss
     base.evaluate, base.train_one = position_only, train_counted
     try:
         base.main()
@@ -167,6 +242,7 @@ def main():
             "parameter_count": int(trained_parameter_count),
             "auxiliary_weights": vars(extra),
         })
+        checkpoint["model_args"]["intent_horizons_steps"] = intent_horizons_steps
         torch.save(checkpoint, path)
     print(f"residual GRU protocol written to {results_path}")
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 BASELINES = ["constant", "feature_mlp", "gru", "lstm", "tcn",
              "inceptiontime", "early_patch_transformer", "mult_cross_attention",
-             "residual_gru"]
+             "residual_gru", "residual_gru_1s"]
 DISPLAY = {
     "constant": "Mean/majority", "feature_mlp": "Handcrafted + MLP",
     "gru": "Causal GRU", "lstm": "Causal LSTM", "tcn": "Causal TCN",
@@ -21,6 +21,7 @@ DISPLAY = {
     "early_patch_transformer": "Early-fusion Patch Transformer",
     "mult_cross_attention": "MulT-style cross-attention",
     "residual_gru": "State-conditioned residual GRU (ours)",
+    "residual_gru_1s": "Residual GRU + 1 s intent reconstruction (ours)",
     "proposed": "Proposed model",
 }
 METRICS = ["gripper_macro_f1", "position_cm", "pixel_error_px",
@@ -162,11 +163,17 @@ def main():
     for seed in args.seeds:
         for architecture in args.architectures:
             directory = args.output_dir / architecture / f"seed{seed}"
-            if architecture == "residual_gru":
+            if architecture in {"residual_gru", "residual_gru_1s"}:
                 command = [python, "scripts/train_neuromuscular_residual_gru.py",
                            *shared, "--seed", str(seed),
                            "--split-seed", str(args.split_seed),
                            "--output-dir", str(directory)]
+                if architecture == "residual_gru_1s":
+                    command.extend((
+                        "--reconstruction-horizon-ms", "1000",
+                        "--reconstruction-step-ms", "100",
+                        "--reconstruction-decay-ms", "500",
+                        "--future-imu-weight", "0"))
             else:
                 command = [python, "scripts/train_architecture_baseline.py",
                            "--architecture", architecture, *shared,
