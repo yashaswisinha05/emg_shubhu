@@ -107,7 +107,9 @@ def task_loss(model, output, batch, class_weight, args):
                             labels, weight=class_weight, reduction="none")
     pose_valid = usable & batch["pose_mask"][..., 0].bool()
     position = F.smooth_l1_loss(output["position"], batch["pose"], reduction="none")
-    total = (extra.state_weight * masked_mean(state, state_valid)
+    state_weight = (0. if isinstance(model, NeuroClassifierConditionedAttention)
+                    else extra.state_weight)
+    total = (state_weight * masked_mean(state, state_valid)
              + args.position_weight * masked_mean(position, pose_valid[..., None]))
 
     if output["click"] is not None:
@@ -247,6 +249,11 @@ def main():
             predict_intent_state=classifier_state is None)
         if classifier_state is None:
             return motion
+        # The authoritative frozen classifier supplies the state. Do not count
+        # or optimize the motion model's unused private state estimator.
+        for parameter in motion.state_head.parameters():
+            parameter.requires_grad_(False)
+        motion.imu_state_prior.requires_grad_(False)
         if active_normalization is None:
             raise RuntimeError("motion normalization was not initialized")
         classifier_args = classifier_state["model_args"]
