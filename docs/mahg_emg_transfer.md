@@ -41,6 +41,20 @@ and 100 Hz output. Normalization statistics come only from the MAHG training
 subjects. Results and confusion matrices are saved to `results.json`; each
 protocol also writes its own `*_best.pt` checkpoint.
 
+Evaluate the untouched subject recorded in the checkpoint:
+
+```bash
+python scripts/test_mahg_emg.py \
+  --root /path/to/extracted/MAHG-EMG \
+  --checkpoint runs/mahg_neuromuscular_transfer/finetune_best.pt \
+  --device cuda \
+  --output runs/mahg_neuromuscular_transfer/test_results.json
+```
+
+Use `--subjects 8 9 10` only when deliberately evaluating those subjects. The
+default is safer for paper reporting because it reads the untouched test-subject
+split saved by training.
+
 For a defensible transfer claim, report test macro-F1 and balanced accuracy for
 all three protocols over several seeds. Transfer is supported when the frozen
 linear probe or partial fine-tune consistently beats the same GRU trained from

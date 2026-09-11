@@ -243,9 +243,12 @@ def main():
                     "state_dict": model.state_dict(), "model_args": model_args,
                     "encoder_kind": kind, "source_format": source.get("format"),
                     "labels": label_names, "normalization": {"mean": mean, "std": std},
+                    "subject_split": split,
+                    "files_per_subject": args.files_per_subject,
                     "preprocessing": {"raw_rate_hz": args.raw_rate_hz,
                                       "output_rate_hz": args.output_rate_hz,
-                                      "window_ms": args.window_ms}},
+                                      "window_ms": args.window_ms,
+                                      "stride_ms": args.stride_ms}},
                    args.output_dir / f"{protocol}_best.pt")
         print(protocol, "TEST", test, flush=True)
     (args.output_dir / "results.json").write_text(json.dumps(results, indent=2))
