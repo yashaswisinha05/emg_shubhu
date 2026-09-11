@@ -74,12 +74,12 @@
   <line x1="325" y1="488" x2="405" y2="488" class="arrow"/><text x="365" y="476" text-anchor="middle" class="tensor">x<tspan baseline-shift="sub">i</tspan></text>
   <line x1="545" y1="158" x2="635" y2="158" class="arrow"/><text x="590" y="146" text-anchor="middle" class="tensor">z<tspan baseline-shift="sub">e</tspan></text>
   <line x1="545" y1="488" x2="635" y2="488" class="arrow"/><text x="590" y="476" text-anchor="middle" class="tensor">z<tspan baseline-shift="sub">i</tspan></text>
-  <line x1="545" y1="184" x2="630" y2="298" class="arrow"/><text x="575" y="235" text-anchor="middle" class="tensor">z<tspan baseline-shift="sub">e</tspan></text>
-  <line x1="545" y1="462" x2="630" y2="346" class="arrow"/><text x="575" y="412" text-anchor="middle" class="tensor">z<tspan baseline-shift="sub">i</tspan></text>
+  <polyline points="545,184 580,184 580,306 630,306" class="arrow"/><text x="566" y="210" text-anchor="middle" class="tensor">z<tspan baseline-shift="sub">e</tspan></text>
+  <polyline points="545,462 580,462 580,338 630,338" class="arrow"/><text x="566" y="450" text-anchor="middle" class="tensor">z<tspan baseline-shift="sub">i</tspan></text>
   <line x1="765" y1="158" x2="855" y2="158" class="arrow"/><text x="810" y="146" text-anchor="middle" class="tensor">h<tspan baseline-shift="sub">e</tspan></text>
-  <line x1="770" y1="309" x2="855" y2="181" class="arrow"/><text x="811" y="244" text-anchor="middle" class="tensor">p<tspan baseline-shift="sub">g</tspan></text>
-  <line x1="1005" y1="181" x2="1095" y2="298" class="arrow"/><text x="1041" y="235" text-anchor="middle" class="tensor">c<tspan baseline-shift="sub">t</tspan>, γ<tspan baseline-shift="sub">t</tspan></text>
-  <line x1="765" y1="488" x2="1095" y2="346" class="arrow"/><text x="930" y="410" text-anchor="middle" class="tensor">h<tspan baseline-shift="sub">i</tspan></text>
+  <polyline points="770,306 800,306 800,182 855,182" class="arrow"/><text x="812" y="205" text-anchor="middle" class="tensor">p<tspan baseline-shift="sub">g</tspan></text>
+  <polyline points="1005,182 1040,182 1040,302 1095,302" class="arrow"/><text x="1066" y="290" text-anchor="middle" class="tensor">c<tspan baseline-shift="sub">t</tspan>, γ<tspan baseline-shift="sub">t</tspan></text>
+  <polyline points="765,488 1035,488 1035,342 1095,342" class="arrow"/><text x="930" y="476" text-anchor="middle" class="tensor">h<tspan baseline-shift="sub">i</tspan></text>
   <line x1="1245" y1="322" x2="1360" y2="322" class="arrow"/><text x="1302" y="310" text-anchor="middle" class="tensor">f<tspan baseline-shift="sub">t</tspan></text>
 
   <!-- integrated output and training objectives -->
@@ -103,10 +103,10 @@
   <text x="1730" y="537" text-anchor="middle" class="tensor">XYZ<tspan baseline-shift="sub">t+0.1:1.0 s</tspan></text>
   <text x="1730" y="563" text-anchor="middle" class="loss">L<tspan baseline-shift="sub">intent</tspan> + L<tspan baseline-shift="sub">EMG→IMU</tspan></text>
 
-  <line x1="770" y1="322" x2="1600" y2="130" class="arrow"/><text x="1178" y="216" text-anchor="middle" class="tensor">p<tspan baseline-shift="sub">g</tspan></text>
-  <line x1="1500" y1="304" x2="1600" y2="263" class="arrow"/><text x="1548" y="271" text-anchor="middle" class="tensor">ŷ<tspan baseline-shift="sub">t</tspan></text>
-  <line x1="1500" y1="325" x2="1600" y2="397" class="arrow"/><text x="1548" y="348" text-anchor="middle" class="tensor">ŷ<tspan baseline-shift="sub">short</tspan></text>
-  <line x1="1500" y1="345" x2="1600" y2="529" class="arrow"/><text x="1545" y="424" text-anchor="middle" class="tensor">ŷ<tspan baseline-shift="sub">long</tspan></text>
+  <polyline points="770,322 790,322 790,92 1570,92 1570,130 1600,130" class="arrow"/><text x="1180" y="81" text-anchor="middle" class="tensor">p<tspan baseline-shift="sub">g</tspan></text>
+  <polyline points="1500,304 1540,304 1540,263 1600,263" class="arrow"/><text x="1568" y="251" text-anchor="middle" class="tensor">ŷ<tspan baseline-shift="sub">t</tspan></text>
+  <polyline points="1500,322 1560,322 1560,397 1600,397" class="arrow"/><text x="1578" y="385" text-anchor="middle" class="tensor">ŷ<tspan baseline-shift="sub">short</tspan></text>
+  <polyline points="1500,340 1580,340 1580,529 1600,529" class="arrow"/><text x="1582" y="517" text-anchor="end" class="tensor">ŷ<tspan baseline-shift="sub">long</tspan></text>
 
   <text x="475" y="558" text-anchor="middle" class="note">dashed border = frozen</text>
   <text x="1730" y="624" text-anchor="middle" class="note">orange terms apply during training</text>
