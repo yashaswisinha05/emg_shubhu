@@ -12,13 +12,15 @@ from pathlib import Path
 
 
 BASELINES = ["constant", "feature_mlp", "gru", "lstm", "tcn",
-             "inceptiontime", "early_patch_transformer", "mult_cross_attention"]
+             "inceptiontime", "early_patch_transformer", "mult_cross_attention",
+             "residual_gru"]
 DISPLAY = {
     "constant": "Mean/majority", "feature_mlp": "Handcrafted + MLP",
     "gru": "Causal GRU", "lstm": "Causal LSTM", "tcn": "Causal TCN",
     "inceptiontime": "Causal InceptionTime",
     "early_patch_transformer": "Early-fusion Patch Transformer",
     "mult_cross_attention": "MulT-style cross-attention",
+    "residual_gru": "State-conditioned residual GRU (ours)",
     "proposed": "Proposed model",
 }
 METRICS = ["gripper_macro_f1", "position_cm", "pixel_error_px",
@@ -160,10 +162,16 @@ def main():
     for seed in args.seeds:
         for architecture in args.architectures:
             directory = args.output_dir / architecture / f"seed{seed}"
-            command = [python, "scripts/train_architecture_baseline.py",
-                       "--architecture", architecture, *shared,
-                       "--seed", str(seed), "--split-seed", str(args.split_seed),
-                       "--output-dir", str(directory)]
+            if architecture == "residual_gru":
+                command = [python, "scripts/train_neuromuscular_residual_gru.py",
+                           *shared, "--seed", str(seed),
+                           "--split-seed", str(args.split_seed),
+                           "--output-dir", str(directory)]
+            else:
+                command = [python, "scripts/train_architecture_baseline.py",
+                           "--architecture", architecture, *shared,
+                           "--seed", str(seed), "--split-seed", str(args.split_seed),
+                           "--output-dir", str(directory)]
             run_or_resume(command, directory, resume=args.resume,
                           dry_run=args.dry_run)
         proposed = args.output_dir / "proposed" / f"seed{seed}"
