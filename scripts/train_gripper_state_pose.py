@@ -381,6 +381,10 @@ def main():
     parser.add_argument("--split-seed", type=int,
                         help="Trial-split seed; defaults to --seed for backward compatibility")
     parser.add_argument("--raw-rate-hz", type=float, default=1259.4)
+    parser.add_argument("--emg-features", choices=["rms", "stft"], default="rms",
+                         help="EMG representation: trailing-RMS (default) or a causal "
+                              "trailing-window STFT band-power feature of the same width, "
+                              "for an architecture-matched time- vs frequency-domain ablation.")
     parser.add_argument("--event-origin", choices=["auto", "start"], default="auto")
     parser.add_argument("--patience", type=int, default=12)
     parser.add_argument("--react-weight", type=float, default=.2)
@@ -444,7 +448,7 @@ def main():
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     settings = {"raw_rate_hz": args.raw_rate_hz, "rate_hz": 100., "gap_s": .02,
                 "event_origin": args.event_origin, "event_pulse_s": .1,
-                "require_events": False}
+                "require_events": False, "emg_features": args.emg_features}
     trials, rejected, hashes = [], {}, {}
     paths = sorted({p for root in args.root for p in Path(root).rglob("trial_*.csv")})
     if not paths:

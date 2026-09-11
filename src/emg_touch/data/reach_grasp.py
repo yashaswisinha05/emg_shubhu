@@ -70,6 +70,30 @@ def segments(t, mask, max_gap):
         yield start, len(t)
 
 
+def causal_stft_bands(signal, rate, win_s, band_edges):
+    """Trailing-window STFT magnitude, averaged into frequency bands.
+
+    Frame i covers raw samples (i - win + 1 .. i), inclusive of the current
+    sample and none after it -- zero-padded with past silence at the start
+    of `signal`, never with samples that have not occurred yet. This mirrors
+    the causal boundary handling already used for the trailing-RMS features
+    (an IIR filter started from a zero state), so swapping representations
+    does not change what "causal" means for this pipeline.
+    """
+    win = max(2, round(win_s * rate))
+    window = np.hanning(win)
+    pad = np.zeros(win - 1, dtype=signal.dtype)
+    frames = np.lib.stride_tricks.sliding_window_view(
+        np.concatenate([pad, signal]), win)
+    spectrum = np.abs(np.fft.rfft(frames * window, axis=-1)) / win
+    freqs = np.fft.rfftfreq(win, d=1. / rate)
+    bands = np.zeros((len(signal), len(band_edges) - 1), dtype=signal.dtype)
+    for b, (low, high) in enumerate(zip(band_edges[:-1], band_edges[1:])):
+        in_band = (freqs >= low) & (freqs < high)
+        bands[:, b] = spectrum[:, in_band].mean(axis=1) if in_band.any() else 0.
+    return bands
+
+
 def preprocess(path, settings):
     frame = pd.read_csv(path)
     times = numeric(frame, ["time_perf_counter"])[:, 0]
@@ -98,11 +122,24 @@ def preprocess(path, settings):
     if high <= 20:
         raise ValueError("raw sampling rate too low for the default EMG filter")
     sos = butter(4, [20., high], btype="bandpass", fs=rate, output="sos")
+    emg_features = settings.get("emg_features", "rms")
+    if emg_features not in ("rms", "stft"):
+        raise ValueError(f"unknown emg_features setting: {emg_features!r}")
     rms = np.zeros_like(emg)
     long_rms = np.zeros_like(emg)
     for channel in range(4):
         for a, b in segments(t, ev[:, channel], settings["gap_s"]):
             signal = sosfilt(sos, emg[a:b, channel])
+            if emg_features == "stft":
+                # Same two-features-per-channel shape as the RMS path (one
+                # low band, one high band spanning the 20-450 Hz bandpass),
+                # so the model's input width -- and therefore every other
+                # architectural choice -- is unchanged by this ablation.
+                bands = causal_stft_bands(signal, rate, win_s=.128,
+                                           band_edges=[20., 135., high])
+                rms[a:b, channel] = bands[:, 0]
+                long_rms[a:b, channel] = bands[:, 1]
+                continue
             size = max(1, round(.02 * rate))
             rms[a:b, channel] = np.sqrt(np.maximum(lfilter(np.ones(size) / size, [1], signal**2), 0))
             size = max(1, round(.05 * rate))

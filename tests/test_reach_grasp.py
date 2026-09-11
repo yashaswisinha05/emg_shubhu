@@ -61,6 +61,31 @@ def test_preprocessing_causality_and_masks(tmp_path):
     assert first["emg_valid"][31].all()
 
 
+def test_stft_features_are_causal_and_match_rms_width(tmp_path):
+    f = frame()
+    path = tmp_path / "trial.csv"
+    f.to_csv(path, index=False)
+    stft_settings = {**settings(), "emg_features": "stft"}
+    first = preprocess(path, stft_settings)
+    # Perturbing samples strictly after row 700 must not change any feature
+    # computed at or before it -- the defining property of a causal feature.
+    f.loc[700:, "EMG 1_S0"] = 1e6
+    f.to_csv(path, index=False)
+    second = preprocess(path, stft_settings)
+    cutoff = np.searchsorted(first["time"], f["time_perf_counter"].iloc[700] - f["time_perf_counter"].iloc[0])
+    np.testing.assert_allclose(first["emg"][:cutoff], second["emg"][:cutoff])
+    assert not np.allclose(first["emg"][cutoff + 20:], second["emg"][cutoff + 20:])
+    assert first["emg"].shape == preprocess(path, settings())["emg"].shape
+
+
+def test_stft_features_reject_unknown_representation(tmp_path):
+    f = frame()
+    path = tmp_path / "trial.csv"
+    f.to_csv(path, index=False)
+    with pytest.raises(ValueError, match="emg_features"):
+        preprocess(path, {**settings(), "emg_features": "wavelet"})
+
+
 def test_model_causality_and_event_matching():
     torch.set_num_threads(1)
     model = ReachGraspModel().eval()
