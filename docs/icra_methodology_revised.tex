@@ -176,15 +176,13 @@ the supervised error.
 \subsubsection{Prediction heads}
 
 Current Cartesian position is predicted from $\mathbf f_t$ using a two-layer
-MLP. The screen head predicts a distribution over an internal $3\times3$ grid
-and a bounded two-dimensional offset for each cell:
+MLP. A separate screen head predicts the continuous normalized coordinate
+directly from the fused representation:
 \begin{equation}
- \hat{\mathbf u}_t=\sum_{k=1}^{9}\pi_{t,k}
- \operatorname{clip}_{[0,1]}
- (\mathbf m_k+\boldsymbol\delta_{t,k}).
+ \hat{\mathbf u}_t=\phi_{\mathrm{screen}}(\mathbf f_t),
 \end{equation}
-This is an internal parameterization of continuous screen position and is
-independent of the external $3\times2$ grid used to report six-cell accuracy.
+which is converted independently along the horizontal and vertical axes when
+reported in pixels.
 
 A shared future decoder combines $\mathbf f_t$ with the horizon encoding
 \begin{equation}
@@ -205,28 +203,31 @@ IMU.
 \subsection{Final Motion Objective}
 \label{subsec:final-loss}
 
-The final Stage-II objective retains the losses directly associated with
-current motion, screen intent, and future intent:
-\begin{align}
- \mathcal L_{\mathrm{II}}={}&
- 1.00\mathcal L_{\mathrm{pos}}
- +0.35\mathcal L_{\mathrm{pixel}}
- +0.15\mathcal L_{\mathrm{grid}}
- +0.10\mathcal L_{\mathrm{offset}} \nonumber\\
- &+0.50\mathcal L_{\mathrm{future200}}
- +0.10\mathcal L_{\mathrm{consistency}}
- +0.05\mathcal L_{\mathrm{intent}} \nonumber\\
- &+0.05\mathcal L_{\mathrm{EMG}\rightarrow\mathrm{future\text{-}IMU}}
- +0.01\mathcal L_{\mathrm{correction}}.
-\end{align}
+The final Stage-II objective is written parametrically as
+\begin{equation}
+ \mathcal L_{\mathrm{II}}
+ =\sum_{k\in\mathcal T}\lambda_k\mathcal L_k,
+ \label{eq:stage-two-objective}
+\end{equation}
+where
+\begin{equation}
+ \begin{aligned}
+ \mathcal T=\{&\mathrm{pos},\mathrm{screen},\mathrm{future},\mathrm{cons},\\
+              &\mathrm{intent},\mathrm{cross},\mathrm{reg}\}.
+ \end{aligned}
+\end{equation}
+These terms respectively supervise current Cartesian position, screen
+location, the dense 200-ms trajectory, temporal consistency, one-second
+motion intent, sEMG-to-future-IMU prediction, and correction regularization.
+The corresponding coefficients were 1.00, 0.35, 0.50, 0.10, 0.05, 0.05,
+and 0.01, in the order listed above.
 
 $\mathcal L_{\mathrm{pos}}$ is a smooth-$L_1$ loss on current Cartesian
 position. Smooth-$L_1$ reduces sensitivity to occasional VIVE and
-synchronization outliers. The screen objective combines a physical pixel-space
-smooth-$L_1$ loss with grid classification and within-cell offset losses. Pixel
-errors are scaled separately by display width and height, and later trial
-frames receive greater weight so that the estimate converges near interaction
-time.
+synchronization outliers. The screen objective is a smooth-$L_1$ loss in
+physical pixel space. Horizontal and vertical errors are scaled independently
+by display width and height, and later trial frames receive greater weight so
+that the estimate converges near interaction time.
 
 $\mathcal L_{\mathrm{future200}}$ directly supervises all 20 future positions
 between 10 and 200 ms. The consistency term compares each future prediction
@@ -246,7 +247,7 @@ $h\in\{100,200,\ldots,1000\}$ ms:
  \qquad \lambda_h=\exp[-h/(500\ \mathrm{ms})].
 \end{equation}
 Displacement targets reduce dependence on participant-specific workspace
-offsets. The decay preserves supervision at 1 s while assigning greater weight
+variation. The decay preserves supervision at 1 s while assigning greater weight
 to the more predictable near horizons.
 
 Finally, a training-only sEMG decoder predicts the change in an
