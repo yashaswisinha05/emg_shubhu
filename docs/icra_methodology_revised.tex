@@ -212,15 +212,14 @@ The final Stage-II objective is written parametrically as
 where
 \begin{equation}
  \begin{aligned}
- \mathcal T=\{&\mathrm{pos},\mathrm{screen},\mathrm{future},\mathrm{cons},\\
-              &\mathrm{intent},\mathrm{cross},\mathrm{reg}\}.
+ \mathcal T=\{\mathrm{pos},\mathrm{screen},\mathrm{future},
+              \mathrm{cons},\mathrm{intent}\}.
  \end{aligned}
 \end{equation}
 These terms respectively supervise current Cartesian position, screen
 location, the dense 200-ms trajectory, temporal consistency, one-second
-motion intent, sEMG-to-future-IMU prediction, and correction regularization.
-The corresponding coefficients were 1.00, 0.35, 0.50, 0.10, 0.05, 0.05,
-and 0.01, in the order listed above.
+motion intent. The corresponding coefficients were 1.00, 0.35, 0.50, 0.10,
+and 0.05, in the order listed above.
 
 $\mathcal L_{\mathrm{pos}}$ is a smooth-$L_1$ loss on current Cartesian
 position. Smooth-$L_1$ reduces sensitivity to occasional VIVE and
@@ -249,15 +248,6 @@ $h\in\{100,200,\ldots,1000\}$ ms:
 Displacement targets reduce dependence on participant-specific workspace
 variation. The decay preserves supervision at 1 s while assigning greater weight
 to the more predictable near horizons.
-
-Finally, a training-only sEMG decoder predicts the change in an
-interval-averaged future IMU signal. The corresponding
-$\mathcal L_{\mathrm{EMG}\rightarrow\mathrm{future\text{-}IMU}}$ term encourages
-the sEMG representation to encode muscle activity that precedes mechanical
-motion. The IMU feature is excluded from this auxiliary decoder to prevent a
-copying shortcut. $\mathcal L_{\mathrm{correction}}=
-\langle\|\mathbf c_t\|_2^2\rangle$ keeps the sEMG correction small when it does
-not improve prediction.
 
 No Stage-II state loss is used because the authoritative gripper classifier is
 frozen. Orientation and final 3-D endpoint prediction are also disabled in the
