@@ -125,12 +125,44 @@ The principal Stage-I objective is class-balanced cross entropy,
  \qquad w_c=\frac{N}{2N_c}.
 \end{equation}
 Class weighting prevents the more frequent state from dominating training.
-Auxiliary masked-state, masked-sEMG, temporal-stability, pose, screen-target,
-and short-horizon motion objectives regularize the source representation. Their
-purpose is to expose the classifier to the mechanical conditions accompanying
-each state; they are not outputs of the final Stage-II model. After checkpoint
-selection, the complete Stage-I classifier and its modality encoders are
-frozen.
+The complete Stage-I objective is
+\begin{align}
+ \mathcal L_{\mathrm I}={}&
+ \mathcal L_g
+ +0.20\mathcal L_{\mathrm{aux}}
+ +0.15(\mathcal L_{\mathrm{mask}}
+       +\mathcal L_{\mathrm{recon}})
+ +0.03\mathcal L_{\mathrm{stable}} \nonumber\\
+ &+0.20\mathcal L_{\mathrm{pos}}^{\mathrm I}
+ +0.50\mathcal L_{\mathrm{ori}}^{\mathrm I}
+ +0.35\mathcal L_{\mathrm{screen}}^{\mathrm I}
+ +0.20\mathcal L_{\mathrm{end}}^{\mathrm I} \nonumber\\
+ &+0.10\mathcal L_{\mathrm{future}}^{\mathrm I}
+ +0.05\mathcal L_{\mathrm{IMU}}^{\mathrm I}.
+\end{align}
+$\mathcal L_{\mathrm{aux}}$ applies the state target to the sEMG-only branch
+and preserves direct neuromuscular evidence. $\mathcal L_{\mathrm{mask}}$
+predicts state labels hidden over random temporal spans, encouraging the model
+to use causal context rather than isolated frames. During the same spans,
+$\mathcal L_{\mathrm{recon}}$ reconstructs withheld sEMG activation and
+regularizes the encoder against short signal loss.
+
+The stability term penalizes changes in close probability only when adjacent
+labels are equal:
+\begin{equation}
+ \mathcal L_{\mathrm{stable}}
+ =\left\langle
+ [P_t(\mathrm{close})-P_{t-1}(\mathrm{close})]^2
+ \right\rangle_{g_t=g_{t-1}}.
+\end{equation}
+It suppresses spurious switching without penalizing genuine transitions.
+The remaining Stage-I terms provide kinematic context: current position and
+orientation describe the instantaneous arm configuration; screen and endpoint
+losses associate the representation with the interaction goal; and future-pose
+and future-IMU losses expose it to short-term motion dynamics. These are
+auxiliary representation losses and are not deployed as final Stage-II outputs.
+After checkpoint selection, the complete Stage-I classifier and both modality
+encoders are frozen.
 
 \subsection{Stage II: State-Conditioned Motion Model}
 
@@ -206,7 +238,7 @@ IMU.
 The final Stage-II objective is written parametrically as
 \begin{equation}
  \mathcal L_{\mathrm{II}}
- =\sum_{k\in\mathcal T}\lambda_k\mathcal L_k,
+ =\sum_{k\in\mathcal T}\eta_k\mathcal L_k,
  \label{eq:stage-two-objective}
 \end{equation}
 where
@@ -218,21 +250,50 @@ where
 \end{equation}
 These terms respectively supervise current Cartesian position, screen
 location, the dense 200-ms trajectory, temporal consistency, one-second
-motion intent. The corresponding coefficients were 1.00, 0.35, 0.50, 0.10,
-and 0.05, in the order listed above.
+motion intent. The corresponding coefficients $\eta_k$ were 1.00, 0.35, 0.50,
+0.10, and 0.05, in the order listed above.
 
 $\mathcal L_{\mathrm{pos}}$ is a smooth-$L_1$ loss on current Cartesian
-position. Smooth-$L_1$ reduces sensitivity to occasional VIVE and
-synchronization outliers. The screen objective is a smooth-$L_1$ loss in
-physical pixel space. Horizontal and vertical errors are scaled independently
-by display width and height, and later trial frames receive greater weight so
-that the estimate converges near interaction time.
+position:
+\begin{equation}
+ \mathcal L_{\mathrm{pos}}
+ =\left\langle\rho(
+ \hat{\mathbf p}_t-\mathbf p_t)\right\rangle.
+\end{equation}
+Smooth-$L_1$ reduces sensitivity to occasional VIVE and synchronization
+outliers. The screen loss is evaluated in physical pixel space:
+\begin{equation}
+ \mathcal L_{\mathrm{screen}}
+ =\left\langle
+ a_t\rho\!\left(
+ \frac{(\hat{\mathbf u}_t-\mathbf u_t)\odot(W,H)}{100}
+ \right)\right\rangle,
+ \qquad a_t=0.25+3.75r_t^4,
+\end{equation}
+where $r_t$ is normalized trial progress. Independent axis scaling respects
+the display aspect ratio, while $a_t$ emphasizes convergence near interaction
+without removing early supervision.
 
-$\mathcal L_{\mathrm{future200}}$ directly supervises all 20 future positions
-between 10 and 200 ms. The consistency term compares each future prediction
-with the detached current-position estimate produced when that future time is
-reached. Together, these terms improve short-horizon accuracy and reduce
-temporal disagreement between successive predictions.
+The short-horizon loss directly supervises all 20 future positions between 10
+and 200 ms:
+\begin{equation}
+ \mathcal L_{\mathrm{future}}
+ =\frac{1}{|\mathcal H_s|}\sum_{h\in\mathcal H_s}
+ \left\langle\rho(
+ \hat{\mathbf p}_{t+h\mid t}-\mathbf p_{t+h})\right\rangle,
+\end{equation}
+where $\mathcal H_s=\{10,20,\ldots,200\}$ ms. The consistency loss is
+\begin{equation}
+ \mathcal L_{\mathrm{cons}}
+ =\frac{1}{|\mathcal H_s|}\sum_{h\in\mathcal H_s}
+ \left\langle\rho\!\left(
+ \hat{\mathbf p}_{t+h\mid t}
+ -\operatorname{sg}(\hat{\mathbf p}_{t+h\mid t+h})
+ \right)\right\rangle.
+\end{equation}
+The first term supplies direct future supervision; the second makes successive
+predictions agree when the forecast time arrives. Stop-gradient prevents the
+consistency path from moving the later current-position estimate.
 
 The long-horizon intent loss supervises displacement at
 $h\in\{100,200,\ldots,1000\}$ ms:
