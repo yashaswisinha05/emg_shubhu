@@ -304,13 +304,20 @@ the supervised error.
 \subsubsection{Prediction heads}
 
 Current Cartesian position is predicted from $\mathbf f_t$ using a two-layer
-MLP. A separate screen head predicts the continuous normalized coordinate
-directly from the fused representation:
+MLP. The screen head predicts a probability $\pi_{t,k}$ and a bounded offset
+$\boldsymbol\delta_{t,k}\in[-1/6,1/6]^2$ for each cell of an internal
+$3\times3$ spatial decomposition. With fixed cell centers $\mathbf m_k$, its
+continuous normalized output is
 \begin{equation}
- \hat{\mathbf u}_t=\phi_{\mathrm{screen}}(\mathbf f_t),
+ \hat{\mathbf u}_t=\sum_{k=1}^{9}\pi_{t,k}
+ \operatorname{clip}_{[0,1]}
+ (\mathbf m_k+\boldsymbol\delta_{t,k}),
+ \quad
+ \boldsymbol\pi_t=\operatorname{softmax}
+ (\boldsymbol\ell^{\mathrm{cell}}_t).
 \end{equation}
-which is converted independently along the horizontal and vertical axes when
-reported in pixels.
+This decomposition is an internal continuous-regression parameterization; it
+is distinct from any display partition used only to report cell accuracy.
 
 A shared future decoder combines $\mathbf f_t$ with the horizon encoding
 \begin{equation}
@@ -340,14 +347,17 @@ The final Stage-II objective is written parametrically as
 where
 \begin{equation}
  \begin{aligned}
- \mathcal T=\{\mathrm{pos},\mathrm{screen},\mathrm{future},
-              \mathrm{cons},\mathrm{intent}\}.
+ \mathcal T=\{&\mathrm{pos},\mathrm{pixel},\mathrm{cell},\\
+               &\mathrm{offset},\mathrm{future},\mathrm{cons},\\
+               &\mathrm{intent},\mathrm{cross},\mathrm{reg}\}.
  \end{aligned}
 \end{equation}
 These terms respectively supervise current Cartesian position, screen
-location, the dense 200-ms trajectory, temporal consistency, one-second
-motion intent. The corresponding coefficients $\eta_k$ were 1.00, 0.35, 0.50,
-0.10, and 0.05, in the order listed above.
+location, coarse spatial assignment, within-cell displacement, the dense
+200-ms trajectory, temporal consistency, one-second motion intent,
+sEMG-to-future-IMU prediction, and correction regularization. The
+corresponding coefficients $\eta_k$ were 1.00, 0.35, 0.15, 0.10, 0.50, 0.10,
+0.05, 0.05, and 0.01, in the order listed above.
 
 $\mathcal L_{\mathrm{pos}}$ is a smooth-$L_1$ loss on current Cartesian
 position:
@@ -357,9 +367,9 @@ position:
  \hat{\mathbf p}_t-\mathbf p_t)\right\rangle.
 \end{equation}
 Smooth-$L_1$ reduces sensitivity to occasional VIVE and synchronization
-outliers. The screen loss is evaluated in physical pixel space:
+outliers. The continuous screen loss is evaluated in physical pixel space:
 \begin{equation}
- \mathcal L_{\mathrm{screen}}
+ \mathcal L_{\mathrm{pixel}}
  =\left\langle
  a_t\rho\!\left(
  \frac{(\hat{\mathbf u}_t-\mathbf u_t)\odot(W,H)}{100}
@@ -369,6 +379,28 @@ outliers. The screen loss is evaluated in physical pixel space:
 where $r_t$ is normalized trial progress. Independent axis scaling respects
 the display aspect ratio, while $a_t$ emphasizes convergence near interaction
 without removing early supervision.
+
+Let $k_t^*$ denote the cell containing the ground-truth coordinate. The cell
+classification loss is
+\begin{equation}
+ \mathcal L_{\mathrm{cell}}
+ =\left\langle
+ \operatorname{CE}(\boldsymbol\ell^{\mathrm{cell}}_t,k_t^*)
+ \right\rangle.
+\end{equation}
+It discourages averaging between spatially separated target regions. The
+within-cell target is $\boldsymbol\delta_t^*=\mathbf u_t-\mathbf m_{k_t^*}$,
+and the offset loss is
+\begin{equation}
+ \mathcal L_{\mathrm{offset}}
+ =\left\langle\rho\!\left(
+ \frac{(\boldsymbol\delta_{t,k_t^*}-\boldsymbol\delta_t^*)
+       \odot(W,H)}{100}
+ \right)\right\rangle.
+\end{equation}
+This term provides fine continuous localization inside the correct coarse
+region. Together, the pixel, cell, and offset terms train one continuous screen
+output rather than three deployed predictions.
 
 The short-horizon loss directly supervises all 20 future positions between 10
 and 200 ms:
@@ -405,6 +437,38 @@ $h\in\{100,200,\ldots,1000\}$ ms:
 Displacement targets reduce dependence on participant-specific workspace
 variation. The decay preserves supervision at 1 s while assigning greater weight
 to the more predictable near horizons.
+
+The same long-horizon weights supervise a training-only sEMG-to-future-IMU
+decoder. For consecutive intent horizons $h_{k-1}$ and $h_k$, its target is
+\begin{equation}
+ n_k=\frac{h_k}{10\ \mathrm{ms}},
+ \qquad
+ \Delta\bar{\mathbf i}_{t,k}
+ =\frac{1}{n_k-n_{k-1}}
+ \sum_{j=n_{k-1}+1}^{n_k}\mathbf i_{t+j}-\mathbf i_t,
+\end{equation}
+where the indices refer to the 100-Hz model grid. The loss is
+\begin{equation}
+ \mathcal L_{\mathrm{cross}}
+ =\frac{\sum_k\lambda_{h_k}
+ \left\langle\rho\!\left(
+ \widehat{\Delta\bar{\mathbf i}}_{t,k}
+ -\Delta\bar{\mathbf i}_{t,k}
+ \right)\right\rangle}
+ {\sum_k\lambda_{h_k}}.
+\end{equation}
+Because this decoder receives the sEMG representation but not the current IMU
+feature, it cannot solve the task by copying inertial input. The loss encourages
+muscle activity to encode mechanical changes that occur later, while interval
+averaging avoids reconstruction of noisy high-rate samples.
+
+Finally, the correction penalty is
+\begin{equation}
+ \mathcal L_{\mathrm{reg}}
+ =\left\langle c_{t,j}^2\right\rangle_{t,j}.
+\end{equation}
+It discourages unnecessary sEMG corrections and preserves the IMU base when
+the muscle signal provides no additional information.
 
 No Stage-II state loss is used because the authoritative gripper classifier is
 frozen. Orientation and final 3-D endpoint prediction are also disabled in the
