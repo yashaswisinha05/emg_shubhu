@@ -56,7 +56,8 @@ class ArchitectureBaseline(nn.Module):
 
     def __init__(self, architecture, modality="emg+imu", width=128, patch=16,
                  stride=4, layers=4, heads=4, dropout=.1, future_steps=20,
-                 predict_click=True, predict_final_pose=False, react_context=100,
+                 predict_click=True, predict_final_pose=False, predict_state=True,
+                 react_context=100,
                  constant_initialization=None):
         super().__init__()
         if architecture not in self.NAMES:
@@ -68,6 +69,7 @@ class ArchitectureBaseline(nn.Module):
         self.architecture, self.modality = architecture, modality
         self.width, self.future_steps = width, future_steps
         self.predict_click = predict_click
+        self.predict_state = predict_state
         inputs = 64
 
         if architecture == "constant":
@@ -113,7 +115,7 @@ class ArchitectureBaseline(nn.Module):
             self.cross_output = nn.Sequential(
                 nn.Linear(width * 2, width), nn.LayerNorm(width), nn.GELU())
 
-        self.state_head = nn.Linear(width, 2)
+        self.state_head = nn.Linear(width, 2) if predict_state else None
         self.position_head = nn.Sequential(nn.Linear(width, width), nn.GELU(),
                                            nn.Linear(width, 3))
         self.click_head = (nn.Sequential(nn.Linear(width, width), nn.GELU(),
@@ -171,7 +173,8 @@ class ArchitectureBaseline(nn.Module):
                 batch, length, self.future_steps, 3) + zero
         else:
             features = self._features(emg, imu)
-            state = self.state_head(features)
+            state = (self.state_head(features) if self.state_head is not None
+                     else features.new_zeros(batch, length, 2))
             position = self.position_head(features)
             click = self.click_head(features).sigmoid() if self.click_head is not None else None
             future = self.future_head(features).reshape(

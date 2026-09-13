@@ -37,14 +37,14 @@ def run_is_complete(directory: Path) -> bool:
     return all((directory / name).is_file() for name in REQUIRED_RUN_FILES)
 
 
-def matched_width(architecture, target, future_steps):
+def matched_width(architecture, target, future_steps, predict_state=True):
     """Choose a four-head-compatible width nearest the requested capacity."""
     from emg_touch.models.reach_grasp_architecture_baselines import ArchitectureBaseline
     candidates = []
     for width in range(32, 513, 4):
         model = ArchitectureBaseline(
             architecture, width=width, layers=4, heads=4,
-            future_steps=future_steps)
+            future_steps=future_steps, predict_state=predict_state)
         count = sum(parameter.numel() for parameter in model.parameters())
         candidates.append((abs(count - target), width, count))
     _, width, count = min(candidates)

@@ -46,6 +46,16 @@ def test_recurrent_models_are_not_bidirectional():
         assert model.recurrent.bidirectional is False
 
 
+def test_motion_only_baseline_has_no_classifier_parameters():
+    model = ArchitectureBaseline(
+        "gru", modality="imu", width=16, layers=1, heads=4,
+        predict_state=False)
+    assert model.state_head is None
+    output = model(torch.zeros(2, 8, 16), torch.zeros(2, 8, 48))
+    assert output["gripper_state_logits"].shape == (2, 8, 2)
+    assert not output["gripper_state_logits"].any()
+
+
 def test_constant_uses_supplied_training_statistics():
     initialization = {
         "state_logits": [-2., 2.], "position": [1., 2., 3.],

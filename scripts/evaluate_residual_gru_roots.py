@@ -82,6 +82,8 @@ def main():
                           else "cpu")
     model, state = load_model(args.checkpoint, device)
     motion = model.motion if isinstance(model, NeuroClassifierConditionedAttention) else model
+    model_modality = getattr(motion, "modality", "emg+imu")
+    predicts_state = getattr(motion, "predict_state", True)
     stats = state["normalization"]
     settings = dict(state["preprocessing"])
     settings["require_events"] = False
@@ -103,15 +105,17 @@ def main():
                 pass
             emg_usable = trial["emg_valid"].mean(1) >= .75
             imu_usable = trial["imu_valid"].mean(1) >= .75
-            wearable = emg_usable & imu_usable
+            wearable = (imu_usable if model_modality == "imu"
+                        else emg_usable & imu_usable)
             emg = torch.from_numpy(packed(trial, stats, "emg").astype("float32"))[None].to(device)
             imu = torch.from_numpy(packed(trial, stats, "imu").astype("float32"))[None].to(device)
             with torch.no_grad():
                 output = model(emg, imu)
             probability = output["gripper_state_logits"][0].softmax(-1).cpu().numpy()
             state_valid = wearable & trial["gripper_state_valid"]
-            state_truth.extend(trial["gripper_state"][state_valid].tolist())
-            state_prediction.extend(probability.argmax(-1)[state_valid].tolist())
+            if predicts_state:
+                state_truth.extend(trial["gripper_state"][state_valid].tolist())
+                state_prediction.extend(probability.argmax(-1)[state_valid].tolist())
 
             scale = np.asarray(stats["position"]["std"])
             mean = np.asarray(stats["position"]["mean"])

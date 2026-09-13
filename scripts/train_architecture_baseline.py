@@ -21,6 +21,7 @@ from scripts import train_gripper_state_pose as base
 
 selected_architecture = None
 selected_width = 128
+predict_state = True
 constant_initialization = None
 future_consistency_weight = .1
 trained_parameter_count = None
@@ -28,6 +29,7 @@ trained_parameter_count = None
 
 def model_factory(**kwargs):
     kwargs["width"] = selected_width
+    kwargs["predict_state"] = predict_state
     return ArchitectureBaseline(
         selected_architecture, constant_initialization=constant_initialization,
         **kwargs)
@@ -42,12 +44,13 @@ def comparison_loss(model, output, batch, class_weight, args):
         usable = batch["emg_usable"] & batch["imu_usable"]
     labels = batch["gripper_state"]
     state_valid = usable & batch["gripper_state_valid"]
-    state = F.cross_entropy(output["gripper_state_logits"].transpose(1, 2),
-                            labels, weight=class_weight, reduction="none")
     pose_valid = usable & batch["pose_mask"][..., 0].bool()
     position = F.smooth_l1_loss(output["position"], batch["pose"], reduction="none")
-    total = (masked_mean(state, state_valid)
-             + args.position_weight * masked_mean(position, pose_valid[..., None]))
+    total = args.position_weight * masked_mean(position, pose_valid[..., None])
+    if predict_state:
+        state = F.cross_entropy(output["gripper_state_logits"].transpose(1, 2),
+                                labels, weight=class_weight, reduction="none")
+        total = total + masked_mean(state, state_valid)
 
     if output["click"] is not None:
         click_valid = usable & batch["click_valid"]
@@ -92,12 +95,14 @@ def main():
                         choices=sorted(ArchitectureBaseline.NAMES))
     parser.add_argument("--future-consistency-weight", type=float, default=.1)
     parser.add_argument("--width", type=int, default=128)
+    parser.add_argument("--no-gripper-head", action="store_true")
     option, remaining = parser.parse_known_args()
     if option.future_consistency_weight < 0:
         parser.error("future consistency weight must be nonnegative")
-    global selected_architecture, selected_width, future_consistency_weight
+    global selected_architecture, selected_width, predict_state, future_consistency_weight
     selected_architecture = option.architecture
     selected_width = option.width
+    predict_state = not option.no_gripper_head
     future_consistency_weight = option.future_consistency_weight
 
     sys.argv = [sys.argv[0], *remaining]
@@ -114,8 +119,8 @@ def main():
         models = []
         while index < len(sys.argv) and not sys.argv[index].startswith("--"):
             models.append(sys.argv[index]); index += 1
-        if models != ["emg+imu"]:
-            parser.error("the architecture comparison requires --models emg+imu")
+        if len(models) != 1 or models[0] not in {"imu", "emg+imu"}:
+            parser.error("motion baselines require one of --models imu or emg+imu")
 
     old_model, old_loss = base.GripperStatePoseModel, base.loss
     old_evaluate, old_train_one = base.evaluate, base.train_one
@@ -123,6 +128,10 @@ def main():
     def position_only(*args, **kwargs):
         report = old_evaluate(*args, **kwargs)
         report["orientation_deg"] = None
+        if not predict_state:
+            report["gripper_accuracy"] = None
+            report["gripper_macro_f1"] = None
+            report["confusion_open_close"] = None
         for value in report.get("future_pose_by_ms", {}).values():
             value["orientation_deg"], value["valid_orientation_frames"] = None, 0
         return report
@@ -169,6 +178,7 @@ def main():
         checkpoint["architecture"] = selected_architecture
         checkpoint["parameter_count"] = int(trained_parameter_count)
         checkpoint["model_args"]["width"] = selected_width
+        checkpoint["model_args"]["predict_state"] = predict_state
         torch.save(checkpoint, path)
     print(f"comparison protocol written to {results_path}")
 
