@@ -125,6 +125,8 @@ The principal Stage-I objective is class-balanced cross entropy,
  \qquad w_c=\frac{N}{2N_c}.
 \end{equation}
 Class weighting prevents the more frequent state from dominating training.
+In the following, $\rho(\cdot)$ denotes the element-wise smooth-$L_1$ penalty,
+and $\langle\cdot\rangle_{\mathcal V}$ denotes an average over valid elements.
 The complete Stage-I objective is
 \begin{align}
  \mathcal L_{\mathrm I}={}&
@@ -140,12 +142,36 @@ The complete Stage-I objective is
  &+0.10\mathcal L_{\mathrm{future}}^{\mathrm I}
  +0.05\mathcal L_{\mathrm{IMU}}^{\mathrm I}.
 \end{align}
-$\mathcal L_{\mathrm{aux}}$ applies the state target to the sEMG-only branch
-and preserves direct neuromuscular evidence. $\mathcal L_{\mathrm{mask}}$
-predicts state labels hidden over random temporal spans, encouraging the model
-to use causal context rather than isolated frames. During the same spans,
-$\mathcal L_{\mathrm{recon}}$ reconstructs withheld sEMG activation and
-regularizes the encoder against short signal loss.
+The sEMG-only auxiliary classifier is supervised by
+\begin{equation}
+ \mathcal L_{\mathrm{aux}}
+ =\left\langle
+ \operatorname{CE}(\boldsymbol\ell^{e}_t,g_t)
+ \right\rangle_{t\in\mathcal V_g}.
+\end{equation}
+This prevents all state information from being delegated to the inertial
+stream. For an independently sampled set of masked action spans
+$\mathcal M_g$, the masked-state loss is
+\begin{equation}
+ \mathcal L_{\mathrm{mask}}
+ =\left\langle
+ \operatorname{CE}(\boldsymbol\ell^{e,\mathrm{mask}}_t,g_t)
+ \right\rangle_{t\in\mathcal M_g}.
+\end{equation}
+It requires the causal sEMG branch to infer a hidden state from preceding
+sensor context rather than reading the corresponding action token.
+
+For masked sEMG spans $\mathcal M_e$, the reconstruction objective is
+\begin{equation}
+ \mathcal L_{\mathrm{recon}}
+ =\left\langle
+ \|\hat{\mathbf e}_t-\mathbf e_t\|_2^2
+ \right\rangle_{t\in\mathcal M_e}.
+\end{equation}
+This Stage-I-only loss regularizes the sEMG encoder against short dropouts and
+encourages it to retain the temporal structure of muscle activation. It is
+different from intent prediction: reconstruction estimates a hidden current
+sensor representation, whereas intent predicts future hand displacement.
 
 The stability term penalizes changes in close probability only when adjacent
 labels are equal:
@@ -156,12 +182,82 @@ labels are equal:
  \right\rangle_{g_t=g_{t-1}}.
 \end{equation}
 It suppresses spurious switching without penalizing genuine transitions.
-The remaining Stage-I terms provide kinematic context: current position and
-orientation describe the instantaneous arm configuration; screen and endpoint
-losses associate the representation with the interaction goal; and future-pose
-and future-IMU losses expose it to short-term motion dynamics. These are
-auxiliary representation losses and are not deployed as final Stage-II outputs.
-After checkpoint selection, the complete Stage-I classifier and both modality
+
+Current position and orientation are supervised in standardized Cartesian and
+continuous 6-D rotation representations:
+\begin{align}
+ \mathcal L_{\mathrm{pos}}^{\mathrm I}
+ &=\left\langle
+ \rho(\hat{\mathbf p}_t-\mathbf p_t)
+ \right\rangle_{\mathcal V_p},\\
+ \mathcal L_{\mathrm{ori}}^{\mathrm I}
+ &=\left\langle
+ \rho(\hat{\mathbf r}^{6D}_t-\mathbf r^{6D}_t)
+ \right\rangle_{\mathcal V_r}.
+\end{align}
+These losses associate state features with the instantaneous mechanical
+configuration and help separate similar muscle amplitudes produced under
+different arm orientations.
+
+Let $d(\hat{\mathbf u},\mathbf u)$ denote smooth-$L_1$ error after independently
+scaling normalized horizontal and vertical coordinates to units of 100 pixels.
+The Stage-I screen loss combines its fused prediction with auxiliary direct and
+endpoint-derived predictions:
+\begin{equation}
+ \mathcal L_{\mathrm{screen}}^{\mathrm I}
+ =\left\langle a_t^{\mathrm I}
+ [d(\hat{\mathbf u}_t,\mathbf u)
+ +0.2d(\hat{\mathbf u}^{d}_t,\mathbf u)
+ +0.2d(\hat{\mathbf u}^{e}_t,\mathbf u)]\right\rangle,
+\end{equation}
+where $a_t^{\mathrm I}=0.25+2.75r_t^2$. This associates the representation with
+the interaction target and gives greater importance to predictions made after
+more of the reach has been observed.
+
+The Stage-I endpoint objective is
+\begin{equation}
+ \begin{aligned}
+ \mathcal L_{\mathrm{end}}^{\mathrm I}={}&
+ 2.5\left\langle(1+r_t^2)
+ \rho\!\left(
+ \frac{(\hat{\mathbf p}^{e}_t-\mathbf p^{e})
+       \odot\boldsymbol\sigma_p}{0.1\ \mathrm m}
+ \right)\right\rangle \\
+ &+\left\langle
+ \rho(\hat{\mathbf r}^{e,6D}_t-\mathbf r^{e,6D})
+ \right\rangle.
+ \end{aligned}
+\end{equation}
+The physical scaling gives equal meaning to the three Cartesian axes, while
+the increased late-trial weight emphasizes the final interaction location.
+
+For $\mathcal H_s=\{10,20,\ldots,200\}$ ms, the Stage-I future-pose loss is
+\begin{equation}
+ \begin{aligned}
+ \mathcal L_{\mathrm{future}}^{\mathrm I}={}&
+ \frac{1}{|\mathcal H_s|}\sum_{h\in\mathcal H_s}
+ \left\langle\rho(
+ \hat{\mathbf p}_{t+h\mid t}-\mathbf p_{t+h})\right\rangle\\
+ &+\frac{1}{|\mathcal H_s|}\sum_{h\in\mathcal H_s}
+ \left\langle\rho(
+ \hat{\mathbf r}^{6D}_{t+h\mid t}-\mathbf r^{6D}_{t+h})
+ \right\rangle.
+ \end{aligned}
+\end{equation}
+It prevents the source representation from explaining only the present frame.
+Finally, the Stage-I future-IMU loss is
+\begin{equation}
+ \mathcal L_{\mathrm{IMU}}^{\mathrm I}
+ =\frac{1}{|\mathcal H_s|}\sum_{h\in\mathcal H_s}
+ \left\langle\rho\!\left(
+ \widehat{\Delta\mathbf i}_{t,h}
+ -(\mathbf i_{t+h}-\mathbf i_t)
+ \right)\right\rangle.
+\end{equation}
+This auxiliary target links the learned state to subsequent mechanical change.
+The Stage-I kinematic heads regularize representation learning; the final
+Stage-II system does not deploy its orientation, endpoint, or Stage-I future
+outputs. After checkpoint selection, the complete classifier and both modality
 encoders are frozen.
 
 \subsection{Stage II: State-Conditioned Motion Model}
