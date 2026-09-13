@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write one metrics JSON for a residual-GRU checkpoint over multiple roots."""
+"""Write one metrics JSON for a causal future checkpoint over multiple roots."""
 from __future__ import annotations
 
 import argparse
@@ -20,6 +20,7 @@ from emg_touch.data.reach_grasp import preprocess
 from emg_touch.models.reach_grasp_neuro_classifier_attention import (
     NeuroClassifierConditionedAttention,
 )
+from emg_touch.models.reach_grasp_architecture_baselines import ArchitectureBaseline
 from emg_touch.residual_gru_inference import load_residual_gru
 
 
@@ -58,6 +59,16 @@ def causal_velocity_sequence(position, time, valid, lookback_ms):
     return velocity
 
 
+def load_model(checkpoint, device):
+    state = torch.load(checkpoint, map_location=device, weights_only=False)
+    if state.get("format") != "reach_grasp_architecture_baseline_v1":
+        return load_residual_gru(checkpoint, device)
+    model = ArchitectureBaseline(
+        state["architecture"], **state["model_args"]).to(device)
+    model.load_state_dict(state["state_dict"])
+    return model.eval().requires_grad_(False), state
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
@@ -69,7 +80,7 @@ def main():
     args = parser.parse_args()
     device = torch.device(args.device if args.device != "cuda" or torch.cuda.is_available()
                           else "cpu")
-    model, state = load_residual_gru(args.checkpoint, device)
+    model, state = load_model(args.checkpoint, device)
     motion = model.motion if isinstance(model, NeuroClassifierConditionedAttention) else model
     stats = state["normalization"]
     settings = dict(state["preprocessing"])
