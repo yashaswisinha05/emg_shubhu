@@ -315,7 +315,11 @@ def train_one(modality, args, train, validation, stats, class_weight, settings, 
             value.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.); optimizer.step()
             losses.append(value.item())
         report = evaluate(model, validation, stats, args)
-        score = report["position_cm"] + .1 * (report["orientation_deg"] or 0) + 5 * (1-report["gripper_macro_f1"])
+        state_f1 = report.get("gripper_macro_f1")
+        state_penalty = 0. if state_f1 is None else 5 * (1 - state_f1)
+        score = (report["position_cm"]
+                 + .1 * (report["orientation_deg"] or 0)
+                 + state_penalty)
         # Pixels are a much larger number than centimetres, so scale it into
         # the same range as the other terms before it drives checkpointing.
         if args.pixel_architecture == "goal-consistent":
@@ -334,8 +338,9 @@ def train_one(modality, args, train, validation, stats, class_weight, settings, 
         final_xyz = (f" final={endpoint:.2f}cm(x={report['final_position_cm_x']:.2f},"
                     f"y={report['final_position_cm_y']:.2f},"
                     f"z={report['final_position_cm_z']:.2f})" if endpoint is not None else "")
+        state_text = "n/a" if state_f1 is None else f"{state_f1:.3f}"
         print(f"modality={modality} epoch={epoch} loss={np.mean(losses):.4f} score={score:.3f} "
-              f"state_f1={report['gripper_macro_f1']:.3f} pose={report['position_cm']:.2f}cm"
+              f"state_f1={state_text} pose={report['position_cm']:.2f}cm"
               + click_xy + final_xyz, flush=True)
         if score < best:
             best, stale = score, 0
