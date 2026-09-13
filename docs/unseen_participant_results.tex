@@ -1,0 +1,91 @@
+\subsection{Generalization to an Unseen Participant}
+\label{subsec:unseen-participant}
+
+We evaluated the models without adaptation on an unseen participant comprising
+50 open-hand and 50 closed-hand trials. All 100 trials were accepted by the
+preprocessing pipeline. Metrics were pooled over valid frames rather than
+averaged across the two conditions, thereby accounting for their slightly
+different durations. The recurrent baselines contained no gripper classifier:
+IMU models received only inertial measurements, whereas fusion models used
+early concatenation of sEMG and IMU features. GRU and LSTM widths were selected
+to approximate the trainable parameter count of the proposed Stage-II model.
+
+\begin{table*}[t]
+ \centering
+ \caption{Motion generalization on the unseen participant. Values are mean
+ Euclidean errors pooled across open and closed trials. The proposed model uses
+ its dense trajectory head at 100--200 ms and its intent head at 500--1000 ms.}
+ \label{tab:unseen-motion}
+ \small
+ \setlength{\tabcolsep}{5pt}
+ \begin{tabular}{lrrrrrr}
+  \hline
+  Model & Current (cm) & Pixel (px) & 100 ms (cm) & 200 ms (cm) &
+  500 ms (cm) & 1000 ms (cm) \\
+  \hline
+  Proposed       & \textbf{7.29} & \textbf{409.7} & \textbf{7.63} &
+                   \textbf{8.04} & 10.78 & 15.16 \\
+  IMU--GRU       & 7.43 & 429.0 & 7.82 & 8.33 & \textbf{10.73} & 14.88 \\
+  sEMG+IMU--GRU  & 11.40 & 498.7 & 11.38 & 11.73 & 13.34 & 16.14 \\
+  IMU--LSTM      & 7.92 & 416.7 & 8.34 & 8.78 & 11.09 & \textbf{14.40} \\
+  sEMG+IMU--LSTM & 8.88 & 448.8 & 9.16 & 9.83 & 11.79 & 15.18 \\
+  \hline
+ \end{tabular}
+\end{table*}
+
+The proposed model produced the lowest current-position and screen errors and
+the lowest errors at 100 and 200 ms. Relative to the strongest conventional
+baseline at each of these outputs, it reduced current-position error by
+0.15 cm, pixel error by 7.0 pixels, 100-ms error by 0.19 cm, and 200-ms error
+by 0.28 cm. At longer horizons, the advantage did not persist: IMU--GRU was
+0.05 cm better at 500 ms and IMU--LSTM was 0.77 cm better at 1 s. Thus, the
+unseen-participant evidence supports improved current and short-horizon
+decoding, but does not establish superiority over recurrent IMU baselines at
+all long horizons.
+
+Naive early fusion generalized poorly, particularly for the GRU. This result
+suggests that inter-participant variation in sEMG can corrupt a recurrent
+motion representation when the modalities are concatenated without control.
+In contrast, the proposed model restricts sEMG to a bounded correction of an
+IMU-derived mechanical representation. Its stronger short-horizon performance
+is therefore consistent with the intended role of sEMG as incremental evidence
+rather than an unconstrained replacement for inertial information.
+
+\begin{table}[t]
+ \centering
+ \caption{Proposed-model future error and causal reference baselines on the
+ combined unseen open and closed trials.}
+ \label{tab:unseen-future-baselines}
+ \small
+ \begin{tabular}{rrrr}
+  \hline
+  Horizon & Proposed & Persistence & Linear extrapolation \\
+  \hline
+  100 ms  & \textbf{7.63} & 8.57 & 8.19 \\
+  200 ms  & \textbf{8.04} & 10.72 & 10.13 \\
+  500 ms  & \textbf{10.78} & 19.34 & 21.81 \\
+  1000 ms & \textbf{15.16} & 37.57 & 50.96 \\
+  \hline
+ \end{tabular}
+\end{table}
+
+The persistence baseline repeats the model's current Cartesian estimate,
+whereas linear extrapolation estimates velocity by least-squares fitting over
+the preceding 200 ms and propagates that velocity causally. At 1 s, the
+proposed intent head reduced error by 22.41 cm relative to persistence and by
+35.80 cm relative to linear extrapolation. This demonstrates predictive motion
+information beyond holding the current pose or extending recent velocity,
+although the matched IMU--LSTM remained more accurate at that horizon.
+
+The proposed gripper classifier was assessed only after combining both
+conditions, because classwise F1 is not meaningful within an all-open or
+all-closed subset. The combined confusion matrix was
+\begin{equation}
+ \begin{bmatrix}
+  10330 & 130\\
+  759 & 10280
+ \end{bmatrix},
+\end{equation}
+with rows denoting true open and closed states. This corresponds to 95.86\%
+accuracy and 95.86\% macro-F1, indicating balanced transfer of the frozen
+state representation to the unseen participant.
