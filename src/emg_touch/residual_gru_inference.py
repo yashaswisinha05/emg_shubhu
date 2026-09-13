@@ -18,6 +18,27 @@ from .models.reach_grasp_residual_gru import NeuromuscularResidualGRU
 from .models.reach_grasp_shared_encoder_adapter import SharedEncoderResidualGRU
 
 
+def causal_linear_extrapolation(position_history, horizons_ms, rate_hz=100.,
+                                lookback_ms=200.):
+    """Extrapolate a past-only least-squares velocity from predicted positions."""
+    history = np.asarray(position_history, dtype=float)
+    horizons = np.asarray(horizons_ms, dtype=float)
+    if history.ndim != 2 or history.shape[1] != 3:
+        raise ValueError("position_history must have shape [time, 3]")
+    count = max(2, int(round(lookback_ms * rate_hz / 1000.)) + 1)
+    history = history[-count:]
+    finite = np.isfinite(history).all(1)
+    history = history[finite]
+    if len(history) < 2:
+        return (np.repeat(history[-1:], len(horizons), axis=0)
+                if len(history) else np.full((len(horizons), 3), np.nan))
+    time = np.arange(len(history), dtype=float) / rate_hz
+    centered = time - time.mean()
+    velocity = (centered[:, None] * (history - history.mean(0))).sum(0)
+    velocity /= np.square(centered).sum()
+    return history[-1] + horizons[:, None] * velocity / 1000.
+
+
 def load_residual_gru(checkpoint, device="cuda"):
     device = torch.device(device)
     state = torch.load(Path(checkpoint), map_location=device, weights_only=False)
@@ -139,12 +160,25 @@ class ResidualGRUStream:
             "emg_correction_gate": float(output["emg_correction_gate"][0, -1, 0]),
             "normalization_diagnostics": diagnostics,
         }
+        short_horizons = np.arange(1, len(future) + 1) * 10
+        history_m = (output["position"][0].cpu().numpy()
+                     * position_std + position_mean)
+        result["future_persistence_positions_m"] = np.repeat(
+            position[None], len(short_horizons), axis=0).tolist()
+        result["future_linear_extrapolation_positions_m"] = (
+            causal_linear_extrapolation(
+                history_m, short_horizons, self.pipeline.rate).tolist())
         intent_delta = output.get("intent_position_delta")
         if intent_delta is not None:
             delta_m = intent_delta[0, -1].cpu().numpy() * position_std
-            result["intent_horizons_ms"] = [step * 10
-                for step in self.motion.intent_horizons_steps]
+            intent_horizons = [step * 10 for step in self.motion.intent_horizons_steps]
+            result["intent_horizons_ms"] = intent_horizons
             result["intent_positions_m"] = (position[None] + delta_m).tolist()
+            result["intent_persistence_positions_m"] = np.repeat(
+                position[None], len(intent_horizons), axis=0).tolist()
+            result["intent_linear_extrapolation_positions_m"] = (
+                causal_linear_extrapolation(
+                    history_m, intent_horizons, self.pipeline.rate).tolist())
         return result
 
     def update(self, time_s, emg_4, imu_24, canvas_px=(1920, 1080)):

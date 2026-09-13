@@ -3,7 +3,10 @@ import pandas as pd
 import torch
 
 from emg_touch.models.reach_grasp_residual_gru import NeuromuscularResidualGRU
-from emg_touch.residual_gru_inference import ResidualGRUStream
+from emg_touch.residual_gru_inference import (
+    ResidualGRUStream,
+    causal_linear_extrapolation,
+)
 from scripts.infer_neuromuscular_residual_gru import prepare_replay_frame
 
 
@@ -13,6 +16,15 @@ def test_recorded_replay_sorts_and_deduplicates_timestamps():
     cleaned = prepare_replay_frame(frame)
     assert cleaned["_inference_time"].tolist() == [1., 2.]
     assert cleaned["sample"].tolist() == [11, 20]
+
+
+def test_causal_linear_extrapolation_recovers_constant_velocity():
+    time = np.arange(21) / 100.
+    history = np.stack((2 * time, -time, .5 * time), axis=-1)
+    predicted = causal_linear_extrapolation(history, [100, 500], rate_hz=100.)
+    np.testing.assert_allclose(
+        predicted, history[-1] + np.asarray([[.2, -.1, .05], [1., -.5, .25]]),
+        atol=1e-12)
 
 
 def test_live_residual_gru_returns_short_and_long_future(tmp_path):
@@ -36,5 +48,9 @@ def test_live_residual_gru_returns_short_and_long_future(tmp_path):
         result = stream.update(index / 1000., np.zeros(4), np.zeros(24)) or result
     assert result["valid"]
     assert len(result["future_positions_m"]) == 20
+    assert len(result["future_persistence_positions_m"]) == 20
+    assert len(result["future_linear_extrapolation_positions_m"]) == 20
     assert result["intent_horizons_ms"] == [100, 500, 1000]
+    assert len(result["intent_persistence_positions_m"]) == 3
+    assert len(result["intent_linear_extrapolation_positions_m"]) == 3
     assert np.asarray(result["pixel_xy"]).shape == (2,)

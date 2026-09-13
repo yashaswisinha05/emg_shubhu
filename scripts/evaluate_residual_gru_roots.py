@@ -38,12 +38,34 @@ def error_summary(values, unit):
             "frames": int(len(values))}
 
 
+def causal_velocity_sequence(position, time, valid, lookback_ms):
+    """Past-only least-squares velocity for every frame."""
+    position, time, valid = map(np.asarray, (position, time, valid))
+    velocity = np.zeros_like(position, dtype=float)
+    lookback_s = lookback_ms / 1000.
+    for end in range(len(time)):
+        start = np.searchsorted(time, time[end] - lookback_s, side="left")
+        keep = valid[start:end + 1] & np.isfinite(position[start:end + 1]).all(1)
+        if keep.sum() < 2:
+            continue
+        stamps = time[start:end + 1][keep]
+        values = position[start:end + 1][keep]
+        centered = stamps - stamps.mean()
+        denominator = np.square(centered).sum()
+        if denominator > 0:
+            velocity[end] = (
+                centered[:, None] * (values - values.mean(0))).sum(0) / denominator
+    return velocity
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--root", nargs="+", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--velocity-lookback-ms", type=float, default=200.,
+                        help="Past-only window used by the linear-extrapolation baseline")
     args = parser.parse_args()
     device = torch.device(args.device if args.device != "cuda" or torch.cuda.is_available()
                           else "cpu")
@@ -83,6 +105,8 @@ def main():
             scale = np.asarray(stats["position"]["std"])
             mean = np.asarray(stats["position"]["mean"])
             current = output["position"][0].cpu().numpy() * scale + mean
+            velocity = causal_velocity_sequence(
+                current, trial["time"], wearable, args.velocity_lookback_ms)
             pose_valid = wearable & trial["pose_valid"]
             position_errors.extend(
                 (np.linalg.norm(current - trial["position"], axis=-1)[pose_valid] * 100).tolist())
@@ -101,9 +125,13 @@ def main():
                 predicted = short[:-horizon, horizon - 1]
                 actual = trial["position"][horizon:]
                 held = current[:-horizon]
-                bucket = short_future.setdefault(horizon * 10, {"model": [], "hold": []})
+                bucket = short_future.setdefault(
+                    horizon * 10, {"model": [], "hold": [], "linear": []})
                 bucket["model"].extend((np.linalg.norm(predicted - actual, axis=-1)[valid] * 100).tolist())
                 bucket["hold"].extend((np.linalg.norm(held - actual, axis=-1)[valid] * 100).tolist())
+                linear = current[:-horizon] + horizon * .01 * velocity[:-horizon]
+                bucket["linear"].extend(
+                    (np.linalg.norm(linear - actual, axis=-1)[valid] * 100).tolist())
 
             intent = output.get("intent_position_delta")
             if intent is not None:
@@ -115,9 +143,13 @@ def main():
                     predicted = current[:-horizon] + intent[:-horizon, index] * scale
                     actual = trial["position"][horizon:]
                     held = current[:-horizon]
-                    bucket = intent_future.setdefault(horizon * 10, {"model": [], "hold": []})
+                    bucket = intent_future.setdefault(
+                        horizon * 10, {"model": [], "hold": [], "linear": []})
                     bucket["model"].extend((np.linalg.norm(predicted - actual, axis=-1)[valid] * 100).tolist())
                     bucket["hold"].extend((np.linalg.norm(held - actual, axis=-1)[valid] * 100).tolist())
+                    linear = current[:-horizon] + horizon * .01 * velocity[:-horizon]
+                    bucket["linear"].extend(
+                        (np.linalg.norm(linear - actual, axis=-1)[valid] * 100).tolist())
             accepted.append(str(path))
             print(f"[{number}/{len(paths)}] {path}", file=sys.stderr, flush=True)
         except (ValueError, KeyError, RuntimeError) as error:
@@ -149,10 +181,14 @@ def main():
         for horizon, values in sorted(collection.items()):
             model_error = error_summary(values["model"], "cm")
             hold_error = error_summary(values["hold"], "cm")
+            linear_error = error_summary(values["linear"], "cm")
             result[name][str(horizon)] = {
                 "model": model_error, "hold_current_baseline": hold_error,
+                "linear_extrapolation_baseline": linear_error,
                 "mean_gain_over_hold_cm": (hold_error["mean"] - model_error["mean"]
                                            if model_error and hold_error else None),
+                "mean_gain_over_linear_cm": (linear_error["mean"] - model_error["mean"]
+                                             if model_error and linear_error else None),
             }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2))
