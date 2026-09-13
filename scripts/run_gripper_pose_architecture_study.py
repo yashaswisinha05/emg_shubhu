@@ -37,6 +37,20 @@ def run_is_complete(directory: Path) -> bool:
     return all((directory / name).is_file() for name in REQUIRED_RUN_FILES)
 
 
+def matched_width(architecture, target, future_steps):
+    """Choose a four-head-compatible width nearest the requested capacity."""
+    from emg_touch.models.reach_grasp_architecture_baselines import ArchitectureBaseline
+    candidates = []
+    for width in range(32, 513, 4):
+        model = ArchitectureBaseline(
+            architecture, width=width, layers=4, heads=4,
+            future_steps=future_steps)
+        count = sum(parameter.numel() for parameter in model.parameters())
+        candidates.append((abs(count - target), width, count))
+    _, width, count = min(candidates)
+    return width, count
+
+
 def metric_row(name, seed, directory):
     result = json.loads((directory / "results.json").read_text())["emg+imu"]
     future = result.get("future_pose_by_ms", {}).get("200", {})
@@ -139,6 +153,8 @@ def main():
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--future-pose-ms", type=int, default=200,
                         help="Dense future horizon for architecture baselines")
+    parser.add_argument("--parameter-reference-checkpoint", type=Path,
+                        help="Match GRU/LSTM parameter counts to this checkpoint's trainable count")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--patience", type=int, default=12)
     parser.add_argument("--device", default="cuda")
@@ -147,6 +163,20 @@ def main():
                         help="Keep complete per-model runs and train only missing ones")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    parameter_target = None
+    matched = {}
+    if args.parameter_reference_checkpoint:
+        import torch
+        reference = torch.load(
+            args.parameter_reference_checkpoint, map_location="cpu", weights_only=False)
+        parameter_target = reference.get("parameter_count")
+        if not parameter_target:
+            parser.error("reference checkpoint has no parameter_count metadata")
+        for architecture in ("gru", "lstm"):
+            matched[architecture] = matched_width(
+                architecture, int(parameter_target), args.future_pose_ms // 10)
+            print(f"PARAMETER MATCH {architecture}: width={matched[architecture][0]} "
+                  f"params={matched[architecture][1]:,} target={parameter_target:,}")
     classifier_checkpoint = Path(args.classifier_checkpoint)
     if not args.dry_run and not classifier_checkpoint.is_file():
         parser.error(
@@ -198,6 +228,8 @@ def main():
                            "--architecture", architecture, *shared,
                            "--seed", str(seed), "--split-seed", str(args.split_seed),
                            "--output-dir", str(directory)]
+                if architecture in matched:
+                    command.extend(("--width", str(matched[architecture][0])))
             run_or_resume(command, directory, resume=args.resume,
                           dry_run=args.dry_run)
         proposed = args.output_dir / "proposed" / f"seed{seed}"

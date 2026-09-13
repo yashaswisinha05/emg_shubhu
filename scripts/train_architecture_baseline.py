@@ -20,12 +20,14 @@ from scripts import train_gripper_state_pose as base
 
 
 selected_architecture = None
+selected_width = 128
 constant_initialization = None
 future_consistency_weight = .1
 trained_parameter_count = None
 
 
 def model_factory(**kwargs):
+    kwargs["width"] = selected_width
     return ArchitectureBaseline(
         selected_architecture, constant_initialization=constant_initialization,
         **kwargs)
@@ -89,11 +91,13 @@ def main():
     parser.add_argument("--architecture", required=True,
                         choices=sorted(ArchitectureBaseline.NAMES))
     parser.add_argument("--future-consistency-weight", type=float, default=.1)
+    parser.add_argument("--width", type=int, default=128)
     option, remaining = parser.parse_known_args()
     if option.future_consistency_weight < 0:
         parser.error("future consistency weight must be nonnegative")
-    global selected_architecture, future_consistency_weight
+    global selected_architecture, selected_width, future_consistency_weight
     selected_architecture = option.architecture
+    selected_width = option.width
     future_consistency_weight = option.future_consistency_weight
 
     sys.argv = [sys.argv[0], *remaining]
@@ -164,6 +168,7 @@ def main():
         checkpoint["format"] = "reach_grasp_architecture_baseline_v1"
         checkpoint["architecture"] = selected_architecture
         checkpoint["parameter_count"] = int(trained_parameter_count)
+        checkpoint["model_args"]["width"] = selected_width
         torch.save(checkpoint, path)
     print(f"comparison protocol written to {results_path}")
 
