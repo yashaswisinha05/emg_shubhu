@@ -137,6 +137,8 @@ def main():
     parser.add_argument("--split-seed", type=int, default=42,
                         help="Fixed trial split shared by every training seed")
     parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--future-pose-ms", type=int, default=200,
+                        help="Dense future horizon for architecture baselines")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--patience", type=int, default=12)
     parser.add_argument("--device", default="cuda")
@@ -166,7 +168,8 @@ def main():
               "--models", "emg+imu", "--pixel-weight", ".35",
               "--pixel-architecture", "direct", "--position-weight", "1.0",
               "--orientation-weight", "0", "--final-pose-weight", "0",
-              "--future-pose-weight", ".5", "--future-pose-ms", "200"]
+              "--future-pose-weight", ".5", "--future-pose-ms",
+              str(args.future_pose_ms)]
     python = sys.executable
     expected_splits = {}
     rows = []
