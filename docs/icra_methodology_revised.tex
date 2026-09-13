@@ -117,148 +117,10 @@ the representation retains direct neuromuscular information rather than
 depending entirely on IMU context. At inference, its action inputs are replaced
 by learned MASK tokens.
 
-The principal Stage-I objective is class-balanced cross entropy,
-\begin{equation}
- \mathcal L_g=-\frac{1}{|\mathcal V_g|}
- \sum_{t\in\mathcal V_g}w_{g_t}
- \log\operatorname{softmax}(\boldsymbol{\ell}^{g}_t)_{g_t},
- \qquad w_c=\frac{N}{2N_c}.
-\end{equation}
-Class weighting prevents the more frequent state from dominating training.
-In the following, $\rho(\cdot)$ denotes the element-wise smooth-$L_1$ penalty,
-and $\langle\cdot\rangle_{\mathcal V}$ denotes an average over valid elements.
-The complete Stage-I objective is
-\begin{align}
- \mathcal L_{\mathrm I}={}&
- \mathcal L_g
- +0.20\mathcal L_{\mathrm{aux}}
- +0.15(\mathcal L_{\mathrm{mask}}
-       +\mathcal L_{\mathrm{recon}})
- +0.03\mathcal L_{\mathrm{stable}} \nonumber\\
- &+0.20\mathcal L_{\mathrm{pos}}^{\mathrm I}
- +0.50\mathcal L_{\mathrm{ori}}^{\mathrm I}
- +0.35\mathcal L_{\mathrm{screen}}^{\mathrm I}
- +0.20\mathcal L_{\mathrm{end}}^{\mathrm I} \nonumber\\
- &+0.10\mathcal L_{\mathrm{future}}^{\mathrm I}
- +0.05\mathcal L_{\mathrm{IMU}}^{\mathrm I}.
-\end{align}
-The sEMG-only auxiliary classifier is supervised by
-\begin{equation}
- \mathcal L_{\mathrm{aux}}
- =\left\langle
- \operatorname{CE}(\boldsymbol\ell^{e}_t,g_t)
- \right\rangle_{t\in\mathcal V_g}.
-\end{equation}
-This prevents all state information from being delegated to the inertial
-stream. For an independently sampled set of masked action spans
-$\mathcal M_g$, the masked-state loss is
-\begin{equation}
- \mathcal L_{\mathrm{mask}}
- =\left\langle
- \operatorname{CE}(\boldsymbol\ell^{e,\mathrm{mask}}_t,g_t)
- \right\rangle_{t\in\mathcal M_g}.
-\end{equation}
-It requires the causal sEMG branch to infer a hidden state from preceding
-sensor context rather than reading the corresponding action token.
-
-For masked sEMG spans $\mathcal M_e$, the reconstruction objective is
-\begin{equation}
- \mathcal L_{\mathrm{recon}}
- =\left\langle
- \|\hat{\mathbf e}_t-\mathbf e_t\|_2^2
- \right\rangle_{t\in\mathcal M_e}.
-\end{equation}
-This Stage-I-only loss regularizes the sEMG encoder against short dropouts and
-encourages it to retain the temporal structure of muscle activation. It is
-different from intent prediction: reconstruction estimates a hidden current
-sensor representation, whereas intent predicts future hand displacement.
-
-The stability term penalizes changes in close probability only when adjacent
-labels are equal:
-\begin{equation}
- \mathcal L_{\mathrm{stable}}
- =\left\langle
- [P_t(\mathrm{close})-P_{t-1}(\mathrm{close})]^2
- \right\rangle_{g_t=g_{t-1}}.
-\end{equation}
-It suppresses spurious switching without penalizing genuine transitions.
-
-Current position and orientation are supervised in standardized Cartesian and
-continuous 6-D rotation representations:
-\begin{align}
- \mathcal L_{\mathrm{pos}}^{\mathrm I}
- &=\left\langle
- \rho(\hat{\mathbf p}_t-\mathbf p_t)
- \right\rangle_{\mathcal V_p},\\
- \mathcal L_{\mathrm{ori}}^{\mathrm I}
- &=\left\langle
- \rho(\hat{\mathbf r}^{6D}_t-\mathbf r^{6D}_t)
- \right\rangle_{\mathcal V_r}.
-\end{align}
-These losses associate state features with the instantaneous mechanical
-configuration and help separate similar muscle amplitudes produced under
-different arm orientations.
-
-Let $d(\hat{\mathbf u},\mathbf u)$ denote smooth-$L_1$ error after independently
-scaling normalized horizontal and vertical coordinates to units of 100 pixels.
-The Stage-I screen loss combines its fused prediction with auxiliary direct and
-endpoint-derived predictions:
-\begin{equation}
- \mathcal L_{\mathrm{screen}}^{\mathrm I}
- =\left\langle a_t^{\mathrm I}
- [d(\hat{\mathbf u}_t,\mathbf u)
- +0.2d(\hat{\mathbf u}^{d}_t,\mathbf u)
- +0.2d(\hat{\mathbf u}^{e}_t,\mathbf u)]\right\rangle,
-\end{equation}
-where $a_t^{\mathrm I}=0.25+2.75r_t^2$. This associates the representation with
-the interaction target and gives greater importance to predictions made after
-more of the reach has been observed.
-
-The Stage-I endpoint objective is
-\begin{equation}
- \begin{aligned}
- \mathcal L_{\mathrm{end}}^{\mathrm I}={}&
- 2.5\left\langle(1+r_t^2)
- \rho\!\left(
- \frac{(\hat{\mathbf p}^{e}_t-\mathbf p^{e})
-       \odot\boldsymbol\sigma_p}{0.1\ \mathrm m}
- \right)\right\rangle \\
- &+\left\langle
- \rho(\hat{\mathbf r}^{e,6D}_t-\mathbf r^{e,6D})
- \right\rangle.
- \end{aligned}
-\end{equation}
-The physical scaling gives equal meaning to the three Cartesian axes, while
-the increased late-trial weight emphasizes the final interaction location.
-
-For $\mathcal H_s=\{10,20,\ldots,200\}$ ms, the Stage-I future-pose loss is
-\begin{equation}
- \begin{aligned}
- \mathcal L_{\mathrm{future}}^{\mathrm I}={}&
- \frac{1}{|\mathcal H_s|}\sum_{h\in\mathcal H_s}
- \left\langle\rho(
- \hat{\mathbf p}_{t+h\mid t}-\mathbf p_{t+h})\right\rangle\\
- &+\frac{1}{|\mathcal H_s|}\sum_{h\in\mathcal H_s}
- \left\langle\rho(
- \hat{\mathbf r}^{6D}_{t+h\mid t}-\mathbf r^{6D}_{t+h})
- \right\rangle.
- \end{aligned}
-\end{equation}
-It prevents the source representation from explaining only the present frame.
-Finally, the Stage-I future-IMU loss is
-\begin{equation}
- \mathcal L_{\mathrm{IMU}}^{\mathrm I}
- =\frac{1}{|\mathcal H_s|}\sum_{h\in\mathcal H_s}
- \left\langle\rho\!\left(
- \widehat{\Delta\mathbf i}_{t,h}
- -(\mathbf i_{t+h}-\mathbf i_t)
- \right)\right\rangle.
-\end{equation}
-This auxiliary target links the learned state to subsequent mechanical change.
-The Stage-I kinematic heads regularize representation learning; the final
-Stage-II system does not deploy its orientation, endpoint, or Stage-I future
-outputs. After checkpoint selection, the complete classifier and both modality
-encoders are frozen.
+The classifier, masked reconstruction, and kinematic supervision used to learn
+this representation are defined jointly with the Stage-II losses in
+Sec.~\ref{subsec:two-stage-loss}. After Stage-I checkpoint selection, the
+classifier and both modality encoders are frozen.
 
 \subsection{Stage II: State-Conditioned Motion Model}
 
@@ -335,147 +197,123 @@ The explicit sEMG pathway allows early muscle activation to contribute to
 intent prediction before its mechanical consequence is fully observed by the
 IMU.
 
-\subsection{Final Motion Objective}
-\label{subsec:final-loss}
+\subsection{Two-Stage Learning Objectives}
+\label{subsec:two-stage-loss}
 
-The final Stage-II objective is written parametrically as
-\begin{equation}
- \mathcal L_{\mathrm{II}}
- =\sum_{k\in\mathcal T}\eta_k\mathcal L_k,
- \label{eq:stage-two-objective}
-\end{equation}
-where
-\begin{equation}
- \begin{aligned}
- \mathcal T=\{&\mathrm{pos},\mathrm{pixel},\mathrm{cell},\\
-               &\mathrm{offset},\mathrm{future},\mathrm{cons},\\
-               &\mathrm{intent},\mathrm{cross},\mathrm{reg}\}.
- \end{aligned}
-\end{equation}
-These terms respectively supervise current Cartesian position, screen
-location, coarse spatial assignment, within-cell displacement, the dense
-200-ms trajectory, temporal consistency, one-second motion intent,
-sEMG-to-future-IMU prediction, and correction regularization. The
-corresponding coefficients $\eta_k$ were 1.00, 0.35, 0.15, 0.10, 0.50, 0.10,
-0.05, 0.05, and 0.01, in the order listed above.
+The stages share supervision for current and future motion, but they do not
+optimize the same model. Stage I learns the multimodal representation and
+gripper classifier; Stage II freezes that representation and trains only the
+residual GRUs and motion heads. We therefore define the losses once and then
+specify the objective used at each stage.
 
-$\mathcal L_{\mathrm{pos}}$ is a smooth-$L_1$ loss on current Cartesian
-position:
+Let $\rho(\cdot)$ denote element-wise smooth-$L_1$, and let
+$\langle\cdot\rangle$ average only valid targets. Current Cartesian position
+and 6-D orientation are supervised by
 \begin{equation}
- \mathcal L_{\mathrm{pos}}
- =\left\langle\rho(
- \hat{\mathbf p}_t-\mathbf p_t)\right\rangle.
+ \mathcal L_{\mathrm{pos}}=\langle\rho(\hat{\mathbf p}_t-\mathbf p_t)\rangle,
+ \qquad
+ \mathcal L_{\mathrm{ori}}=\langle\rho(\hat{\mathbf r}^{6D}_t-
+ \mathbf r^{6D}_t)\rangle.
 \end{equation}
-Smooth-$L_1$ reduces sensitivity to occasional VIVE and synchronization
-outliers. The continuous screen loss is evaluated in physical pixel space:
-\begin{equation}
- \mathcal L_{\mathrm{pixel}}
- =\left\langle
- a_t\rho\!\left(
- \frac{(\hat{\mathbf u}_t-\mathbf u_t)\odot(W,H)}{100}
- \right)\right\rangle,
- \qquad a_t=0.25+3.75r_t^4,
-\end{equation}
-where $r_t$ is normalized trial progress. Independent axis scaling respects
-the display aspect ratio, while $a_t$ emphasizes convergence near interaction
-without removing early supervision.
+Screen error is computed after scaling the two normalized axes independently
+by display width $W$ and height $H$. Stage I uses a goal-consistent screen
+loss over fused, direct, and endpoint-derived predictions, whereas Stage II
+uses a continuous pixel loss together with internal cell and within-cell
+offset supervision:
+\begin{align}
+ \mathcal L_{\mathrm{screen}}^{\mathrm I}
+ &=\left\langle a_t^{\mathrm I}
+ [d(\hat{\mathbf u}_t,\mathbf u_t)
+ +0.2d(\hat{\mathbf u}^{d}_t,\mathbf u_t)
+ +0.2d(\hat{\mathbf u}^{e}_t,\mathbf u_t)]\right\rangle,\\
+ \mathcal L_{\mathrm{screen}}^{\mathrm{II}}
+ &=0.35\mathcal L_{\mathrm{pixel}}
+ +0.15\mathcal L_{\mathrm{cell}}
+ +0.10\mathcal L_{\mathrm{offset}},
+\end{align}
+where $d$ is pixel-scaled smooth-$L_1$,
+$a_t^{\mathrm I}=0.25+2.75r_t^2$, and the Stage-II pixel term uses
+$a_t^{\mathrm{II}}=0.25+3.75r_t^4$. The auxiliary cell and offset terms reduce
+spatial averaging but still produce one continuous screen coordinate.
 
-Let $k_t^*$ denote the cell containing the ground-truth coordinate. The cell
-classification loss is
-\begin{equation}
- \mathcal L_{\mathrm{cell}}
- =\left\langle
- \operatorname{CE}(\boldsymbol\ell^{\mathrm{cell}}_t,k_t^*)
- \right\rangle.
-\end{equation}
-It discourages averaging between spatially separated target regions. The
-within-cell target is $\boldsymbol\delta_t^*=\mathbf u_t-\mathbf m_{k_t^*}$,
-and the offset loss is
-\begin{equation}
- \mathcal L_{\mathrm{offset}}
- =\left\langle\rho\!\left(
- \frac{(\boldsymbol\delta_{t,k_t^*}-\boldsymbol\delta_t^*)
-       \odot(W,H)}{100}
- \right)\right\rangle.
-\end{equation}
-This term provides fine continuous localization inside the correct coarse
-region. Together, the pixel, cell, and offset terms train one continuous screen
-output rather than three deployed predictions.
-
-The short-horizon loss directly supervises all 20 future positions between 10
-and 200 ms:
+For $\mathcal H_s=\{10,20,\ldots,200\}$ ms, both stages use dense future
+supervision,
 \begin{equation}
  \mathcal L_{\mathrm{future}}
  =\frac{1}{|\mathcal H_s|}\sum_{h\in\mathcal H_s}
- \left\langle\rho(
- \hat{\mathbf p}_{t+h\mid t}-\mathbf p_{t+h})\right\rangle,
+ \left\langle\rho(\hat{\mathbf p}_{t+h\mid t}-\mathbf p_{t+h})\right\rangle.
 \end{equation}
-where $\mathcal H_s=\{10,20,\ldots,200\}$ ms. The consistency loss is
+Stage I additionally includes future orientation in this term. Stage II adds
+arrival consistency,
 \begin{equation}
  \mathcal L_{\mathrm{cons}}
  =\frac{1}{|\mathcal H_s|}\sum_{h\in\mathcal H_s}
  \left\langle\rho\!\left(
  \hat{\mathbf p}_{t+h\mid t}
- -\operatorname{sg}(\hat{\mathbf p}_{t+h\mid t+h})
- \right)\right\rangle.
+ -\operatorname{sg}(\hat{\mathbf p}_{t+h\mid t+h})\right)\right\rangle,
 \end{equation}
-The first term supplies direct future supervision; the second makes successive
-predictions agree when the forecast time arrives. Stop-gradient prevents the
-consistency path from moving the later current-position estimate.
+which makes a forecast agree with the detached current estimate when that time
+is reached.
 
-The long-horizon intent loss supervises displacement at
-$h\in\{100,200,\ldots,1000\}$ ms:
+Stage II also predicts displacement at
+$\mathcal H_l=\{100,200,\ldots,1000\}$ ms:
 \begin{equation}
- \mathcal L_{\mathrm{intent}}=
- \frac{\sum_h\lambda_h
+ \mathcal L_{\mathrm{intent}}
+ =\frac{\sum_{h\in\mathcal H_l}\lambda_h
  \left\langle\rho\!\left(
- \Delta\hat{\mathbf p}_{t,h}
- -(\mathbf p_{t+h}-\mathbf p_t)\right)\right\rangle}
- {\sum_h\lambda_h},
- \qquad \lambda_h=\exp[-h/(500\ \mathrm{ms})].
+ \Delta\hat{\mathbf p}_{t,h}-(\mathbf p_{t+h}-\mathbf p_t)
+ \right)\right\rangle}{\sum_{h\in\mathcal H_l}\lambda_h},
+ \qquad \lambda_h=e^{-h/(500\,\mathrm{ms})}.
 \end{equation}
-Displacement targets reduce dependence on participant-specific workspace
-variation. The decay preserves supervision at 1 s while assigning greater weight
-to the more predictable near horizons.
+Displacements reduce sensitivity to participant-specific workspace offsets,
+while the decay retains 1-s supervision without allowing the least predictable
+horizons to dominate.
 
-The same long-horizon weights supervise a training-only sEMG-to-future-IMU
-decoder. For consecutive intent horizons $h_{k-1}$ and $h_k$, its target is
-\begin{equation}
- n_k=\frac{h_k}{10\ \mathrm{ms}},
- \qquad
- \Delta\bar{\mathbf i}_{t,k}
- =\frac{1}{n_k-n_{k-1}}
- \sum_{j=n_{k-1}+1}^{n_k}\mathbf i_{t+j}-\mathbf i_t,
-\end{equation}
-where the indices refer to the 100-Hz model grid. The loss is
-\begin{equation}
- \mathcal L_{\mathrm{cross}}
- =\frac{\sum_k\lambda_{h_k}
- \left\langle\rho\!\left(
- \widehat{\Delta\bar{\mathbf i}}_{t,k}
- -\Delta\bar{\mathbf i}_{t,k}
- \right)\right\rangle}
- {\sum_k\lambda_{h_k}}.
-\end{equation}
-Because this decoder receives the sEMG representation but not the current IMU
-feature, it cannot solve the task by copying inertial input. The loss encourages
-muscle activity to encode mechanical changes that occur later, while interval
-averaging avoids reconstruction of noisy high-rate samples.
+The state-specific Stage-I losses are class-balanced gripper cross entropy
+$\mathcal L_g$, sEMG-only auxiliary cross entropy $\mathcal L_{\mathrm{aux}}$,
+masked-state cross entropy $\mathcal L_{\mathrm{mask}}$, masked-sEMG mean-square
+reconstruction $\mathcal L_{\mathrm{recon}}$, and within-state probability
+stability $\mathcal L_{\mathrm{stable}}$. They prevent class imbalance, retain
+direct neuromuscular evidence, improve dropout robustness, and suppress false
+open/close switching. Stage I further applies endpoint position--orientation
+loss $\mathcal L_{\mathrm{end}}$ and future IMU-difference prediction
+$\mathcal L_{\mathrm{IMU}}$ as representation regularizers.
 
-Finally, the correction penalty is
-\begin{equation}
- \mathcal L_{\mathrm{reg}}
- =\left\langle c_{t,j}^2\right\rangle_{t,j}.
-\end{equation}
-It discourages unnecessary sEMG corrections and preserves the IMU base when
-the muscle signal provides no additional information.
+Stage II replaces those source-task auxiliaries with a training-only
+sEMG-to-future-IMU loss $\mathcal L_{\mathrm{cross}}$, computed on
+interval-averaged future IMU changes using the same $\lambda_h$. Its decoder
+receives the sEMG representation but no IMU feature, preventing a copying
+shortcut and encouraging neuromuscular features that precede motion. The
+correction penalty
+$\mathcal L_{\mathrm{reg}}=\langle c_{t,j}^2\rangle_{t,j}$ preserves the IMU
+base when the bounded sEMG residual is not useful.
 
-No Stage-II state loss is used because the authoritative gripper classifier is
-frozen. Orientation and final 3-D endpoint prediction are also disabled in the
-final model. Stage II uses AdamW with learning rate $3\times10^{-4}$, weight
-decay $10^{-4}$, batch size four, gradient clipping at one, and early stopping
-after 12 stale validation epochs. The complete network contains 3,654,603
-parameters, of which 3,001,102 are frozen and 653,501 are optimized in Stage II.
+The complete objectives are
+\begin{align}
+ \mathcal L_{\mathrm I}={}&
+ \mathcal L_g+0.20\mathcal L_{\mathrm{aux}}
+ +0.15(\mathcal L_{\mathrm{mask}}+\mathcal L_{\mathrm{recon}})
+ +0.03\mathcal L_{\mathrm{stable}} \nonumber\\
+ &+0.20\mathcal L_{\mathrm{pos}}+0.50\mathcal L_{\mathrm{ori}}
+ +0.35\mathcal L_{\mathrm{screen}}^{\mathrm I}
+ +0.20\mathcal L_{\mathrm{end}} \nonumber\\
+ &+0.10\mathcal L_{\mathrm{future}}^{\mathrm I}
+ +0.05\mathcal L_{\mathrm{IMU}},\\[2mm]
+ \mathcal L_{\mathrm{II}}={}&
+ 1.00\mathcal L_{\mathrm{pos}}
+ +\mathcal L_{\mathrm{screen}}^{\mathrm{II}}
+ +0.50\mathcal L_{\mathrm{future}} \nonumber\\
+ &+0.10\mathcal L_{\mathrm{cons}}
+ +0.05\mathcal L_{\mathrm{intent}}
+ +0.05\mathcal L_{\mathrm{cross}}
+ +0.01\mathcal L_{\mathrm{reg}}.
+\end{align}
+Thus, the apparent overlap is intentional: in Stage I, pose and future losses
+shape transferable encoder features; in Stage II, they train the new residual
+adapters and deployed motion heads. Stage II has no state, orientation, or
+endpoint loss because the gripper classifier is frozen and these outputs are
+not deployed. The complete network contains 3,654,603 parameters: 3,001,102
+frozen Stage-I parameters and 653,501 optimized Stage-II parameters.
 
 \subsection{Causal Inference}
 
