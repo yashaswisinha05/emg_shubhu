@@ -177,6 +177,15 @@ def test_optional_heads_are_absent_unless_requested():
     assert output["final_orientation_6d"].shape == (2, 30, 6)
 
 
+def test_orientation_head_can_be_removed_entirely():
+    model = GripperStatePoseModel(
+        width=16, patch=4, stride=2, layers=1, heads=4, dropout=0.,
+        predict_orientation=False)
+    output = model(torch.randn(2, 30, 16), torch.randn(2, 30, 48))
+    assert model.orientation is None
+    assert output["orientation_6d"] is None
+
+
 def test_too_few_trials_reports_why(tmp_path, monkeypatch):
     """A run that fails the '>= 20 valid trials' gate must still explain
     itself: which files were found, how many were rejected and why, with

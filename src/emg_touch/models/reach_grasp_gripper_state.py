@@ -58,7 +58,8 @@ class GripperStatePoseModel(nn.Module):
 
     def __init__(self, modality="emg+imu", width=128, patch=16, stride=4,
                  layers=4, heads=4, dropout=.1, react_context=100,
-                 predict_click=False, predict_final_pose=False, future_steps=0):
+                 predict_click=False, predict_final_pose=False, future_steps=0,
+                 predict_orientation=True):
         super().__init__()
         self.modality = modality
         kwargs = dict(width=width, patch=patch, stride=stride, layers=layers,
@@ -82,8 +83,10 @@ class GripperStatePoseModel(nn.Module):
         # ReachGraspHybrid already use for position/orientation.
         self.position = nn.Sequential(nn.Linear(width * 2, width), nn.GELU(),
                                       nn.Linear(width, 3))
-        self.orientation = nn.Sequential(
-            nn.Linear(width * 2, width), nn.GELU(), nn.Linear(width, 6))
+        self.orientation = None
+        if predict_orientation:
+            self.orientation = nn.Sequential(
+                nn.Linear(width * 2, width), nn.GELU(), nn.Linear(width, 6))
         self.future_steps = future_steps
         self.future_pose = None
         if future_steps:
@@ -187,7 +190,8 @@ class GripperStatePoseModel(nn.Module):
 
         result = {
             "position": self.position(context),
-            "orientation_6d": self.orientation(context),
+            "orientation_6d": (self.orientation(context)
+                               if self.orientation is not None else None),
             "click": self.click(context) if self.click is not None else None,
             "final_position": (self.final_position(context)
                                if self.final_position is not None else None),

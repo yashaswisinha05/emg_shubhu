@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 from scripts import train_gripper_state_pose as base
+from emg_touch.models.reach_grasp_gripper_state import GripperStatePoseModel
 
 
 def classification_loss(model, output, batch, class_weight, args):
@@ -48,6 +49,10 @@ def main():
 
     original_loss = base.loss
     original_train = base.train_one
+    original_model = base.GripperStatePoseModel
+
+    def classifier_factory(**model_args):
+        return GripperStatePoseModel(**model_args, predict_orientation=False)
 
     def classification_train(*args, **kwargs):
         args[1].classification_only = True
@@ -55,11 +60,13 @@ def main():
 
     base.loss = classification_loss
     base.train_one = classification_train
+    base.GripperStatePoseModel = classifier_factory
     try:
         base.main()
     finally:
         base.loss = original_loss
         base.train_one = original_train
+        base.GripperStatePoseModel = original_model
 
     output_arg = next((value.split("=", 1)[1] for value in remaining
                        if value.startswith("--output-dir=")), None)
@@ -85,6 +92,7 @@ def main():
             "stage": "Stage I",
             "objective": "class-balanced open/close cross-entropy only",
         })
+        checkpoint["model_args"]["predict_orientation"] = False
         torch.save(checkpoint, path)
     print(f"Minimal Stage-I protocol written to {results_path}")
 

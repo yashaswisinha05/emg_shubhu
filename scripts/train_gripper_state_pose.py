@@ -120,9 +120,12 @@ def loss(model, output, batch, class_weight, args):
     pose_valid = wearable & batch["pose_mask"].squeeze(-1).bool()
     position = masked_mean(F.smooth_l1_loss(output["position"], batch["pose"],
                                             reduction="none"), pose_valid[..., None])
-    orientation_valid = wearable & batch["orientation_mask"]
-    orientation = masked_mean(F.smooth_l1_loss(output["orientation_6d"], batch["orientation"],
-                                               reduction="none"), orientation_valid[..., None])
+    orientation = state * 0
+    if output["orientation_6d"] is not None and args.orientation_weight > 0:
+        orientation_valid = wearable & batch["orientation_mask"]
+        orientation = masked_mean(F.smooth_l1_loss(
+            output["orientation_6d"], batch["orientation"], reduction="none"),
+            orientation_valid[..., None])
     total = (state + args.react_weight * react + args.masked_weight * (masked_state + reconstruction)
              + args.stability_weight * stability + args.position_weight * position
              + args.orientation_weight * orientation)
@@ -227,7 +230,7 @@ def evaluate(model, trials, stats, args, zero_emg=False, zero_imu=False):
         truth += torch.as_tensor(stats["position"]["mean"], device=args.device)
         position_error.extend((100 * torch.linalg.vector_norm(p - truth, dim=-1)[pose_valid]).cpu().tolist())
         orientation_valid = wearable & batch["orientation_mask"]
-        if orientation_valid.any():
+        if output["orientation_6d"] is not None and orientation_valid.any():
             geodesic, _ = orientation_errors_numpy(
                 output["orientation_6d"][orientation_valid].cpu().numpy(),
                 batch["orientation"][orientation_valid].cpu().numpy())
