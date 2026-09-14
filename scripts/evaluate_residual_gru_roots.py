@@ -39,6 +39,16 @@ def error_summary(values, unit):
             "frames": int(len(values))}
 
 
+def classification_summary(target, prediction):
+    """Return frame-level state metrics, or None for an empty progress bin."""
+    if not len(target):
+        return None
+    return {
+        "accuracy": accuracy_score(target, prediction),
+        "frames": len(target),
+    }
+
+
 def causal_velocity_sequence(position, time, valid, lookback_ms):
     """Past-only least-squares velocity for every frame."""
     position, time, valid = map(np.asarray, (position, time, valid))
@@ -93,6 +103,10 @@ def main():
         parser.error("no trial_*.csv files found under the supplied roots")
 
     state_truth, state_prediction = [], []
+    state_progress = {
+        "50-75%": {"truth": [], "prediction": []},
+        "75-100%": {"truth": [], "prediction": []},
+    }
     position_errors, pixel_errors, pixel_x, pixel_y = [], [], [], []
     short_future, intent_future = {}, {}
     accepted, rejected = [], {}
@@ -114,8 +128,17 @@ def main():
             probability = output["gripper_state_logits"][0].softmax(-1).cpu().numpy()
             state_valid = wearable & trial["gripper_state_valid"]
             if predicts_state:
+                predicted_state = probability.argmax(-1)
                 state_truth.extend(trial["gripper_state"][state_valid].tolist())
-                state_prediction.extend(probability.argmax(-1)[state_valid].tolist())
+                state_prediction.extend(predicted_state[state_valid].tolist())
+                progress = trial["trial_progress"]
+                for name, lower, upper in (("50-75%", .5, .75),
+                                           ("75-100%", .75, 1.0 + 1e-8)):
+                    selected = state_valid & (progress >= lower) & (progress < upper)
+                    state_progress[name]["truth"].extend(
+                        trial["gripper_state"][selected].tolist())
+                    state_progress[name]["prediction"].extend(
+                        predicted_state[selected].tolist())
 
             scale = np.asarray(stats["position"]["std"])
             mean = np.asarray(stats["position"]["mean"])
@@ -190,6 +213,10 @@ def main():
             "confusion_open_close": confusion_matrix(
                 state_truth, state_prediction, labels=[0, 1]).tolist(),
             "frames": len(state_truth),
+            "accuracy_by_trial_progress": {
+                name: classification_summary(values["truth"], values["prediction"])
+                for name, values in state_progress.items()
+            },
         }
     for name, collection in (("supervised_future_position", short_future),
                              ("intent_future_position", intent_future)):
