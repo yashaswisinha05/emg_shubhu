@@ -51,11 +51,17 @@ def main():
     parser.add_argument("--reconstruction-step-ms", type=int, default=100)
     parser.add_argument("--reconstruction-decay-ms", type=float, default=500.)
     parser.add_argument("--emg-to-future-imu-weight", type=float, default=.05)
+    parser.add_argument("--classifier-mode", choices=("frozen", "joint", "single-stage"),
+                        default="frozen",
+                        help="Freeze Stage I, fine-tune it jointly, or reinitialize it for "
+                             "a controlled one-stage ablation")
+    parser.add_argument("--state-weight", type=float, default=1.,
+                        help="Open/close loss weight for joint and single-stage modes")
     option, remaining = parser.parse_known_args()
     if option.adapter_layers <= 0:
         parser.error("adapter-layers must be positive")
     numeric = [value for name, value in vars(option).items()
-               if name != "classifier_checkpoint" and name != "adapter_layers"]
+               if name not in {"classifier_checkpoint", "adapter_layers", "classifier_mode"}]
     if min(numeric) < 0 or option.reconstruction_decay_ms <= 0:
         parser.error("weights and horizons must be nonnegative; decay must be positive")
     if (option.reconstruction_horizon_ms <= 0
@@ -80,7 +86,7 @@ def main():
                            option.reconstruction_horizon_ms // 10 + 1,
                            option.reconstruction_step_ms // 10))
     residual.extra = SimpleNamespace(
-        state_weight=0.,
+        state_weight=(0. if option.classifier_mode == "frozen" else option.state_weight),
         grid_weight=0.,
         grid_residual_weight=0.,
         masked_emg_weight=0.,
@@ -118,6 +124,11 @@ def main():
         if model_args.get("modality") != classifier_modality:
             raise ValueError("motion and classifier modalities must match")
         classifier = load_classifier(classifier_state)
+        if option.classifier_mode == "single-stage":
+            def reset(module):
+                if hasattr(module, "reset_parameters"):
+                    module.reset_parameters()
+            classifier.apply(reset)
         return SharedEncoderResidualGRU(
             classifier,
             classifier_state["normalization"],
@@ -130,6 +141,7 @@ def main():
             pixel_head="direct",
             modality=classifier_modality,
             predict_intent_position=False,
+            freeze_classifier=option.classifier_mode == "frozen",
         )
 
     def train_wrapper(*args, **kwargs):
@@ -168,9 +180,11 @@ def main():
     results_path = output_dir / "results.json"
     results = json.loads(results_path.read_text())
     results["protocol"].update({
-        "architecture": "shared-frozen-patch-encoder-residual-gru-adapter",
+        "architecture": "shared-patch-encoder-residual-gru-adapter",
         "classifier_checkpoint": str(option.classifier_checkpoint),
-        "classifier_and_encoders_frozen": True,
+        "classifier_mode": option.classifier_mode,
+        "classifier_and_encoders_frozen": option.classifier_mode == "frozen",
+        "trainable_parameters": int(trained_parameter_count),
         "modality": classifier_modality,
         "adapter_layers": option.adapter_layers,
         "orientation_disabled": True,
@@ -196,7 +210,7 @@ def main():
             "classifier_format": classifier_state["format"],
             "classifier_model_args": classifier_state["model_args"],
             "classifier_normalization": classifier_state["normalization"],
-            "classifier_frozen": True,
+            "classifier_frozen": option.classifier_mode == "frozen",
             "shared_model_args": {
                 "width": 128, "adapter_layers": option.adapter_layers,
                 "dropout": .1, "future_steps": 20,
@@ -204,6 +218,7 @@ def main():
                 "pixel_head": "direct",
                 "modality": classifier_modality,
                 "predict_intent_position": False,
+                "freeze_classifier": option.classifier_mode == "frozen",
             },
         })
         torch.save(checkpoint, path)

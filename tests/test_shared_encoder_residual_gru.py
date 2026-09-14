@@ -49,6 +49,20 @@ def test_shared_classifier_is_frozen_and_shapes_are_complete():
     assert output["intent_imu_delta"].shape == (2, 30, 2, 24)
 
 
+def test_joint_mode_trains_classifier_and_motion_through_state_conditioning():
+    model = SharedEncoderResidualGRU(
+        DummySharedClassifier(), stats(), stats(), width=16,
+        adapter_layers=1, dropout=0., future_steps=3,
+        intent_horizons_steps=(), pixel_head="direct",
+        freeze_classifier=False)
+    assert all(parameter.requires_grad for parameter in model.classifier.parameters())
+    model.train()
+    assert model.classifier.training
+    output = model(torch.randn(2, 30, 16), torch.randn(2, 30, 48))
+    (output["position"].sum() + output["gripper_state_logits"].sum()).backward()
+    assert any(parameter.grad is not None for parameter in model.classifier.parameters())
+
+
 def test_model_is_causal():
     model = make_model().eval()
     emg, imu = torch.randn(1, 35, 16), torch.randn(1, 35, 48)

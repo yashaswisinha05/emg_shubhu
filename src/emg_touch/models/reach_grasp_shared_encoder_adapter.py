@@ -1,6 +1,7 @@
 """Shared frozen patch encoders with causal GRU motion adapters."""
 from __future__ import annotations
 
+from contextlib import nullcontext
 import math
 
 import torch
@@ -20,7 +21,7 @@ class SharedEncoderResidualGRU(nn.Module):
     def __init__(self, classifier, classifier_normalization, motion_normalization,
                  width=128, adapter_layers=2, dropout=.1, future_steps=20,
                  intent_horizons_steps=None, pixel_head="grid", modality="emg+imu",
-                 predict_intent_position=True):
+                 predict_intent_position=True, freeze_classifier=True):
         super().__init__()
         if future_steps <= 0:
             raise ValueError("future_steps must be positive")
@@ -36,9 +37,11 @@ class SharedEncoderResidualGRU(nn.Module):
         if pixel_head not in {"grid", "direct"}:
             raise ValueError("pixel_head must be 'grid' or 'direct'")
         self.pixel_head_type = pixel_head
+        self.classifier_frozen = bool(freeze_classifier)
         for parameter in self.classifier.parameters():
-            parameter.requires_grad_(False)
-        self.classifier.eval()
+            parameter.requires_grad_(not self.classifier_frozen)
+        if self.classifier_frozen:
+            self.classifier.eval()
 
         for modality, channels in (("emg", 8), ("imu", 24)):
             teacher = classifier_normalization[modality]
@@ -118,7 +121,8 @@ class SharedEncoderResidualGRU(nn.Module):
 
     def train(self, mode=True):
         super().train(mode)
-        self.classifier.eval()
+        if self.classifier_frozen:
+            self.classifier.eval()
         return self
 
     def _classifier_inputs(self, emg, imu):
@@ -129,13 +133,15 @@ class SharedEncoderResidualGRU(nn.Module):
 
     def forward(self, emg, imu):
         teacher_emg, teacher_imu = self._classifier_inputs(emg, imu)
-        with torch.no_grad():
+        classifier_context = torch.no_grad() if self.classifier_frozen else nullcontext()
+        with classifier_context:
             source = self.classifier(teacher_emg, teacher_imu)
             state_logits = source["gripper_state_logits"]
             emg_features = source["emg_context_features"]
             imu_features = source["imu_context_features"]
         state_probability = state_logits.softmax(-1)
-        state = self.state_embedding(state_probability.detach())
+        state = self.state_embedding(
+            state_probability.detach() if self.classifier_frozen else state_probability)
 
         self.emg_adapter.flatten_parameters()
         self.imu_adapter.flatten_parameters()
