@@ -27,6 +27,7 @@ class CausalPatchBranch(nn.Module):
             activation="gelu", batch_first=True, norm_first=True)
         self.transformer = nn.TransformerEncoder(layer, layers, nn.LayerNorm(width))
         self.output = nn.Sequential(nn.Linear(width * 2, width), nn.LayerNorm(width), nn.GELU())
+        self.feature_mode = "both"
 
     @staticmethod
     def positions(length, width, device, dtype):
@@ -55,6 +56,12 @@ class CausalPatchBranch(nn.Module):
         if expanded.shape[1] < values.shape[1]:
             expanded = torch.cat([expanded, expanded[:, -1:].expand(
                 -1, values.shape[1] - expanded.shape[1], -1)], 1)
+        if self.feature_mode == "context-only":
+            local = torch.zeros_like(local)
+        elif self.feature_mode == "local-only":
+            expanded = torch.zeros_like(expanded)
+        elif self.feature_mode != "both":
+            raise ValueError("feature_mode must be both, local-only, or context-only")
         return {"local": local,
                 "context": self.output(torch.cat([local, expanded], -1))}
 

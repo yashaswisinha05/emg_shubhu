@@ -119,3 +119,35 @@ def test_one_second_position_intent_head_can_be_removed():
     assert output["intent_position_delta"] is None
     assert output["future_position"].shape[-2:] == (20, 3)
     assert output["intent_imu_delta"].shape[-2:] == (10, 24)
+
+
+def test_component_ablation_modes_keep_required_output_shapes():
+    emg, imu = torch.randn(1, 30, 16), torch.randn(1, 30, 48)
+    for options in (
+            {"use_state_conditioning": False},
+            {"fusion_mode": "concat"},
+            {"use_residual_gru": False},
+            {"encoder_feature_mode": "local-only"},
+            {"encoder_feature_mode": "context-only"},
+            {"auxiliary_imu_input": True}):
+        model = SharedEncoderResidualGRU(
+            DummySharedClassifier(), stats(), stats(), width=16,
+            adapter_layers=1, dropout=0., future_steps=3,
+            intent_horizons_steps=(10, 20), pixel_head="direct",
+            freeze_classifier=False, **options)
+        output = model(emg, imu)
+        assert output["position"].shape == (1, 30, 3)
+        assert output["click"].shape == (1, 30, 2)
+        assert output["future_position"].shape == (1, 30, 3, 3)
+        assert output["intent_imu_delta"].shape == (1, 30, 2, 24)
+
+
+def test_no_residual_gru_freezes_unused_adapter_parameters():
+    model = SharedEncoderResidualGRU(
+        DummySharedClassifier(), stats(), stats(), width=16,
+        adapter_layers=1, dropout=0., future_steps=3,
+        use_residual_gru=False, freeze_classifier=False)
+    modules = (model.emg_adapter, model.imu_adapter,
+               model.emg_adapter_output, model.imu_adapter_output)
+    assert not any(parameter.requires_grad
+                   for module in modules for parameter in module.parameters())

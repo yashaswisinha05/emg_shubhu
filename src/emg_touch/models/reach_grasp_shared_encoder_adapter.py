@@ -21,7 +21,10 @@ class SharedEncoderResidualGRU(nn.Module):
     def __init__(self, classifier, classifier_normalization, motion_normalization,
                  width=128, adapter_layers=2, dropout=.1, future_steps=20,
                  intent_horizons_steps=None, pixel_head="grid", modality="emg+imu",
-                 predict_intent_position=True, freeze_classifier=True):
+                 predict_intent_position=True, freeze_classifier=True,
+                 use_state_conditioning=True, fusion_mode="gated-correction",
+                 use_residual_gru=True, encoder_feature_mode="both",
+                 auxiliary_imu_input=False):
         super().__init__()
         if future_steps <= 0:
             raise ValueError("future_steps must be positive")
@@ -32,6 +35,16 @@ class SharedEncoderResidualGRU(nn.Module):
         if modality not in {"emg", "imu", "emg+imu"}:
             raise ValueError("modality must be emg, imu, or emg+imu")
         self.modality = modality
+        if fusion_mode not in {"gated-correction", "concat"}:
+            raise ValueError("fusion_mode must be gated-correction or concat")
+        if encoder_feature_mode not in {"both", "local-only", "context-only"}:
+            raise ValueError("invalid encoder_feature_mode")
+        self.use_state_conditioning = bool(use_state_conditioning)
+        self.fusion_mode = fusion_mode
+        self.use_residual_gru = bool(use_residual_gru)
+        self.auxiliary_imu_input = bool(auxiliary_imu_input)
+        for branch in (self.classifier.emg, self.classifier.imu):
+            branch.feature_mode = encoder_feature_mode
         self.future_steps = future_steps
         self.intent_horizons_steps = horizons
         if pixel_head not in {"grid", "direct"}:
@@ -67,6 +80,11 @@ class SharedEncoderResidualGRU(nn.Module):
         nn.init.zeros_(self.emg_adapter_output.bias)
         nn.init.zeros_(self.imu_adapter_output.weight)
         nn.init.zeros_(self.imu_adapter_output.bias)
+        if not self.use_residual_gru:
+            for module in (self.emg_adapter, self.imu_adapter,
+                           self.emg_adapter_output, self.imu_adapter_output):
+                for parameter in module.parameters():
+                    parameter.requires_grad_(False)
 
         self.state_embedding = nn.Sequential(nn.Linear(2, width), nn.GELU())
         self.emg_correction = nn.Sequential(
@@ -78,6 +96,10 @@ class SharedEncoderResidualGRU(nn.Module):
         nn.init.zeros_(self.correction_gate[-1].weight)
         nn.init.constant_(self.correction_gate[-1].bias, -2.)
         self.fused_norm = nn.LayerNorm(width)
+        self.concat_fusion = None
+        if fusion_mode == "concat":
+            self.concat_fusion = nn.Sequential(
+                nn.Linear(width * 2, width), nn.LayerNorm(width), nn.GELU())
 
         self.position_head = nn.Sequential(
             nn.Linear(width, width), nn.GELU(), nn.Linear(width, 3))
@@ -109,8 +131,9 @@ class SharedEncoderResidualGRU(nn.Module):
                     nn.Linear(width * 2 + 4, width), nn.GELU(), nn.Linear(width, 3))
             # Deliberately EMG-only: this auxiliary task asks whether muscle
             # activity predicts later mechanics beyond the current IMU state.
+            auxiliary_width = width * (2 if auxiliary_imu_input else 1)
             self.intent_imu_head = nn.Sequential(
-                nn.Linear(width + 4, width), nn.GELU(), nn.Linear(width, 24))
+                nn.Linear(auxiliary_width + 4, width), nn.GELU(), nn.Linear(width, 24))
             intent_tau = torch.as_tensor(horizons, dtype=torch.float32) / max(horizons)
             intent_basis = torch.stack((intent_tau, intent_tau.square(),
                                         torch.sin(math.pi * intent_tau),
@@ -140,13 +163,20 @@ class SharedEncoderResidualGRU(nn.Module):
             emg_features = source["emg_context_features"]
             imu_features = source["imu_context_features"]
         state_probability = state_logits.softmax(-1)
-        state = self.state_embedding(
-            state_probability.detach() if self.classifier_frozen else state_probability)
+        state_input = (state_probability.detach() if self.classifier_frozen
+                       else state_probability)
+        if not self.use_state_conditioning:
+            state_input = torch.zeros_like(state_input)
+        state = self.state_embedding(state_input)
 
         self.emg_adapter.flatten_parameters()
         self.imu_adapter.flatten_parameters()
-        emg_delta = self.emg_adapter_output(self.emg_adapter(emg_features)[0])
-        imu_delta = self.imu_adapter_output(self.imu_adapter(imu_features)[0])
+        if self.use_residual_gru:
+            emg_delta = self.emg_adapter_output(self.emg_adapter(emg_features)[0])
+            imu_delta = self.imu_adapter_output(self.imu_adapter(imu_features)[0])
+        else:
+            emg_delta = torch.zeros_like(emg_features)
+            imu_delta = torch.zeros_like(imu_features)
         emg_motion = emg_features + emg_delta
         imu_motion = imu_features + imu_delta
 
@@ -161,6 +191,9 @@ class SharedEncoderResidualGRU(nn.Module):
             correction = torch.zeros_like(correction)
             gate = torch.zeros_like(gate)
             fused = self.fused_norm(imu_motion)
+        elif self.fusion_mode == "concat":
+            fused = self.concat_fusion(torch.cat((imu_motion, emg_motion), -1))
+            gate = torch.full_like(gate, .5)
         else:
             fused = self.fused_norm(imu_motion + gate * correction)
 
@@ -188,8 +221,12 @@ class SharedEncoderResidualGRU(nn.Module):
             if self.intent_position_head is not None:
                 intent_position = self.intent_position_head(torch.cat(
                     (expanded_fused, expanded_emg, expanded_basis), -1))
-            auxiliary_motion = (expanded_fused if self.modality == "imu"
-                                else expanded_emg)
+            if self.auxiliary_imu_input:
+                expanded_imu = imu_motion.unsqueeze(2).expand(-1, -1, count, -1)
+                auxiliary_motion = torch.cat((expanded_emg, expanded_imu), -1)
+            else:
+                auxiliary_motion = (expanded_fused if self.modality == "imu"
+                                    else expanded_emg)
             intent_imu = self.intent_imu_head(torch.cat(
                 (auxiliary_motion, expanded_basis), -1))
 

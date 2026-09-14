@@ -57,19 +57,33 @@ def main():
                              "a controlled one-stage ablation")
     parser.add_argument("--state-weight", type=float, default=1.,
                         help="Open/close loss weight for joint and single-stage modes")
+    parser.add_argument("--modality", choices=("emg", "imu", "emg+imu"),
+                        help="Override modality for a randomly initialized single-stage run")
+    parser.add_argument("--no-state-conditioning", action="store_true")
+    parser.add_argument("--fusion-mode", choices=("gated-correction", "concat"),
+                        default="gated-correction")
+    parser.add_argument("--no-residual-gru", action="store_true")
+    parser.add_argument("--encoder-feature-mode",
+                        choices=("both", "local-only", "context-only"), default="both")
+    parser.add_argument("--uniform-pixel-weighting", action="store_true")
+    parser.add_argument("--auxiliary-imu-input", action="store_true",
+                        help="Copying control: expose IMU features to the future-IMU decoder")
     option, remaining = parser.parse_known_args()
     if option.adapter_layers <= 0:
         parser.error("adapter-layers must be positive")
     numeric = [value for name, value in vars(option).items()
-               if name not in {"classifier_checkpoint", "adapter_layers", "classifier_mode"}]
+               if name not in {"classifier_checkpoint", "adapter_layers", "classifier_mode",
+                               "modality", "fusion_mode", "encoder_feature_mode"}
+               and not isinstance(value, bool)]
     if min(numeric) < 0 or option.reconstruction_decay_ms <= 0:
         parser.error("weights and horizons must be nonnegative; decay must be positive")
-    if (option.reconstruction_horizon_ms <= 0
+    if (option.reconstruction_horizon_ms < 0
             or option.reconstruction_step_ms <= 0
-            or option.reconstruction_horizon_ms % option.reconstruction_step_ms
+            or (option.reconstruction_horizon_ms
+                and option.reconstruction_horizon_ms % option.reconstruction_step_ms)
             or option.reconstruction_horizon_ms % 10
             or option.reconstruction_step_ms % 10):
-        parser.error("reconstruction horizon must be a positive multiple of its 10-ms step")
+        parser.error("reconstruction horizon must be zero or a positive multiple of its step")
     if not option.classifier_checkpoint.is_file():
         parser.error(f"classifier checkpoint not found: {option.classifier_checkpoint}")
 
@@ -78,9 +92,12 @@ def main():
     if classifier_state.get("format") not in {
             "gripper_neuromuscular_future_v1", "gripper_classifier_minimal_v1"}:
         parser.error("unsupported shared-encoder classifier checkpoint")
-    classifier_modality = classifier_state["model_args"].get("modality")
-    if classifier_modality not in {"emg", "imu", "emg+imu"}:
+    source_classifier_modality = classifier_state["model_args"].get("modality")
+    if source_classifier_modality not in {"emg", "imu", "emg+imu"}:
         parser.error("classifier checkpoint has an invalid modality")
+    classifier_modality = option.modality or source_classifier_modality
+    if option.modality is not None and option.classifier_mode != "single-stage":
+        parser.error("--modality override is only valid with --classifier-mode single-stage")
 
     horizons = tuple(range(option.reconstruction_step_ms // 10,
                            option.reconstruction_horizon_ms // 10 + 1,
@@ -99,6 +116,7 @@ def main():
         long_position_weight=0.,
         long_imu_weight=option.emg_to_future_imu_weight,
         long_state_weight=0.,
+        pixel_progress_weight=not option.uniform_pixel_weighting,
     )
 
     sys.argv = [sys.argv[0], *remaining]
@@ -123,7 +141,10 @@ def main():
             raise RuntimeError("motion normalization was not initialized")
         if model_args.get("modality") != classifier_modality:
             raise ValueError("motion and classifier modalities must match")
-        classifier = load_classifier(classifier_state)
+        classifier_template = dict(classifier_state)
+        classifier_template["model_args"] = dict(classifier_state["model_args"])
+        classifier_template["model_args"]["modality"] = classifier_modality
+        classifier = load_classifier(classifier_template)
         if option.classifier_mode == "single-stage":
             def reset(module):
                 if hasattr(module, "reset_parameters"):
@@ -142,6 +163,11 @@ def main():
             modality=classifier_modality,
             predict_intent_position=False,
             freeze_classifier=option.classifier_mode == "frozen",
+            use_state_conditioning=not option.no_state_conditioning,
+            fusion_mode=option.fusion_mode,
+            use_residual_gru=not option.no_residual_gru,
+            encoder_feature_mode=option.encoder_feature_mode,
+            auxiliary_imu_input=option.auxiliary_imu_input,
         )
 
     def train_wrapper(*args, **kwargs):
@@ -186,16 +212,22 @@ def main():
         "classifier_and_encoders_frozen": option.classifier_mode == "frozen",
         "trainable_parameters": int(trained_parameter_count),
         "modality": classifier_modality,
+        "state_conditioning": not option.no_state_conditioning,
+        "fusion_mode": option.fusion_mode,
+        "residual_gru": not option.no_residual_gru,
+        "encoder_feature_mode": option.encoder_feature_mode,
+        "pixel_progress_weighting": not option.uniform_pixel_weighting,
+        "auxiliary_imu_input": option.auxiliary_imu_input,
         "adapter_layers": option.adapter_layers,
         "orientation_disabled": True,
         "endpoint_disabled": True,
         "pixel_head": "direct",
         "grid_and_offset_removed": True,
         "masked_emg_reconstruction": False,
-        "emg_to_future_imu": True,
+        "emg_to_future_imu": bool(horizons and option.emg_to_future_imu_weight > 0),
         "future_imu_horizons_ms": [step * 10 for step in horizons],
         "long_horizon_position_intent": False,
-        "heads": ["frozen open/close state", "current XYZ",
+        "heads": ["open/close state", "current XYZ",
                   "direct pixel XY", "future XYZ through 200 ms",
                   "training-only EMG-to-future-IMU summary"],
     })
@@ -208,7 +240,8 @@ def main():
             "parameter_count": int(trained_parameter_count),
             "classifier_source": str(option.classifier_checkpoint),
             "classifier_format": classifier_state["format"],
-            "classifier_model_args": classifier_state["model_args"],
+            "classifier_model_args": {
+                **classifier_state["model_args"], "modality": classifier_modality},
             "classifier_normalization": classifier_state["normalization"],
             "classifier_frozen": option.classifier_mode == "frozen",
             "shared_model_args": {
@@ -219,6 +252,11 @@ def main():
                 "modality": classifier_modality,
                 "predict_intent_position": False,
                 "freeze_classifier": option.classifier_mode == "frozen",
+                "use_state_conditioning": not option.no_state_conditioning,
+                "fusion_mode": option.fusion_mode,
+                "use_residual_gru": not option.no_residual_gru,
+                "encoder_feature_mode": option.encoder_feature_mode,
+                "auxiliary_imu_input": option.auxiliary_imu_input,
             },
         })
         torch.save(checkpoint, path)

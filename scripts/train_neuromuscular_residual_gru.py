@@ -128,7 +128,10 @@ def task_loss(model, output, batch, class_weight, args):
         pixel_error = (output["click"] - batch["click_target"]) * canvas
         pixel_frame = F.smooth_l1_loss(
             pixel_error, torch.zeros_like(pixel_error), reduction="none").mean(-1)
-        late = (.25 + 3.75 * batch["trial_progress"].pow(4)) * click_valid.float()
+        progress_weight = getattr(extra, "pixel_progress_weight", True)
+        frame_weight = (.25 + 3.75 * batch["trial_progress"].pow(4)
+                        if progress_weight else torch.ones_like(batch["trial_progress"]))
+        late = frame_weight * click_valid.float()
         pixel = (pixel_frame * late).sum() / late.sum().clamp_min(1.)
 
         total = total + args.pixel_weight * pixel
