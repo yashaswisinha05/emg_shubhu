@@ -1,4 +1,4 @@
-% Methodology for the current minimal two-stage TIDE model.
+% Methodology for the final single-stage TIDE model.
 % Required packages: amsmath, amssymb, bm
 
 \section{Methodology}
@@ -16,21 +16,24 @@ raw wearable observation is
 where $\mathbf{e}_t\in\mathbb{R}^{4}$ contains the sEMG measurements and
 $\mathbf{a}_t,\boldsymbol{\omega}_t\in\mathbb{R}^{12}$ contain acceleration and
 angular velocity from the four IMUs. Using only observations available at or
-before $t$, the deployed model predicts the open/close state $\hat g_t$, current
+before $t$, the model predicts the open/close state $\hat g_t$, current
 Cartesian position $\hat{\mathbf p}_t\in\mathbb{R}^{3}$, normalized screen
 location $\hat{\mathbf u}_t\in[0,1]^2$, and future Cartesian positions
-$\hat{\mathbf p}_{t+h\mid t}$ at $h\in\{10,20,\ldots,200\}$ ms. Orientation,
-final endpoint, spatial-cell, within-cell offset, and one-second Cartesian
-prediction heads are not part of the final model.
+$\hat{\mathbf p}_{t+h\mid t}$ for
+$h\in\mathcal H_s=\{10,20,\ldots,200\}$ ms. Orientation, final endpoint,
+spatial-cell, within-cell offset, and one-second Cartesian prediction heads are
+not included in the final model.
 
-The method uses two training stages but does not deploy two duplicate feature
-extractors. Stage I learns modality-specific causal encoders and a robust
-gripper-state classifier. Stage II freezes and evaluates these encoders once,
-then reuses their features through lightweight recurrent adapters for motion
-prediction. This separation preserves the validated state representation while
-preventing regression losses from changing the gripper decision boundary.
+The complete network is optimized end to end in a single stage. This choice was
+made after a controlled comparison against separately pretrained and frozen
+encoders: joint optimization preserved gripper-state performance while
+improving current position, screen prediction, and future motion. The resulting
+formulation allows state and motion supervision to shape a common causal
+representation instead of fixing the feature space before the motion tasks are
+introduced.
 
 \subsection{Wearable Signals and Causal Preprocessing}
+\label{subsec:preprocessing}
 
 The four wearable units are distributed around the forearm. Each unit provides
 one sEMG channel, three-axis acceleration, and three-axis angular velocity,
@@ -46,33 +49,30 @@ filter with lower cutoff 20 Hz and upper cutoff
     f_{\mathrm{high}}=\min(450,0.4f_s)\ \mathrm{Hz},
 \end{equation}
 where $f_s$ is the acquisition rate. Trailing root-mean-square envelopes of
-20 and 50 ms are then computed, producing eight sEMG activation features. The
-short window retains rapid recruitment changes, whereas the longer window
-provides a more stable activation estimate. Each IMU channel is processed by a
-trailing three-sample median filter followed by a second-order causal 15-Hz
-low-pass filter. The DC component is retained.
+20 and 50 ms are computed, producing eight sEMG activation features. The short
+window preserves rapid recruitment changes, whereas the longer window provides
+a stable activation estimate. Each IMU channel is processed by a trailing
+three-sample median filter followed by a second-order causal 15-Hz low-pass
+filter. The DC component is retained.
 
 Means and standard deviations are estimated independently for every channel
 using valid training samples only. Standardized values are clipped to
-$[-20,20]$ and concatenated with the corresponding validity indicators. The
-network inputs are therefore
+$[-20,20]$ and concatenated with their validity indicators, producing
 \begin{equation}
     \tilde{\mathbf e}_t\in\mathbb{R}^{16},\qquad
     \tilde{\mathbf i}_t\in\mathbb{R}^{48}.
 \end{equation}
 A fused loss is evaluated only when at least 75\% of both sensor modalities are
-valid. VIVE position is used as training supervision only and is not an input
-to either training stage or inference.
+valid. VIVE position is used as supervision for current and future Cartesian
+position but is never provided as a model input.
 
-\subsection{Stage I: Causal Gripper-State Encoder}
-\label{subsec:stage1}
-
-\subsubsection{Modality-specific multiscale encoding}
+\subsection{Causal Multiscale Encoders}
+\label{subsec:encoders}
 
 sEMG and IMU are encoded separately because they measure different physical
-processes and have different useful temporal scales. sEMG provides direct but
+processes and exhibit different useful temporal scales. sEMG provides direct,
 non-stationary evidence of muscle recruitment, whereas IMU supplies the
-mechanical context required to distinguish grasp-related activity from
+mechanical context needed to distinguish grasp-related activation from
 reaching, rotation, and stabilization. Early concatenation would force both
 signals through identical temporal filters before their modality-specific
 structure had been extracted.
@@ -82,9 +82,10 @@ causal depthwise convolutions with kernels of five and nine samples, covering
 50 and 90 ms at the model rate. In parallel, a context path forms overlapping
 16-frame patches with stride four and passes them through a four-layer,
 four-head Transformer. Left padding ensures that the token associated with
-time $t$ contains no sample later than $t$, and a causal attention mask blocks
-future tokens. The most recent completed patch representation is held between
-successive patch endpoints and combined with the local representation.
+time $t$ contains no later sample, and a causal attention mask blocks future
+tokens. The most recent completed patch representation is held between patch
+endpoints and combined with the local representation. The local path preserves
+rapid state transitions, while the patch path models longer movement context.
 
 Fusion is performed separately for the local and contextual paths. For
 $r\in\{\mathrm{loc},\mathrm{ctx}\}$, let $\mathbf h_t^{e,r}$ and
@@ -106,10 +107,11 @@ and the fused representation is
 \end{align}
 The weighted features preserve modality-specific evidence, while the difference
 and product expose cross-modal disagreement and agreement. Stop-gradient is
-applied only at the gate input; downstream classification gradients continue to
-train both modality encoders.
+applied only at the gate input; all task losses continue to train both modality
+encoders through the fused representation.
 
-\subsubsection{State head and Stage-I objective}
+\subsection{Gripper-State Prediction}
+\label{subsec:state}
 
 The state decoder combines a stable contextual prediction with a
 high-resolution local prediction,
@@ -120,61 +122,42 @@ high-resolution local prediction,
 \end{equation}
 where the local term is produced by an additional five-frame causal depthwise
 convolution. The blend parameter is initialized with $\beta=-2$, initially
-favoring context while allowing training to sharpen state transitions. A
-causal sEMG-only pathway provides an additional zero-initialized correction to
-the state logits. It receives learned MASK state tokens at inference and is
-trained through the same state objective; no masked-signal reconstruction loss
-is used in the final Stage-I model.
+favoring context while allowing learning to sharpen open/close transitions.
 
-Stage I is optimized only with class-balanced cross entropy:
-\begin{equation}
- \mathcal L_{\mathrm I}=\mathcal L_g
- =-\frac{1}{|\mathcal V_g|}
- \sum_{t\in\mathcal V_g}w_{g_t}
- \log\operatorname{softmax}(\boldsymbol{\ell}_t^g)_{g_t},
-\end{equation}
-where $\mathcal V_g$ contains valid labelled frames and
-$w_c=N/(2N_c)$ compensates for class frequency. Removing pose, orientation,
-endpoint, pixel, future-motion, reconstruction, and stability losses makes the
-purpose of this stage unambiguous. The checkpoint with the highest validation
-macro-F1 is retained, after which its classifier and both patch encoders are
-frozen.
+A causal sEMG-only pathway supplies an additional correction to the state
+logits. This pathway prevents the state estimate from depending exclusively on
+mechanical motion and retains a direct route from muscle recruitment to the
+open/close decision. Its output projection is initialized to zero, so it begins
+as a no-op and is retained only when it improves the shared classification
+objective. Learned MASK state tokens are used in this pathway during inference;
+no ground-truth state is supplied to the network.
 
-\subsection{Stage II: State-Conditioned Motion Decoder}
-\label{subsec:stage2}
+The posterior state probability
+$\mathbf q_t=\operatorname{softmax}(\boldsymbol{\ell}_t^g)$ is used both as the
+classification output and as a differentiable conditioning signal for the
+motion pathway. Unlike the earlier frozen formulation, motion gradients may
+therefore refine the encoder features and state-conditioned representation.
 
-\subsubsection{Shared features and residual adaptation}
+\subsection{State-Conditioned Residual Motion Model}
+\label{subsec:motion}
 
-If the two stages use different training populations, Stage-II standardized
-inputs are mapped to the frozen classifier's feature scale. For modality
-$m\in\{e,i\}$,
-\begin{equation}
- \mathbf z_t^{c,m}=\mathbf z_t^{m}\odot
- \frac{\boldsymbol\sigma_m}{\boldsymbol\sigma_c}
- +\frac{\boldsymbol\mu_m-\boldsymbol\mu_c}
- {\boldsymbol\sigma_c},
-\end{equation}
-where $(\boldsymbol\mu_m,\boldsymbol\sigma_m)$ and
-$(\boldsymbol\mu_c,\boldsymbol\sigma_c)$ are the Stage-II and frozen
-classifier statistics, respectively.
-
-The frozen network is evaluated once to obtain modality-specific contextual
-features $\mathbf u_t^e,\mathbf u_t^i\in\mathbb{R}^{128}$ and state
-probabilities $\mathbf q_t$. Separate two-layer causal GRUs learn residual
-adaptations:
+The modality-specific contextual features
+$\mathbf u_t^e,\mathbf u_t^i\in\mathbb{R}^{128}$ are passed to separate
+two-layer causal GRUs. These recurrent layers model motion history while
+retaining the multiscale features extracted by the patch encoders:
 \begin{align}
  \mathbf h_{1:t}^{e}&=\mathbf u_{1:t}^{e}
  +W_a^e\operatorname{GRU}_e(\mathbf u_{1:t}^{e}),\\
  \mathbf h_{1:t}^{i}&=\mathbf u_{1:t}^{i}
  +W_a^i\operatorname{GRU}_i(\mathbf u_{1:t}^{i}).
 \end{align}
-Both output projections $W_a^e$ and $W_a^i$ are initialized to zero, so the
-motion stage begins from the frozen features rather than immediately replacing
-them.
+The residual projections $W_a^e$ and $W_a^i$ are initialized to zero. Thus,
+optimization begins from the causal encoder features and gradually introduces
+recurrent corrections rather than replacing the representation at
+initialization.
 
-The detached state probability is embedded as
-$\mathbf s_t=\phi_s(\operatorname{sg}(\mathbf q_t))$. IMU provides the
-mechanical base representation, while sEMG supplies a bounded,
+The state posterior is embedded as $\mathbf s_t=\phi_s(\mathbf q_t)$. IMU
+provides a mechanical base, and the sEMG stream supplies a bounded,
 state-conditioned correction:
 \begin{align}
  \mathbf c_t&=\tanh\!\left(\phi_c
@@ -185,43 +168,54 @@ state-conditioned correction:
  (\mathbf h_t^i+\gamma_t\mathbf c_t).
 \end{align}
 The correction projection is zero-initialized and the gate bias is initialized
-to $-2$. This provides a conservative IMU-centered starting point while still
-allowing sEMG to modify the representation when supported by motion
-supervision.
+to $-2$. This gives the network a conservative IMU-centered starting point
+while allowing sEMG to modify the motion representation when supported by the
+joint objective.
 
-\subsubsection{Deployed and training-only heads}
+\subsection{Prediction and Auxiliary Heads}
 
 Two-layer multilayer perceptrons map $\mathbf f_t$ directly to current
-Cartesian position and normalized screen location. The screen prediction is
-converted to physical pixels using the two display dimensions independently,
+Cartesian position and normalized screen location. Screen coordinates are
+converted using the horizontal and vertical display dimensions independently,
 \begin{equation}
     \hat{\mathbf u}_t^{\mathrm{px}}
     =(W\hat u_{x,t},H\hat u_{y,t}),
 \end{equation}
-with $W=1920$ and $H=1080$ in our experiments. No spatial grid or offset
-parameterization is used.
+with $W=1920$ and $H=1080$ in our experiments. No spatial-grid classification
+or within-cell offset head is used.
 
 For future prediction, the decoder concatenates $\mathbf f_t$ with the horizon
 encoding
 \begin{equation}
  \mathbf b(\tau)=[\tau,\tau^2,\sin(\pi\tau),\cos(\pi\tau)]
 \end{equation}
-and predicts the absolute Cartesian position at every 10-ms step through
-200 ms. A separate training-only decoder receives the sEMG representation and
-the same type of horizon encoding at 100-ms intervals through 1 s. It predicts
-future IMU changes but is removed from the deployed output interface. In
-particular, the final model does not produce a one-second Cartesian trajectory.
+and predicts absolute Cartesian position at every 10-ms step through 200 ms.
 
-\subsection{Stage-II Learning Objective}
-\label{subsec:stage2-loss}
+A separate training-only decoder receives the sEMG representation and a
+horizon encoding at 100-ms intervals through 1 s. It predicts future IMU
+changes and is omitted from the deployed output interface. This auxiliary task
+encourages the sEMG pathway to preserve neuromuscular activity that anticipates
+subsequent mechanical motion; the final model does not output a one-second
+Cartesian trajectory.
+
+\subsection{Unified Learning Objective}
+\label{subsec:loss}
 
 Let $\rho(\cdot)$ denote element-wise smooth-$L_1$ and let
-$\langle\cdot\rangle_{\mathcal V}$ average only valid targets. Current position
-is supervised in the training-standardized Cartesian space:
+$\langle\cdot\rangle_{\mathcal V}$ average only valid targets. The gripper loss
+is class-balanced cross entropy,
+\begin{equation}
+ \mathcal L_g=-\frac{1}{|\mathcal V_g|}
+ \sum_{t\in\mathcal V_g}w_{g_t}
+ \log\operatorname{softmax}(\boldsymbol{\ell}_t^g)_{g_t},
+ \qquad w_c=\frac{N}{2N_c}.
+\end{equation}
+Current position is supervised in the training-standardized Cartesian space:
 \begin{equation}
  \mathcal L_{\mathrm{pos}}=
  \left\langle\rho(\hat{\mathbf p}_t-\mathbf p_t)\right\rangle_{\mathcal V_p}.
 \end{equation}
+
 For the direct screen head, normalized residuals are scaled independently by
 display width and height. Defining
 $\mathbf D=\operatorname{diag}(W/100,H/100)$ and normalized trial progress
@@ -235,10 +229,10 @@ $r_t\in[0,1]$, the screen objective is
  \qquad a_t=0.25+3.75r_t^4.
 \end{equation}
 The separate $x$ and $y$ scaling respects the 16:9 display geometry, while
-$a_t$ emphasizes the later part of the reach where the intended screen target
+$a_t$ emphasizes the later part of the reach, when the intended screen target
 should have converged.
 
-For $\mathcal H_s=\{10,20,\ldots,200\}$ ms, dense future supervision is
+Dense future-position supervision is
 \begin{equation}
  \mathcal L_{\mathrm{future}}=
  \frac{1}{|\mathcal H_s|}
@@ -247,19 +241,13 @@ For $\mathcal H_s=\{10,20,\ldots,200\}$ ms, dense future supervision is
  \rho(\hat{\mathbf p}_{t+h\mid t}-\mathbf p_{t+h})
  \right\rangle_{\mathcal V_{t,h}}.
 \end{equation}
-This objective trains trajectory prediction directly rather than deriving it
-from current position or a constant-velocity assumption.
+This trains the trajectory directly instead of deriving it from the current
+position or a constant-velocity assumption.
 
-The only long-horizon auxiliary objective is sEMG-to-future-IMU prediction.
-Let $\mathcal H_l=\{100,200,\ldots,1000\}$ ms, let $h^{-}$ denote the previous
-horizon (zero for the first interval), and define the interval target
-\begin{equation}
- \Delta\bar{\mathbf i}_{t,h}=
- \frac{1}{h-h^{-}}
- \int_{h^{-}}^{h}\mathbf i_{t+\tau}\,d\tau-\mathbf i_t.
-\end{equation}
-The discrete implementation averages the 100-Hz samples in each interval. The
-auxiliary loss is
+The only long-horizon auxiliary objective is sEMG-to-future-IMU prediction. Let
+$\mathcal H_l=\{100,200,\ldots,1000\}$ ms, let $h^{-}$ denote the preceding
+horizon, and let $\Delta\bar{\mathbf i}_{t,h}$ be the mean IMU value over the
+interval $(t+h^{-},t+h]$ minus the current IMU value. Then
 \begin{equation}
  \mathcal L_{e\rightarrow i}=
  \frac{\sum_{h\in\mathcal H_l}\lambda_h
@@ -270,44 +258,46 @@ auxiliary loss is
  \qquad
  \lambda_h=\exp\!\left(-\frac{h}{500\ \mathrm{ms}}\right).
 \end{equation}
-The decoder receives no IMU representation. It therefore cannot minimize the
-loss by copying current inertial features and must instead retain sEMG patterns
-that predict subsequent mechanical motion. Future IMU is used only to construct
-training targets.
+The auxiliary decoder receives no IMU representation. It therefore cannot
+solve the task by copying inertial features and must instead extract sEMG
+patterns associated with later mechanics. Future IMU values are used only to
+construct training targets.
 
-The complete Stage-II objective is
+The complete end-to-end objective is
 \begin{equation}
- \boxed{
- \mathcal L_{\mathrm{II}}=
- \mathcal L_{\mathrm{pos}}
- +0.35\mathcal L_{\mathrm{pixel}}
- +0.50\mathcal L_{\mathrm{future}}
- +0.05\mathcal L_{e\rightarrow i}}
- \;.
+ \boxed{\begin{aligned}
+ \mathcal L={}&\mathcal L_g+\mathcal L_{\mathrm{pos}}
+ +0.35\mathcal L_{\mathrm{pixel}}\\
+ &+0.50\mathcal L_{\mathrm{future}}
+ +0.05\mathcal L_{e\rightarrow i}
+ \end{aligned}}
 \end{equation}
-There is no Stage-II classification loss because the validated state classifier
-is frozen. Orientation, endpoint, spatial-grid, within-cell offset,
-future-arrival consistency, correction regularization, masked-sEMG
-reconstruction, and one-second Cartesian intent losses are also absent.
+No orientation, endpoint, grid, offset, arrival-consistency, correction
+regularization, masked-sEMG reconstruction, or one-second Cartesian intent
+loss is used.
 
 \subsection{Optimization and Causal Inference}
 
-Both stages use AdamW with learning rate $3\times10^{-4}$, weight decay
-$10^{-4}$, batch size four, and gradient-norm clipping at one. Models are
-trained for at most 60 epochs with early stopping after 12 validation epochs
-without improvement. Stage I selects the checkpoint with maximum validation
-macro-F1. Stage II selects its checkpoint using the validation motion score.
-Trials, rather than overlapping frames, are assigned to the training,
-validation, and test partitions using a fixed split seed, and all normalization
-statistics are estimated from the training partition.
+The network is trained end to end with AdamW using learning rate
+$3\times10^{-4}$, weight decay $10^{-4}$, batch size four, and gradient-norm
+clipping at one. Training runs for at most 60 epochs and stops after 12
+validation epochs without improvement. Checkpoints minimize the validation
+score
+\begin{equation}
+ S_{\mathrm{val}}=E_{\mathrm{pos}}^{\mathrm{cm}}
+ +0.01E_{\mathrm{pixel}}^{\mathrm{px}}
+ +5(1-F_1^{\mathrm{state}}).
+\end{equation}
+Trials, rather than overlapping frames, are assigned to 60\% training, 20\%
+validation, and 20\% test partitions using a fixed split seed. All
+normalization statistics and class weights are derived from the training
+partition. The selected model contains 3,242,105 trainable parameters.
 
 At inference, the same causal preprocessing is applied with a two-second
 history and a 300-ms warm-up. State output uses hysteresis: the gripper changes
 to closed when $P(g_t=\mathrm{close})\geq0.7$, changes to open when
 $P(g_t=\mathrm{close})\leq0.3$, and otherwise retains its previous state. Each
-valid output contains the state probabilities, current Cartesian position,
-continuous screen coordinate, and 20 future Cartesian positions through
-200 ms. No VIVE sample, future wearable measurement, target label, or online
-parameter update is required. The complete network contains 3,242,105
-parameters, of which 2,642,136 belong to the frozen Stage-I classifier and
-encoders and 599,969 are optimized in Stage II.
+valid output contains state probabilities, current Cartesian position,
+continuous screen location, and 20 future Cartesian positions through 200 ms.
+No VIVE sample, future wearable measurement, target label, or online parameter
+update is required.
