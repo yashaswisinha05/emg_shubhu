@@ -17,6 +17,7 @@ from emg_touch.models.reach_grasp_architecture_baselines import ArchitectureBase
 from emg_touch.models.reach_grasp_neuromuscular_future import (
     NeuromuscularFutureGripperPoseModel,
 )
+from emg_touch.models.reach_grasp_gripper_state import GripperStatePoseModel
 from emg_touch.models.reach_grasp_shared_encoder_adapter import (
     SharedEncoderResidualGRU,
 )
@@ -27,6 +28,8 @@ from scripts import train_neuromuscular_residual_gru as residual
 def load_classifier(state):
     if state.get("format") == "gripper_neuromuscular_future_v1":
         model = NeuromuscularFutureGripperPoseModel(**state["model_args"])
+    elif state.get("format") == "gripper_classifier_minimal_v1":
+        model = GripperStatePoseModel(**state["model_args"])
     elif (state.get("format") == "reach_grasp_architecture_baseline_v1"
           and state.get("architecture") == "gru"):
         model = ArchitectureBaseline("gru", **state["model_args"])
@@ -47,12 +50,8 @@ def main():
     parser.add_argument("--reconstruction-horizon-ms", type=int, default=1000)
     parser.add_argument("--reconstruction-step-ms", type=int, default=100)
     parser.add_argument("--reconstruction-decay-ms", type=float, default=500.)
-    parser.add_argument("--grid-weight", type=float, default=.15)
-    parser.add_argument("--grid-residual-weight", type=float, default=.1)
-    parser.add_argument("--future-consistency-weight", type=float, default=.1)
     parser.add_argument("--long-position-weight", type=float, default=.05)
     parser.add_argument("--emg-to-future-imu-weight", type=float, default=.05)
-    parser.add_argument("--correction-weight", type=float, default=.01)
     option, remaining = parser.parse_known_args()
     if option.adapter_layers <= 0:
         parser.error("adapter-layers must be positive")
@@ -71,8 +70,9 @@ def main():
 
     classifier_state = torch.load(
         option.classifier_checkpoint, map_location="cpu", weights_only=False)
-    if classifier_state.get("format") != "gripper_neuromuscular_future_v1":
-        parser.error("shared encoders require a gripper_neuromuscular_future_v1 checkpoint")
+    if classifier_state.get("format") not in {
+            "gripper_neuromuscular_future_v1", "gripper_classifier_minimal_v1"}:
+        parser.error("unsupported shared-encoder classifier checkpoint")
     if classifier_state["model_args"].get("modality") != "emg+imu":
         parser.error("classifier checkpoint must use fused emg+imu input")
 
@@ -81,12 +81,12 @@ def main():
                            option.reconstruction_step_ms // 10))
     residual.extra = SimpleNamespace(
         state_weight=0.,
-        grid_weight=option.grid_weight,
-        grid_residual_weight=option.grid_residual_weight,
+        grid_weight=0.,
+        grid_residual_weight=0.,
         masked_emg_weight=0.,
         future_imu_weight=0.,
-        future_consistency_weight=option.future_consistency_weight,
-        correction_weight=option.correction_weight,
+        future_consistency_weight=0.,
+        correction_weight=0.,
         reconstruction_horizon_ms=option.reconstruction_horizon_ms,
         reconstruction_step_ms=option.reconstruction_step_ms,
         reconstruction_decay_ms=option.reconstruction_decay_ms,
@@ -125,6 +125,7 @@ def main():
             dropout=model_args.get("dropout", .1),
             future_steps=model_args.get("future_steps", 20),
             intent_horizons_steps=horizons,
+            pixel_head="direct",
         )
 
     def train_wrapper(*args, **kwargs):
@@ -169,11 +170,13 @@ def main():
         "adapter_layers": option.adapter_layers,
         "orientation_disabled": True,
         "endpoint_disabled": True,
+        "pixel_head": "direct",
+        "grid_and_offset_removed": True,
         "masked_emg_reconstruction": False,
         "emg_to_future_imu": True,
         "intent_horizons_ms": [step * 10 for step in horizons],
         "heads": ["frozen open/close state", "current XYZ",
-                  "3x3 grid + pixel residual", "future XYZ through 200 ms",
+                  "direct pixel XY", "future XYZ through 200 ms",
                   "intent XYZ through 1000 ms",
                   "training-only EMG-to-future-IMU summary"],
     })
@@ -193,6 +196,7 @@ def main():
                 "width": 128, "adapter_layers": option.adapter_layers,
                 "dropout": .1, "future_steps": 20,
                 "intent_horizons_steps": horizons,
+                "pixel_head": "direct",
             },
         })
         torch.save(checkpoint, path)

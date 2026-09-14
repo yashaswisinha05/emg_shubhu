@@ -122,25 +122,33 @@ def task_loss(model, output, batch, class_weight, args):
         late = (.25 + 3.75 * batch["trial_progress"].pow(4)) * click_valid.float()
         pixel = (pixel_frame * late).sum() / late.sum().clamp_min(1.)
 
-        target_xy = (batch["click_target"] * 3).floor().long().clamp(0, 2)
-        target_grid = target_xy[..., 1] * 3 + target_xy[..., 0]
-        grid = F.cross_entropy(output["grid_logits"].transpose(1, 2),
-                               target_grid, reduction="none")
-        grid = masked_mean(grid, click_valid)
-        selected_offset = output["grid_offsets"].gather(
-            -2, target_grid[..., None, None].expand(*target_grid.shape, 1, 2)).squeeze(-2)
-        centers = motion.grid_centers[target_grid]
-        target_offset = batch["click_target"] - centers
-        residual_error = (selected_offset - target_offset) * canvas
-        residual = masked_mean(F.smooth_l1_loss(
-            residual_error, torch.zeros_like(residual_error), reduction="none"),
-            click_valid[..., None])
-        total = total + args.pixel_weight * pixel + extra.grid_weight * grid
-        total = total + extra.grid_residual_weight * residual
+        total = total + args.pixel_weight * pixel
+        if extra.grid_weight > 0 or extra.grid_residual_weight > 0:
+            if output.get("grid_logits") is None or output.get("grid_offsets") is None:
+                raise ValueError("grid losses require grid logits and offsets")
+            target_xy = (batch["click_target"] * 3).floor().long().clamp(0, 2)
+            target_grid = target_xy[..., 1] * 3 + target_xy[..., 0]
+            grid = F.cross_entropy(output["grid_logits"].transpose(1, 2),
+                                   target_grid, reduction="none")
+            grid = masked_mean(grid, click_valid)
+            selected_offset = output["grid_offsets"].gather(
+                -2, target_grid[..., None, None].expand(
+                    *target_grid.shape, 1, 2)).squeeze(-2)
+            centers = motion.grid_centers[target_grid]
+            target_offset = batch["click_target"] - centers
+            residual_error = (selected_offset - target_offset) * canvas
+            residual = masked_mean(F.smooth_l1_loss(
+                residual_error, torch.zeros_like(residual_error), reduction="none"),
+                click_valid[..., None])
+            total = total + extra.grid_weight * grid
+            total = total + extra.grid_residual_weight * residual
 
-    future, consistency = future_position_losses(output, batch, usable)
+    future, consistency = future_position_losses(
+        output, batch, usable,
+        include_consistency=extra.future_consistency_weight > 0)
     total = total + args.future_pose_weight * future
-    total = total + extra.future_consistency_weight * consistency
+    if extra.future_consistency_weight > 0:
+        total = total + extra.future_consistency_weight * consistency
     if extra.future_imu_weight > 0:
         total = total + extra.future_imu_weight * future_imu_loss(output, batch, usable)
     long_position, long_imu, long_state = long_intent_loss(
@@ -161,9 +169,12 @@ def task_loss(model, output, batch, class_weight, args):
         reconstruction_valid = hidden[..., None] & batch["emg"][..., 8:].bool()
         reconstruction = masked_mean(
             (reconstructed - batch["emg"][..., :8]).square(), reconstruction_valid)
-    correction_penalty = masked_mean(output["emg_correction"].square(), usable[..., None])
-    return (total + extra.masked_emg_weight * reconstruction
-            + extra.correction_weight * correction_penalty)
+    total = total + extra.masked_emg_weight * reconstruction
+    if extra.correction_weight > 0:
+        correction_penalty = masked_mean(
+            output["emg_correction"].square(), usable[..., None])
+        total = total + extra.correction_weight * correction_penalty
+    return total
 
 
 def main():

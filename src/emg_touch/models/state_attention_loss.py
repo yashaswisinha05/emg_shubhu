@@ -9,7 +9,7 @@ def masked_mean(value, mask):
     return value[mask].mean() if mask.any() else value.sum() * 0
 
 
-def future_position_losses(output, batch, usable=None):
+def future_position_losses(output, batch, usable=None, include_consistency=True):
     """Supervised future position and prediction-to-arrival consistency."""
     if usable is None:
         usable = batch["emg_usable"] & batch["imu_usable"]
@@ -29,10 +29,11 @@ def future_position_losses(output, batch, usable=None):
             prediction[valid], truth[valid], reduction="sum")
         supervised_count = supervised_count + valid.sum() * 3
 
-        arrival_valid = valid & usable[:, horizon:]
-        arrival = output["position"][:, horizon:].detach()
-        consistent = consistent + F.smooth_l1_loss(
-            prediction[arrival_valid], arrival[arrival_valid], reduction="sum")
-        consistent_count = consistent_count + arrival_valid.sum() * 3
+        if include_consistency:
+            arrival_valid = valid & usable[:, horizon:]
+            arrival = output["position"][:, horizon:].detach()
+            consistent = consistent + F.smooth_l1_loss(
+                prediction[arrival_valid], arrival[arrival_valid], reduction="sum")
+            consistent_count = consistent_count + arrival_valid.sum() * 3
     return (supervised / supervised_count.clamp_min(1),
             consistent / consistent_count.clamp_min(1))

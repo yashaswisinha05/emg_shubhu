@@ -28,12 +28,12 @@ def stats():
     }
 
 
-def make_model():
+def make_model(pixel_head="grid"):
     torch.manual_seed(3)
     return SharedEncoderResidualGRU(
         DummySharedClassifier(), stats(), stats(), width=16,
         adapter_layers=1, dropout=0., future_steps=3,
-        intent_horizons_steps=(10, 20))
+        intent_horizons_steps=(10, 20), pixel_head=pixel_head)
 
 
 def test_shared_classifier_is_frozen_and_shapes_are_complete():
@@ -66,3 +66,12 @@ def test_future_imu_auxiliary_has_no_direct_imu_input():
     first = model(emg, torch.randn(1, 30, 48))["intent_imu_delta"]
     second = model(emg, torch.randn(1, 30, 48))["intent_imu_delta"]
     torch.testing.assert_close(first, second)
+
+
+def test_direct_pixel_head_removes_grid_and_offset_predictions():
+    model = make_model(pixel_head="direct")
+    output = model(torch.randn(2, 30, 16), torch.randn(2, 30, 48))
+    assert output["click"].shape == (2, 30, 2)
+    assert output["grid_logits"] is None
+    assert output["grid_offsets"] is None
+    assert torch.all((output["click"] >= 0) & (output["click"] <= 1))

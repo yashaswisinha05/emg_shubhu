@@ -19,7 +19,7 @@ class SharedEncoderResidualGRU(nn.Module):
 
     def __init__(self, classifier, classifier_normalization, motion_normalization,
                  width=128, adapter_layers=2, dropout=.1, future_steps=20,
-                 intent_horizons_steps=None):
+                 intent_horizons_steps=None, pixel_head="grid"):
         super().__init__()
         if future_steps <= 0:
             raise ValueError("future_steps must be positive")
@@ -30,6 +30,9 @@ class SharedEncoderResidualGRU(nn.Module):
         self.modality = "emg+imu"
         self.future_steps = future_steps
         self.intent_horizons_steps = horizons
+        if pixel_head not in {"grid", "direct"}:
+            raise ValueError("pixel_head must be 'grid' or 'direct'")
+        self.pixel_head_type = pixel_head
         for parameter in self.classifier.parameters():
             parameter.requires_grad_(False)
         self.classifier.eval()
@@ -72,13 +75,20 @@ class SharedEncoderResidualGRU(nn.Module):
 
         self.position_head = nn.Sequential(
             nn.Linear(width, width), nn.GELU(), nn.Linear(width, 3))
-        self.grid_head = nn.Sequential(
-            nn.Linear(width, width), nn.GELU(), nn.Linear(width, 9))
-        self.offset_head = nn.Sequential(
-            nn.Linear(width, width), nn.GELU(), nn.Linear(width, 18))
-        coordinates = torch.tensor([1 / 6, 1 / 2, 5 / 6], dtype=torch.float32)
-        yy, xx = torch.meshgrid(coordinates, coordinates, indexing="ij")
-        self.register_buffer("grid_centers", torch.stack((xx.flatten(), yy.flatten()), -1))
+        self.grid_head = self.offset_head = self.click_head = None
+        if pixel_head == "grid":
+            self.grid_head = nn.Sequential(
+                nn.Linear(width, width), nn.GELU(), nn.Linear(width, 9))
+            self.offset_head = nn.Sequential(
+                nn.Linear(width, width), nn.GELU(), nn.Linear(width, 18))
+            coordinates = torch.tensor([1 / 6, 1 / 2, 5 / 6], dtype=torch.float32)
+            yy, xx = torch.meshgrid(coordinates, coordinates, indexing="ij")
+            grid_centers = torch.stack((xx.flatten(), yy.flatten()), -1)
+        else:
+            self.click_head = nn.Sequential(
+                nn.Linear(width, width), nn.GELU(), nn.Linear(width, 2))
+            grid_centers = torch.empty(0, 2)
+        self.register_buffer("grid_centers", grid_centers)
 
         self.future_head = nn.Sequential(
             nn.Linear(width + 4, width), nn.GELU(), nn.Linear(width, 3))
@@ -134,11 +144,15 @@ class SharedEncoderResidualGRU(nn.Module):
         gate = self.correction_gate(torch.cat((imu_motion, emg_motion, state), -1)).sigmoid()
         fused = self.fused_norm(imu_motion + gate * correction)
 
-        grid_logits = self.grid_head(fused)
-        grid_offsets = self.offset_head(fused).reshape(*fused.shape[:2], 9, 2)
-        grid_offsets = grid_offsets.tanh() / 6.
-        candidates = (self.grid_centers.view(1, 1, 9, 2) + grid_offsets).clamp(0., 1.)
-        click = (grid_logits.softmax(-1).unsqueeze(-1) * candidates).sum(-2)
+        grid_logits = grid_offsets = None
+        if self.pixel_head_type == "grid":
+            grid_logits = self.grid_head(fused)
+            grid_offsets = self.offset_head(fused).reshape(*fused.shape[:2], 9, 2)
+            grid_offsets = grid_offsets.tanh() / 6.
+            candidates = (self.grid_centers.view(1, 1, 9, 2) + grid_offsets).clamp(0., 1.)
+            click = (grid_logits.softmax(-1).unsqueeze(-1) * candidates).sum(-2)
+        else:
+            click = self.click_head(fused).sigmoid()
 
         basis = self.horizon_basis.view(1, 1, self.future_steps, 4)
         future_input = torch.cat((

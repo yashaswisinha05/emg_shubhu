@@ -1,28 +1,29 @@
 # Shared-encoder residual GRU
 
 This is the single-encoder version of the final model. The selected Stage-I
-neuromuscular-future checkpoint supplies one frozen EMG patch encoder, one
-frozen IMU patch encoder, and the authoritative open/close classifier. Those
+checkpoint supplies one frozen EMG patch encoder, one frozen IMU patch encoder,
+and the authoritative open/close classifier. Stage I uses only class-balanced
+open/close cross-entropy. Those
 features are computed once and reused by two-layer causal GRU adapters for
 current XYZ, pixel XY, 10--200 ms future XYZ, and 0.1--1.0 s intent XYZ.
 
 The training-only future-IMU decoder receives the EMG representation only. It
 therefore tests whether present muscle activity predicts subsequent mechanics
 without directly copying the current IMU representation. Masked-EMG
-reconstruction is disabled.
+reconstruction is disabled. Stage II directly regresses normalized pixel XY;
+grid classification, within-grid offsets, future consistency, and correction
+regularization are removed.
 
 ## Train
 
-The classifier checkpoint must come from
-`train_gripper_neuromuscular_future.py` and have format
-`gripper_neuromuscular_future_v1`.
+Train both simplified stages together:
 
 ```bash
 git pull origin main
 
-bash scripts/train_shared_encoder_residual_gru.sh \
-  runs/gripper_neuromuscular_future_fused/emg_imu_best.pt \
-  runs/shared_encoder_residual_gru_multi_person \
+bash scripts/train_minimal_two_stage_model.sh \
+  runs/gripper_classifier_minimal \
+  runs/shared_encoder_residual_gru_minimal \
   data/shubham_open data/shubham_close \
   data/mukund_open data/mukund_closed \
   data/gazania_open data/gazania_closed
@@ -31,7 +32,7 @@ bash scripts/train_shared_encoder_residual_gru.sh \
 The deployable checkpoint is:
 
 ```text
-runs/shared_encoder_residual_gru_multi_person/emg_imu_best.pt
+runs/shared_encoder_residual_gru_minimal/emg_imu_best.pt
 ```
 
 To override runtime settings:
@@ -48,7 +49,7 @@ Use a new, empty output directory for every run.
 
 ```bash
 python scripts/infer_shared_encoder_residual_gru.py \
-  --checkpoint runs/shared_encoder_residual_gru_multi_person/emg_imu_best.pt \
+  --checkpoint runs/shared_encoder_residual_gru_minimal/emg_imu_best.pt \
   --trial-csv data/unseen_person/trial_001.csv \
   --canvas-px 1920 1080 \
   --device cuda \
@@ -68,7 +69,7 @@ Omit `--trial-csv` and send one JSON object per line on standard input:
 
 ```bash
 sensor_program | python scripts/infer_shared_encoder_residual_gru.py \
-  --checkpoint runs/shared_encoder_residual_gru_multi_person/emg_imu_best.pt \
+  --checkpoint runs/shared_encoder_residual_gru_minimal/emg_imu_best.pt \
   --canvas-px 1920 1080 --device cuda
 ```
 

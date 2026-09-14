@@ -14,6 +14,7 @@ from .models.reach_grasp_neuro_classifier_attention import (
 from .models.reach_grasp_neuromuscular_future import (
     NeuromuscularFutureGripperPoseModel,
 )
+from .models.reach_grasp_gripper_state import GripperStatePoseModel
 from .models.reach_grasp_residual_gru import NeuromuscularResidualGRU
 from .models.reach_grasp_shared_encoder_adapter import SharedEncoderResidualGRU
 
@@ -51,7 +52,13 @@ def load_residual_gru(checkpoint, device="cuda"):
         raise ValueError("live inference requires an emg+imu checkpoint")
     if state["format"] == "shared_encoder_residual_gru_v1":
         classifier_args = state["classifier_model_args"]
-        classifier = NeuromuscularFutureGripperPoseModel(**classifier_args)
+        if state["classifier_format"] == "gripper_neuromuscular_future_v1":
+            classifier = NeuromuscularFutureGripperPoseModel(**classifier_args)
+        elif state["classifier_format"] == "gripper_classifier_minimal_v1":
+            classifier = GripperStatePoseModel(**classifier_args)
+        else:
+            raise ValueError(
+                f"unsupported frozen classifier: {state['classifier_format']}")
         model = SharedEncoderResidualGRU(
             classifier, state["classifier_normalization"], state["normalization"],
             **state["shared_model_args"])
