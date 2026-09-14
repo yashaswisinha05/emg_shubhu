@@ -1,0 +1,56 @@
+\subsection{Cross-Participant 200-ms Prediction}
+\label{subsec:unseen-200ms}
+
+We separately examined cross-participant generalization at 200 ms using
+50 open-hand and 50 closed-hand trials from an unseen participant, without
+calibration or parameter updates. This horizon was selected because it is the
+end of the densely supervised trajectory window and is therefore predicted by
+the same type of head under the same target definition for every model. It
+also provides a short anticipatory interval that can be consumed by a
+downstream controller while remaining sufficiently close to the observed
+motion for reliable evaluation. Restricting this comparison to 200 ms avoids
+confounding the result with the proposed model's separate long-horizon intent
+decoder.
+
+\begin{table}[t]
+ \centering
+ \caption{Unseen-participant Cartesian prediction error at 200 ms. The pooled
+ result is weighted by the number of valid frames in each condition.}
+ \label{tab:unseen-200ms}
+ \small
+ \setlength{\tabcolsep}{4pt}
+ \begin{tabular}{lrrr}
+  \hline
+  Model & Open (cm) & Closed (cm) & Pooled (cm) \\
+  \hline
+  Proposed       & 7.70 & \textbf{8.37} & \textbf{8.04} \\
+  IMU--GRU       & 7.01 & 9.57 & 8.33 \\
+  sEMG+IMU--GRU  & 8.27 & 15.01 & 11.73 \\
+  IMU--LSTM      & \textbf{6.97} & 10.49 & 8.78 \\
+  sEMG+IMU--LSTM & 7.88 & 11.68 & 9.83 \\
+  \hline
+ \end{tabular}
+\end{table}
+
+The proposed model achieved the lowest pooled error of 8.04 cm, compared with
+8.33 cm for the strongest conventional pooled baseline, IMU--GRU. Although the
+IMU-only recurrent models were more accurate in the open condition, their
+errors increased substantially in the closed condition. The proposed model
+instead maintained similar performance across hand states, with an
+open-to-closed difference of 0.67 cm, compared with 2.56 cm for IMU--GRU and
+3.52 cm for IMU--LSTM. Its frozen state decoder also achieved 95.86\%
+macro-F1 after the open and closed trials were combined. These observations
+support the intended role of state conditioning: it reduces sensitivity to
+changes in muscle recruitment and arm dynamics associated with the gripper
+state while preserving an IMU-derived mechanical base.
+
+Direct early fusion did not provide the same robustness. Its pooled 200-ms
+errors increased to 11.73 cm for the GRU and 9.83 cm for the LSTM, indicating
+that unconstrained sEMG features can introduce negative transfer under
+participant shift. In contrast, the proposed bounded sEMG correction improved
+the pooled result without allowing the muscle stream to replace the inertial
+representation. The comparison therefore isolates the benefit of the proposed
+fusion mechanism rather than merely demonstrating that an additional modality
+was available. Because this experiment contains one unseen participant, the
+differences are reported descriptively and require confirmation on a larger
+cross-participant cohort.
