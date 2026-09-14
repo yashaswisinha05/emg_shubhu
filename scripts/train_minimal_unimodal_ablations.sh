@@ -41,7 +41,7 @@ for modality in emg imu; do
     --future-pose-ms 200 --future-pose-weight 0.5 \
     --reconstruction-horizon-ms 1000 --reconstruction-step-ms 100 \
     --reconstruction-decay-ms 500 \
-    --long-position-weight 0.05 --emg-to-future-imu-weight 0.05 \
+    --emg-to-future-imu-weight 0.05 \
     --output-dir "$motion_dir"
 done
 

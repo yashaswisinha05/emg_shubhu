@@ -50,7 +50,9 @@ def future_imu_loss(output, batch, usable):
 def long_intent_loss(model, output, batch, usable, class_weight):
     """Reconstruct low-rate motion summaries, not noisy raw future samples."""
     zero = output["position"].sum() * 0
-    if output["intent_position_delta"] is None:
+    if (output.get("intent_position_delta") is None
+            and output.get("intent_imu_delta") is None
+            and output.get("intent_state_logits") is None):
         return zero, zero, zero
     position_total = imu_total = state_total = zero
     weight_total = output["position"].new_zeros(())
@@ -62,28 +64,30 @@ def long_intent_loss(model, output, batch, usable, class_weight):
             -horizon_ms / extra.reconstruction_decay_ms))
         source_usable = usable[:, :-horizon]
         target_usable = usable[:, horizon:]
-        pose_valid = (source_usable & target_usable
-                      & batch["pose_mask"][:, :-horizon, 0].bool()
-                      & batch["pose_mask"][:, horizon:, 0].bool())
-        position_target = batch["pose"][:, horizon:] - batch["pose"][:, :-horizon]
-        position_prediction = output["intent_position_delta"][:, :-horizon, index]
-        position_total = position_total + weight * masked_mean(F.smooth_l1_loss(
-            position_prediction, position_target, reduction="none"),
-            pose_valid[..., None])
+        if output.get("intent_position_delta") is not None:
+            pose_valid = (source_usable & target_usable
+                          & batch["pose_mask"][:, :-horizon, 0].bool()
+                          & batch["pose_mask"][:, horizon:, 0].bool())
+            position_target = batch["pose"][:, horizon:] - batch["pose"][:, :-horizon]
+            position_prediction = output["intent_position_delta"][:, :-horizon, index]
+            position_total = position_total + weight * masked_mean(F.smooth_l1_loss(
+                position_prediction, position_target, reduction="none"),
+                pose_valid[..., None])
 
         previous = 0 if index == 0 else model.intent_horizons_steps[index - 1]
         interval = horizon - previous
         length = usable.shape[1] - horizon
-        interval_valid = source_usable & target_usable
-        interval_sum = torch.zeros_like(batch["imu"][:, :length, :24])
-        for offset in range(previous + 1, horizon + 1):
-            interval_sum = interval_sum + batch["imu"][:, offset:offset + length, :24]
-            interval_valid = interval_valid & usable[:, offset:offset + length]
-        interval_mean = interval_sum / interval
-        imu_target = interval_mean - batch["imu"][:, :length, :24]
-        imu_prediction = output["intent_imu_delta"][:, :length, index]
-        imu_total = imu_total + weight * masked_mean(F.smooth_l1_loss(
-            imu_prediction, imu_target, reduction="none"), interval_valid[..., None])
+        if output.get("intent_imu_delta") is not None:
+            interval_valid = source_usable & target_usable
+            interval_sum = torch.zeros_like(batch["imu"][:, :length, :24])
+            for offset in range(previous + 1, horizon + 1):
+                interval_sum = interval_sum + batch["imu"][:, offset:offset + length, :24]
+                interval_valid = interval_valid & usable[:, offset:offset + length]
+            interval_mean = interval_sum / interval
+            imu_target = interval_mean - batch["imu"][:, :length, :24]
+            imu_prediction = output["intent_imu_delta"][:, :length, index]
+            imu_total = imu_total + weight * masked_mean(F.smooth_l1_loss(
+                imu_prediction, imu_target, reduction="none"), interval_valid[..., None])
 
         if output["intent_state_logits"] is not None and extra.long_state_weight > 0:
             state_valid = (source_usable & target_usable

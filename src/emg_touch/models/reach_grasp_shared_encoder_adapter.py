@@ -19,7 +19,8 @@ class SharedEncoderResidualGRU(nn.Module):
 
     def __init__(self, classifier, classifier_normalization, motion_normalization,
                  width=128, adapter_layers=2, dropout=.1, future_steps=20,
-                 intent_horizons_steps=None, pixel_head="grid", modality="emg+imu"):
+                 intent_horizons_steps=None, pixel_head="grid", modality="emg+imu",
+                 predict_intent_position=True):
         super().__init__()
         if future_steps <= 0:
             raise ValueError("future_steps must be positive")
@@ -100,8 +101,9 @@ class SharedEncoderResidualGRU(nn.Module):
 
         self.intent_position_head = self.intent_imu_head = None
         if horizons:
-            self.intent_position_head = nn.Sequential(
-                nn.Linear(width * 2 + 4, width), nn.GELU(), nn.Linear(width, 3))
+            if predict_intent_position:
+                self.intent_position_head = nn.Sequential(
+                    nn.Linear(width * 2 + 4, width), nn.GELU(), nn.Linear(width, 3))
             # Deliberately EMG-only: this auxiliary task asks whether muscle
             # activity predicts later mechanics beyond the current IMU state.
             self.intent_imu_head = nn.Sequential(
@@ -171,14 +173,15 @@ class SharedEncoderResidualGRU(nn.Module):
             fused.unsqueeze(2).expand(-1, -1, self.future_steps, -1),
             basis.expand(*fused.shape[:2], -1, -1)), -1)
         intent_position = intent_imu = None
-        if self.intent_position_head is not None:
+        if self.intent_imu_head is not None:
             count = len(self.intent_horizons_steps)
             ib = self.intent_horizon_basis.view(1, 1, count, 4)
             expanded_basis = ib.expand(*fused.shape[:2], -1, -1)
             expanded_emg = emg_motion.unsqueeze(2).expand(-1, -1, count, -1)
             expanded_fused = fused.unsqueeze(2).expand(-1, -1, count, -1)
-            intent_position = self.intent_position_head(torch.cat(
-                (expanded_fused, expanded_emg, expanded_basis), -1))
+            if self.intent_position_head is not None:
+                intent_position = self.intent_position_head(torch.cat(
+                    (expanded_fused, expanded_emg, expanded_basis), -1))
             auxiliary_motion = (expanded_fused if self.modality == "imu"
                                 else expanded_emg)
             intent_imu = self.intent_imu_head(torch.cat(

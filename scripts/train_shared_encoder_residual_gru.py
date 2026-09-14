@@ -50,7 +50,6 @@ def main():
     parser.add_argument("--reconstruction-horizon-ms", type=int, default=1000)
     parser.add_argument("--reconstruction-step-ms", type=int, default=100)
     parser.add_argument("--reconstruction-decay-ms", type=float, default=500.)
-    parser.add_argument("--long-position-weight", type=float, default=.05)
     parser.add_argument("--emg-to-future-imu-weight", type=float, default=.05)
     option, remaining = parser.parse_known_args()
     if option.adapter_layers <= 0:
@@ -91,7 +90,7 @@ def main():
         reconstruction_horizon_ms=option.reconstruction_horizon_ms,
         reconstruction_step_ms=option.reconstruction_step_ms,
         reconstruction_decay_ms=option.reconstruction_decay_ms,
-        long_position_weight=option.long_position_weight,
+        long_position_weight=0.,
         long_imu_weight=option.emg_to_future_imu_weight,
         long_state_weight=0.,
     )
@@ -130,6 +129,7 @@ def main():
             intent_horizons_steps=horizons,
             pixel_head="direct",
             modality=classifier_modality,
+            predict_intent_position=False,
         )
 
     def train_wrapper(*args, **kwargs):
@@ -179,10 +179,10 @@ def main():
         "grid_and_offset_removed": True,
         "masked_emg_reconstruction": False,
         "emg_to_future_imu": True,
-        "intent_horizons_ms": [step * 10 for step in horizons],
+        "future_imu_horizons_ms": [step * 10 for step in horizons],
+        "long_horizon_position_intent": False,
         "heads": ["frozen open/close state", "current XYZ",
                   "direct pixel XY", "future XYZ through 200 ms",
-                  "intent XYZ through 1000 ms",
                   "training-only EMG-to-future-IMU summary"],
     })
     results_path.write_text(json.dumps(results, indent=2))
@@ -203,6 +203,7 @@ def main():
                 "intent_horizons_steps": horizons,
                 "pixel_head": "direct",
                 "modality": classifier_modality,
+                "predict_intent_position": False,
             },
         })
         torch.save(checkpoint, path)

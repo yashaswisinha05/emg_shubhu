@@ -5,7 +5,7 @@ checkpoint supplies one frozen EMG patch encoder, one frozen IMU patch encoder,
 and the authoritative open/close classifier. Stage I uses only class-balanced
 open/close cross-entropy. Those
 features are computed once and reused by two-layer causal GRU adapters for
-current XYZ, pixel XY, 10--200 ms future XYZ, and 0.1--1.0 s intent XYZ.
+current XYZ, pixel XY, and 10--200 ms future XYZ.
 
 The training-only future-IMU decoder receives the EMG representation only. It
 therefore tests whether present muscle activity predicts subsequent mechanics
@@ -94,5 +94,4 @@ sensor_program | python scripts/infer_shared_encoder_residual_gru.py \
 
 Each emitted JSON record contains open/close probabilities and hysteretic
 state, current position, normalized and absolute pixel coordinates, dense
-future positions through 200 ms, intent positions through 1 s, and the learned
-EMG correction gate.
+future positions through 200 ms, and the learned EMG correction gate.

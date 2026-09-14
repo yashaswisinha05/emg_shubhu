@@ -25,7 +25,7 @@ python scripts/train_shared_encoder_residual_gru.py \
   --future-pose-ms 200 --future-pose-weight 0.5 \
   --reconstruction-horizon-ms 1000 --reconstruction-step-ms 100 \
   --reconstruction-decay-ms 500 \
-  --long-position-weight 0.05 --emg-to-future-imu-weight 0.05 \
+  --emg-to-future-imu-weight 0.05 \
   --output-dir "$output_dir"
 
 echo "Checkpoint: $output_dir/emg_imu_best.pt"

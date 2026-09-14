@@ -92,3 +92,16 @@ def test_unimodal_motion_predictions_ignore_the_removed_sensor():
     first, second = imu_model(emg, imu), imu_model(torch.randn_like(emg), imu)
     for key in keys:
         torch.testing.assert_close(first[key], second[key])
+
+
+def test_one_second_position_intent_head_can_be_removed():
+    model = SharedEncoderResidualGRU(
+        DummySharedClassifier(), stats(), stats(), width=16,
+        adapter_layers=1, dropout=0., future_steps=20,
+        intent_horizons_steps=tuple(range(10, 101, 10)), pixel_head="direct",
+        predict_intent_position=False)
+    output = model(torch.randn(1, 30, 16), torch.randn(1, 30, 48))
+    assert model.intent_position_head is None
+    assert output["intent_position_delta"] is None
+    assert output["future_position"].shape[-2:] == (20, 3)
+    assert output["intent_imu_delta"].shape[-2:] == (10, 24)
