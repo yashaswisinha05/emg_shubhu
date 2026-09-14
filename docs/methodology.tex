@@ -248,16 +248,17 @@ The only long-horizon auxiliary objective is sEMG-to-future-IMU prediction. Let
 $\mathcal H_l=\{100,200,\ldots,1000\}$ ms, let $h^{-}$ denote the preceding
 horizon, and let $\Delta\bar{\mathbf i}_{t,h}$ be the mean IMU value over the
 interval $(t+h^{-},t+h]$ minus the current IMU value. Then
-\begin{equation}
- \mathcal L_{e\rightarrow i}=
- \frac{\sum_{h\in\mathcal H_l}\lambda_h
- \left\langle\rho(
+\begin{align}
+ \mathcal L_{e\rightarrow i}^{(h)}
+ &=\left\langle\rho\!\left(
  \widehat{\Delta\bar{\mathbf i}}_{t,h}
- -\Delta\bar{\mathbf i}_{t,h})\right\rangle}
- {\sum_{h\in\mathcal H_l}\lambda_h},
- \qquad
- \lambda_h=\exp\!\left(-\frac{h}{500\ \mathrm{ms}}\right).
-\end{equation}
+ -\Delta\bar{\mathbf i}_{t,h}\right)\right\rangle,\\
+ \mathcal L_{e\rightarrow i}
+ &=\frac{\sum_{h\in\mathcal H_l}\lambda_h
+ \mathcal L_{e\rightarrow i}^{(h)}}
+ {\sum_{h\in\mathcal H_l}\lambda_h},\\
+ \lambda_h&=\exp\!\left(-\frac{h}{500\ \mathrm{ms}}\right).
+\end{align}
 The auxiliary decoder receives no IMU representation. It therefore cannot
 solve the task by copying inertial features and must instead extract sEMG
 patterns associated with later mechanics. Future IMU values are used only to
