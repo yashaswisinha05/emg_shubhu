@@ -47,11 +47,19 @@ def main():
             sys.argv.extend((flag, value))
 
     original_loss = base.loss
+    original_train = base.train_one
+
+    def classification_train(*args, **kwargs):
+        args[1].classification_only = True
+        return original_train(*args, **kwargs)
+
     base.loss = classification_loss
+    base.train_one = classification_train
     try:
         base.main()
     finally:
         base.loss = original_loss
+        base.train_one = original_train
 
     output_arg = next((value.split("=", 1)[1] for value in remaining
                        if value.startswith("--output-dir=")), None)
@@ -63,6 +71,8 @@ def main():
     results["protocol"].update({
         "stage": "Stage I",
         "objective": "class-balanced open/close cross-entropy only",
+        "checkpoint_selection": "maximum validation macro-F1",
+        "heads": ["open/close state"],
         "heads_trained": ["open/close state"],
         "auxiliary_losses": [],
     })

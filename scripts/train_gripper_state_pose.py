@@ -325,20 +325,26 @@ def train_one(modality, args, train, validation, stats, class_weight, settings, 
             losses.append(value.item())
         report = evaluate(model, validation, stats, args)
         state_f1 = report.get("gripper_macro_f1")
-        state_penalty = 0. if state_f1 is None else 5 * (1 - state_f1)
-        score = (report["position_cm"]
-                 + .1 * (report["orientation_deg"] or 0)
-                 + state_penalty)
-        # Pixels are a much larger number than centimetres, so scale it into
-        # the same range as the other terms before it drives checkpointing.
-        if args.pixel_architecture == "goal-consistent":
-            quarters = report.get("click_pixel_error_by_quarter", [None] * 4)
-            late = quarters[-1] if quarters[-1] is not None else report.get("click_pixel_error", 0.)
-            score += .005 * report.get("click_pixel_error", 0.) + .03 * late
+        if getattr(args, "classification_only", False):
+            if state_f1 is None:
+                raise ValueError("classification-only selection requires state labels")
+            score = 1 - state_f1
         else:
-            score += .01 * report.get("click_pixel_error", 0.)
-        score += report.get("final_position_cm", 0.)
-        score += .1 * (report.get("final_orientation_deg") or 0.)
+            state_penalty = 0. if state_f1 is None else 5 * (1 - state_f1)
+            score = (report["position_cm"]
+                     + .1 * (report["orientation_deg"] or 0)
+                     + state_penalty)
+            # Pixels are a much larger number than centimetres, so scale it into
+            # the same range as the other terms before it drives checkpointing.
+            if args.pixel_architecture == "goal-consistent":
+                quarters = report.get("click_pixel_error_by_quarter", [None] * 4)
+                late = (quarters[-1] if quarters[-1] is not None
+                        else report.get("click_pixel_error", 0.))
+                score += .005 * report.get("click_pixel_error", 0.) + .03 * late
+            else:
+                score += .01 * report.get("click_pixel_error", 0.)
+            score += report.get("final_position_cm", 0.)
+            score += .1 * (report.get("final_orientation_deg") or 0.)
         history.append({"epoch": epoch, "training_loss": float(np.mean(losses)),
                         "selection_score": score, "validation": report})
         pixels, endpoint = report.get("click_pixel_error"), report.get("final_position_cm")
