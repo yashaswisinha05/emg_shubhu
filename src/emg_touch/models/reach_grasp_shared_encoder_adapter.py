@@ -19,7 +19,7 @@ class SharedEncoderResidualGRU(nn.Module):
 
     def __init__(self, classifier, classifier_normalization, motion_normalization,
                  width=128, adapter_layers=2, dropout=.1, future_steps=20,
-                 intent_horizons_steps=None, pixel_head="grid"):
+                 intent_horizons_steps=None, pixel_head="grid", modality="emg+imu"):
         super().__init__()
         if future_steps <= 0:
             raise ValueError("future_steps must be positive")
@@ -27,7 +27,9 @@ class SharedEncoderResidualGRU(nn.Module):
         if any(h <= 0 for h in horizons) or tuple(sorted(set(horizons))) != horizons:
             raise ValueError("intent horizons must be positive, sorted and unique")
         self.classifier = classifier
-        self.modality = "emg+imu"
+        if modality not in {"emg", "imu", "emg+imu"}:
+            raise ValueError("modality must be emg, imu, or emg+imu")
+        self.modality = modality
         self.future_steps = future_steps
         self.intent_horizons_steps = horizons
         if pixel_head not in {"grid", "direct"}:
@@ -142,7 +144,17 @@ class SharedEncoderResidualGRU(nn.Module):
 
         correction = self.emg_correction(torch.cat((emg_motion, state), -1))
         gate = self.correction_gate(torch.cat((imu_motion, emg_motion, state), -1)).sigmoid()
-        fused = self.fused_norm(imu_motion + gate * correction)
+        if self.modality == "emg":
+            imu_motion = torch.zeros_like(imu_motion)
+            gate = torch.ones_like(gate)
+            fused = self.fused_norm(emg_motion)
+        elif self.modality == "imu":
+            emg_motion = torch.zeros_like(emg_motion)
+            correction = torch.zeros_like(correction)
+            gate = torch.zeros_like(gate)
+            fused = self.fused_norm(imu_motion)
+        else:
+            fused = self.fused_norm(imu_motion + gate * correction)
 
         grid_logits = grid_offsets = None
         if self.pixel_head_type == "grid":
@@ -167,8 +179,10 @@ class SharedEncoderResidualGRU(nn.Module):
             expanded_fused = fused.unsqueeze(2).expand(-1, -1, count, -1)
             intent_position = self.intent_position_head(torch.cat(
                 (expanded_fused, expanded_emg, expanded_basis), -1))
+            auxiliary_motion = (expanded_fused if self.modality == "imu"
+                                else expanded_emg)
             intent_imu = self.intent_imu_head(torch.cat(
-                (expanded_emg, expanded_basis), -1))
+                (auxiliary_motion, expanded_basis), -1))
 
         identity = fused.new_tensor([1., 0., 0., 0., 1., 0.])
         return {

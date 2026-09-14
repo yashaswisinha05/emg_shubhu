@@ -17,9 +17,8 @@ from scripts import train_gripper_state_pose as base
 
 def classification_loss(model, output, batch, class_weight, args):
     """The sole Stage-I objective: class-balanced open/close cross-entropy."""
-    del model, args
-    valid = (batch["emg_usable"] & batch["imu_usable"]
-             & batch["gripper_state_valid"])
+    del args
+    valid = base.wearable_mask(model, batch) & batch["gripper_state_valid"]
     frame_loss = F.cross_entropy(
         output["gripper_state_logits"].transpose(1, 2),
         batch["gripper_state"], weight=class_weight, reduction="none")

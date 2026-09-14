@@ -45,6 +45,25 @@ DEVICE=cuda EPOCHS=60 BATCH_SIZE=4 SEED=42 SPLIT_SEED=42 \
 
 Use a new, empty output directory for every run.
 
+## Train proper modality ablations
+
+The following command trains independent EMG-only and IMU-only Stage-I and
+Stage-II models. It uses the same split seed, widths, heads, horizons, and loss
+weights as the fused model; it is therefore the appropriate modality ablation.
+Test-time zeroing of a fused checkpoint is only a sensor-removal stress test.
+
+```bash
+bash scripts/train_minimal_unimodal_ablations.sh \
+  runs/shared_encoder_unimodal_ablations \
+  data/shubham_open data/shubham_close \
+  data/mukund_open data/mukund_closed \
+  data/gazania_open data/gazania_closed
+```
+
+The resulting checkpoints are
+`emg_motion/emg_best.pt` and `imu_motion/imu_best.pt` beneath the selected
+output root.
+
 ## Infer on an unseen CSV
 
 ```bash

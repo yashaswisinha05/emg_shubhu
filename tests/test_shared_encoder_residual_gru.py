@@ -28,12 +28,13 @@ def stats():
     }
 
 
-def make_model(pixel_head="grid"):
+def make_model(pixel_head="grid", modality="emg+imu"):
     torch.manual_seed(3)
     return SharedEncoderResidualGRU(
         DummySharedClassifier(), stats(), stats(), width=16,
         adapter_layers=1, dropout=0., future_steps=3,
-        intent_horizons_steps=(10, 20), pixel_head=pixel_head)
+        intent_horizons_steps=(10, 20), pixel_head=pixel_head,
+        modality=modality)
 
 
 def test_shared_classifier_is_frozen_and_shapes_are_complete():
@@ -75,3 +76,19 @@ def test_direct_pixel_head_removes_grid_and_offset_predictions():
     assert output["grid_logits"] is None
     assert output["grid_offsets"] is None
     assert torch.all((output["click"] >= 0) & (output["click"] <= 1))
+
+
+def test_unimodal_motion_predictions_ignore_the_removed_sensor():
+    emg, imu = torch.randn(1, 30, 16), torch.randn(1, 30, 48)
+    keys = ("position", "click", "future_position", "intent_position_delta",
+            "intent_imu_delta")
+
+    emg_model = make_model(pixel_head="direct", modality="emg").eval()
+    first, second = emg_model(emg, imu), emg_model(emg, torch.randn_like(imu))
+    for key in keys:
+        torch.testing.assert_close(first[key], second[key])
+
+    imu_model = make_model(pixel_head="direct", modality="imu").eval()
+    first, second = imu_model(emg, imu), imu_model(torch.randn_like(emg), imu)
+    for key in keys:
+        torch.testing.assert_close(first[key], second[key])

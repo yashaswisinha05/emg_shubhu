@@ -100,7 +100,12 @@ def long_intent_loss(model, output, batch, usable, class_weight):
 
 def task_loss(model, output, batch, class_weight, args):
     motion = model.motion if isinstance(model, NeuroClassifierConditionedAttention) else model
-    usable = batch["emg_usable"] & batch["imu_usable"]
+    if motion.modality == "emg":
+        usable = batch["emg_usable"]
+    elif motion.modality == "imu":
+        usable = batch["imu_usable"]
+    else:
+        usable = batch["emg_usable"] & batch["imu_usable"]
     labels = batch["gripper_state"]
     state_valid = usable & batch["gripper_state_valid"]
     state = F.cross_entropy(output["gripper_state_logits"].transpose(1, 2),

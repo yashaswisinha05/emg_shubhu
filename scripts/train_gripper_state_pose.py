@@ -86,8 +86,17 @@ def masked_mean(values, mask):
     return values[mask].mean() if mask.any() else values.sum() * 0
 
 
+def wearable_mask(model, batch):
+    """Validity mask for the sensor streams actually used by a model."""
+    if model.modality == "emg":
+        return batch["emg_usable"]
+    if model.modality == "imu":
+        return batch["imu_usable"]
+    return batch["emg_usable"] & batch["imu_usable"]
+
+
 def loss(model, output, batch, class_weight, args):
-    wearable = batch["emg_usable"] & batch["imu_usable"]
+    wearable = wearable_mask(model, batch)
     valid = wearable & batch["gripper_state_valid"]
     labels = batch["gripper_state"]
     state = masked_mean(F.cross_entropy(output["gripper_state_logits"].transpose(1, 2),
@@ -207,7 +216,7 @@ def evaluate(model, trials, stats, args, zero_emg=False, zero_imu=False):
                     angles, _ = orientation_errors_numpy(
                         rpred[rmask].cpu().numpy(), rtruth[rmask].cpu().numpy())
                     item["orientation"].extend(angles.tolist())
-        wearable = batch["emg_usable"] & batch["imu_usable"]
+        wearable = wearable_mask(model, batch)
         state_valid = wearable & batch["gripper_state_valid"]
         predicted.extend(output["gripper_state_logits"].argmax(-1)[state_valid].cpu().tolist())
         target.extend(batch["gripper_state"][state_valid].cpu().tolist())

@@ -18,8 +18,9 @@ def test_stage_one_loss_is_only_classification_cross_entropy():
         "position": torch.full((1, 2, 3), 1e9),
         "click": torch.full((1, 2, 2), 1e9),
     }
-    first = classification_loss(None, output, batch, torch.ones(2), SimpleNamespace())
+    model = SimpleNamespace(modality="emg+imu")
+    first = classification_loss(model, output, batch, torch.ones(2), SimpleNamespace())
     output["position"].zero_()
     output["click"].zero_()
-    second = classification_loss(None, output, batch, torch.ones(2), SimpleNamespace())
+    second = classification_loss(model, output, batch, torch.ones(2), SimpleNamespace())
     torch.testing.assert_close(first, second)

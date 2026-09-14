@@ -73,8 +73,9 @@ def main():
     if classifier_state.get("format") not in {
             "gripper_neuromuscular_future_v1", "gripper_classifier_minimal_v1"}:
         parser.error("unsupported shared-encoder classifier checkpoint")
-    if classifier_state["model_args"].get("modality") != "emg+imu":
-        parser.error("classifier checkpoint must use fused emg+imu input")
+    classifier_modality = classifier_state["model_args"].get("modality")
+    if classifier_modality not in {"emg", "imu", "emg+imu"}:
+        parser.error("classifier checkpoint has an invalid modality")
 
     horizons = tuple(range(option.reconstruction_step_ms // 10,
                            option.reconstruction_horizon_ms // 10 + 1,
@@ -97,7 +98,7 @@ def main():
 
     sys.argv = [sys.argv[0], *remaining]
     defaults = {
-        "--models": "emg+imu", "--pixel-architecture": "direct",
+        "--models": classifier_modality, "--pixel-architecture": "direct",
         "--pixel-weight": ".35", "--position-weight": "1.0",
         "--orientation-weight": "0", "--final-pose-weight": "0",
         "--future-pose-ms": "200", "--future-pose-weight": ".5",
@@ -115,6 +116,8 @@ def main():
     def model_factory(**model_args):
         if active_normalization is None:
             raise RuntimeError("motion normalization was not initialized")
+        if model_args.get("modality") != classifier_modality:
+            raise ValueError("motion and classifier modalities must match")
         classifier = load_classifier(classifier_state)
         return SharedEncoderResidualGRU(
             classifier,
@@ -126,6 +129,7 @@ def main():
             future_steps=model_args.get("future_steps", 20),
             intent_horizons_steps=horizons,
             pixel_head="direct",
+            modality=classifier_modality,
         )
 
     def train_wrapper(*args, **kwargs):
@@ -167,6 +171,7 @@ def main():
         "architecture": "shared-frozen-patch-encoder-residual-gru-adapter",
         "classifier_checkpoint": str(option.classifier_checkpoint),
         "classifier_and_encoders_frozen": True,
+        "modality": classifier_modality,
         "adapter_layers": option.adapter_layers,
         "orientation_disabled": True,
         "endpoint_disabled": True,
@@ -197,6 +202,7 @@ def main():
                 "dropout": .1, "future_steps": 20,
                 "intent_horizons_steps": horizons,
                 "pixel_head": "direct",
+                "modality": classifier_modality,
             },
         })
         torch.save(checkpoint, path)
