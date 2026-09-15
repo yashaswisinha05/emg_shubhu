@@ -11,6 +11,7 @@ def test_final_model_ablation_runner_help_lists_core_variants():
         cwd=root, capture_output=True, text=True)
     assert result.returncode == 0
     assert "no_state_conditioning" in result.stdout
+    assert "with_state_conditioning" in result.stdout
     assert "no_state_loss" in result.stdout
     assert "no_current_position_loss" in result.stdout
     assert "no_pixel_loss" in result.stdout
@@ -39,3 +40,5 @@ def test_component_suite_excludes_modality_and_auxiliary_variants():
     assert "no_future_imu_loss" not in module.COMPONENTS_NO_AUX
     assert "future_imu_200ms" not in module.COMPONENTS_NO_AUX
     assert "full" in module.COMPONENTS_NO_AUX
+    assert "with_state_conditioning" in module.COMPONENTS_NO_AUX
+    assert "no_state_conditioning" not in module.COMPONENTS_NO_AUX

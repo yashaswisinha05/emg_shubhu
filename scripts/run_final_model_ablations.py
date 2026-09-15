@@ -16,6 +16,7 @@ VARIANTS = {
     "emg_only": ["--modality", "emg"],
     "imu_only": ["--modality", "imu"],
     "no_state_conditioning": ["--no-state-conditioning"],
+    "with_state_conditioning": [],
     "concat_fusion": ["--fusion-mode", "concat"],
     "no_residual_gru": ["--no-residual-gru"],
     "no_local_branch": ["--encoder-feature-mode", "context-only"],
@@ -41,7 +42,7 @@ LOWER_IS_BETTER = {
 
 COMPONENTS_NO_AUX = (
     "full",
-    "no_state_conditioning",
+    "with_state_conditioning",
     "concat_fusion",
     "no_residual_gru",
     "no_local_branch",
@@ -124,6 +125,8 @@ def main():
                 "--reconstruction-horizon-ms", "0",
                 "--emg-to-future-imu-weight", "0",
             ))
+            if name != "with_state_conditioning":
+                overrides.append("--no-state-conditioning")
         if "--classifier-mode" in overrides:
             index = overrides.index("--classifier-mode")
             mode = overrides[index + 1]
@@ -173,6 +176,7 @@ def main():
             "future_imu_1000ms_is_the_full_model": args.suite == "all",
             "suite": args.suite,
             "future_imu_auxiliary_enabled": args.suite != "components-no-aux",
+            "reference_state_conditioning_enabled": args.suite != "components-no-aux",
         },
         "variants": rows,
     }

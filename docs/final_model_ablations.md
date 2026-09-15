@@ -24,8 +24,8 @@ XYZ, overall pixel error, pixel error at 50--75% and 75--100% trial progress,
 200-ms future XYZ, the persistence baseline, gripper macro-F1, and parameter
 count.
 
-For the final component-only study, with future-IMU reconstruction disabled
-in every run and no unimodal experiments, add:
+For the final component-only study, with future-IMU reconstruction and state
+conditioning disabled in the reference model and no unimodal experiments, add:
 
 ```bash
 --suite components-no-aux
