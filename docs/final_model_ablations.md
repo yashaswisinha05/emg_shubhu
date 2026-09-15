@@ -24,6 +24,13 @@ XYZ, overall pixel error, pixel error at 50--75% and 75--100% trial progress,
 200-ms future XYZ, the persistence baseline, gripper macro-F1, and parameter
 count.
 
+For the final component-only study, with future-IMU reconstruction disabled
+in every run and no unimodal experiments, add:
+
+```bash
+--suite components-no-aux
+```
+
 The default variants cover modality, state conditioning, fusion, residual GRU,
 local/context features, every retained supervised loss, pixel time weighting,
 future-IMU horizon, the no-copying constraint, and frozen/joint/single-stage

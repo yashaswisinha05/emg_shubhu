@@ -16,6 +16,7 @@ def test_final_model_ablation_runner_help_lists_core_variants():
     assert "no_pixel_loss" in result.stdout
     assert "no_future_imu_loss" in result.stdout
     assert "frozen_pretrained" in result.stdout
+    assert "components-no-aux" in result.stdout
 
 
 def test_hold_baseline_is_a_lower_is_better_metric():
@@ -25,3 +26,16 @@ def test_hold_baseline_is_a_lower_is_better_metric():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert "future_200ms_hold_cm" in module.LOWER_IS_BETTER
+
+
+def test_component_suite_excludes_modality_and_auxiliary_variants():
+    root = Path(__file__).resolve().parents[1]
+    script = root / "scripts" / "run_final_model_ablations.py"
+    spec = importlib.util.spec_from_file_location("final_ablations", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert "emg_only" not in module.COMPONENTS_NO_AUX
+    assert "imu_only" not in module.COMPONENTS_NO_AUX
+    assert "no_future_imu_loss" not in module.COMPONENTS_NO_AUX
+    assert "future_imu_200ms" not in module.COMPONENTS_NO_AUX
+    assert "full" in module.COMPONENTS_NO_AUX

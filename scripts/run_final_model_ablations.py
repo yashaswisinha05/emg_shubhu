@@ -39,6 +39,22 @@ LOWER_IS_BETTER = {
     "pixel_75_100_px", "future_200ms_cm", "future_200ms_hold_cm",
 }
 
+COMPONENTS_NO_AUX = (
+    "full",
+    "no_state_conditioning",
+    "concat_fusion",
+    "no_residual_gru",
+    "no_local_branch",
+    "no_context_branch",
+    "no_state_loss",
+    "no_current_position_loss",
+    "no_pixel_loss",
+    "no_future_200ms_loss",
+    "uniform_pixel_weight",
+    "joint_pretrained",
+    "frozen_pretrained",
+)
+
 
 def value(source, *keys):
     for key in keys:
@@ -72,8 +88,12 @@ def main():
                              "single-stage variants reinitialize it")
     parser.add_argument("--root", nargs="+", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--suite", choices=("all", "components-no-aux"), default="all",
+        help="components-no-aux excludes modality and future-IMU studies and "
+             "disables future-IMU reconstruction in every retained variant")
     parser.add_argument("--variants", nargs="+", choices=tuple(VARIANTS),
-                        default=tuple(VARIANTS))
+                        help="Optional explicit variant list; overrides --suite selection")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument("--epochs", type=int, default=60)
@@ -84,9 +104,12 @@ def main():
 
     if not Path(args.classifier_checkpoint).is_file():
         parser.error(f"classifier checkpoint not found: {args.classifier_checkpoint}")
+    selected_variants = (args.variants if args.variants is not None else
+                         (list(COMPONENTS_NO_AUX) if args.suite == "components-no-aux"
+                          else list(VARIANTS)))
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    for name in args.variants:
+    for name in selected_variants:
         destination = args.output_dir / name
         result_path = destination / "results.json"
         if args.resume and result_path.is_file():
@@ -96,6 +119,11 @@ def main():
             parser.error(f"{destination} is not empty; remove it or pass --resume")
         mode = "single-stage"
         overrides = list(VARIANTS[name])
+        if args.suite == "components-no-aux":
+            overrides.extend((
+                "--reconstruction-horizon-ms", "0",
+                "--emg-to-future-imu-weight", "0",
+            ))
         if "--classifier-mode" in overrides:
             index = overrides.index("--classifier-mode")
             mode = overrides[index + 1]
@@ -117,7 +145,7 @@ def main():
         subprocess.run(command, cwd=ROOT, check=True)
 
     rows = {}
-    for name in args.variants:
+    for name in selected_variants:
         path = args.output_dir / name / "results.json"
         rows[name] = metrics(json.loads(path.read_text()))
         rows[name]["results"] = str(path)
@@ -142,7 +170,9 @@ def main():
             "retrained_each_variant": True,
             "same_roots_split_optimizer_and_epochs": True,
             "positive_improvement_over_full_means_ablation_is_better": True,
-            "future_imu_1000ms_is_the_full_model": True,
+            "future_imu_1000ms_is_the_full_model": args.suite == "all",
+            "suite": args.suite,
+            "future_imu_auxiliary_enabled": args.suite != "components-no-aux",
         },
         "variants": rows,
     }
