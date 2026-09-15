@@ -8,6 +8,7 @@ from scripts.evaluate_residual_gru_roots import (
     classification_summary,
     discrete_frechet,
     downsample_path,
+    normalized_trial_progress,
     position_rmse,
 )
 
@@ -44,3 +45,7 @@ def test_discrete_frechet_is_zero_for_identical_path_and_tracks_offset():
     sampled = downsample_path(np.arange(30).reshape(10, 3), 4)
     assert len(sampled) == 4
     assert np.array_equal(sampled[[0, -1]], [[0, 1, 2], [27, 28, 29]])
+
+
+def test_trial_progress_matches_training_batch_definition():
+    assert np.allclose(normalized_trial_progress(5), [0., .25, .5, .75, 1.])

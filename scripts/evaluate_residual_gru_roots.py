@@ -125,6 +125,11 @@ def classification_summary(target, prediction):
     }
 
 
+def normalized_trial_progress(length):
+    """Match the training loader's normalized frame position for one trial."""
+    return np.linspace(0., 1., length, dtype="float32")
+
+
 def causal_velocity_sequence(position, time, valid, lookback_ms):
     """Past-only least-squares velocity for every frame."""
     position, time, valid = map(np.asarray, (position, time, valid))
@@ -212,7 +217,9 @@ def main():
                 predicted_state = probability.argmax(-1)
                 state_truth.extend(trial["gripper_state"][state_valid].tolist())
                 state_prediction.extend(predicted_state[state_valid].tolist())
-                progress = trial["trial_progress"]
+                # Progress is a batch-derived value during training; it is not
+                # stored in the preprocessed trial dictionary.
+                progress = normalized_trial_progress(len(wearable))
                 for name, lower, upper in (("50-75%", .5, .75),
                                            ("75-100%", .75, 1.0 + 1e-8)):
                     selected = state_valid & (progress >= lower) & (progress < upper)
