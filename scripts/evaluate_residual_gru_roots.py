@@ -39,6 +39,82 @@ def error_summary(values, unit):
             "frames": int(len(values))}
 
 
+def position_rmse(predicted, actual):
+    """Return vector and per-axis RMSE in centimetres."""
+    residual_cm = (np.asarray(predicted) - np.asarray(actual)) * 100.
+    if not len(residual_cm):
+        return None
+    return {
+        "rmse_3d_cm": float(np.sqrt(np.mean(np.sum(residual_cm ** 2, axis=-1)))),
+        "rmse_axis_cm": {
+            axis: float(np.sqrt(np.mean(residual_cm[:, index] ** 2)))
+            for index, axis in enumerate(("x", "y", "z"))
+        },
+        "frames": int(len(residual_cm)),
+    }
+
+
+def downsample_path(points, max_points):
+    """Uniformly retain endpoints while bounding discrete-Frechet cost."""
+    points = np.asarray(points, dtype=float)
+    if max_points <= 0 or len(points) <= max_points:
+        return points
+    indices = np.linspace(0, len(points) - 1, max_points).round().astype(int)
+    return points[np.unique(indices)]
+
+
+def discrete_frechet(left, right):
+    """Discrete Frechet distance between two ordered 3-D paths."""
+    left, right = np.asarray(left, dtype=float), np.asarray(right, dtype=float)
+    if not len(left) or not len(right):
+        return None
+    previous = np.full(len(right), np.inf)
+    for row, point in enumerate(left):
+        current = np.full(len(right), np.inf)
+        distances = np.linalg.norm(right - point, axis=-1)
+        for column, distance in enumerate(distances):
+            if row == 0 and column == 0:
+                current[column] = distance
+            elif row == 0:
+                current[column] = max(current[column - 1], distance)
+            elif column == 0:
+                current[column] = max(previous[column], distance)
+            else:
+                current[column] = max(
+                    min(previous[column], previous[column - 1], current[column - 1]),
+                    distance,
+                )
+        previous = current
+    return float(previous[-1])
+
+
+def draw_position_metrics(per_trial, output):
+    """Draw trial-level RMSE and discrete-Frechet distributions."""
+    import matplotlib.pyplot as plt
+
+    rmse = np.asarray([row["rmse_3d_cm"] for row in per_trial])
+    dfd = np.asarray([row["discrete_frechet_cm"] for row in per_trial])
+    figure, axes = plt.subplots(1, 2, figsize=(8.2, 3.4), constrained_layout=True)
+    axes[0].boxplot([rmse, dfd], labels=["RMSE", "DFD"], showmeans=True)
+    random = np.random.default_rng(0)
+    for index, values in enumerate((rmse, dfd), 1):
+        axes[0].scatter(index + random.uniform(-.06, .06, len(values)), values,
+                        s=11, alpha=.35, color="#1769aa")
+    axes[0].set_ylabel("Position error (cm)")
+    axes[0].set_title("Unseen-trial error")
+    axes[0].grid(axis="y", alpha=.25)
+
+    axes[1].scatter(rmse, dfd, s=20, alpha=.55, color="#d95f02")
+    upper = max(float(rmse.max()), float(dfd.max())) * 1.05
+    axes[1].plot([0, upper], [0, upper], "--", color="0.55", linewidth=1)
+    axes[1].set(xlabel="RMSE (cm)", ylabel="DFD (cm)",
+                title="Frame error vs. path error", xlim=(0, upper), ylim=(0, upper))
+    axes[1].grid(alpha=.25)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output, dpi=220, bbox_inches="tight")
+    plt.close(figure)
+
+
 def classification_summary(target, prediction):
     """Return frame-level state metrics, or None for an empty progress bin."""
     if not len(target):
@@ -87,6 +163,10 @@ def main():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--velocity-lookback-ms", type=float, default=200.,
                         help="Past-only window used by the linear-extrapolation baseline")
+    parser.add_argument("--dfd-max-points", type=int, default=250,
+                        help="Uniform points retained per trial for discrete Frechet (0 = exact)")
+    parser.add_argument("--position-plot", type=Path,
+                        help="Optional PNG/PDF plot of trial-level position RMSE and DFD")
     args = parser.parse_args()
     device = torch.device(args.device if args.device != "cuda" or torch.cuda.is_available()
                           else "cpu")
@@ -107,7 +187,8 @@ def main():
         "50-75%": {"truth": [], "prediction": []},
         "75-100%": {"truth": [], "prediction": []},
     }
-    position_errors, pixel_errors, pixel_x, pixel_y = [], [], [], []
+    position_errors, position_residuals, position_by_trial = [], [], []
+    pixel_errors, pixel_x, pixel_y = [], [], []
     short_future, intent_future = {}, {}
     accepted, rejected = [], {}
     for number, path in enumerate(paths, 1):
@@ -146,8 +227,22 @@ def main():
             velocity = causal_velocity_sequence(
                 current, trial["time"], wearable, args.velocity_lookback_ms)
             pose_valid = wearable & trial["pose_valid"]
+            predicted_valid = current[pose_valid]
+            actual_valid = trial["position"][pose_valid]
             position_errors.extend(
-                (np.linalg.norm(current - trial["position"], axis=-1)[pose_valid] * 100).tolist())
+                (np.linalg.norm(predicted_valid - actual_valid, axis=-1) * 100).tolist())
+            position_residuals.extend((predicted_valid - actual_valid).tolist())
+            if len(predicted_valid):
+                predicted_path = downsample_path(predicted_valid, args.dfd_max_points)
+                actual_path = downsample_path(actual_valid, args.dfd_max_points)
+                trial_rmse = position_rmse(predicted_valid, actual_valid)
+                position_by_trial.append({
+                    "trial": str(path),
+                    "valid_frames": int(len(predicted_valid)),
+                    "rmse_3d_cm": trial_rmse["rmse_3d_cm"],
+                    "discrete_frechet_cm": 100. * discrete_frechet(
+                        predicted_path, actual_path),
+                })
             if "click_target" in trial and output["click"] is not None:
                 click = output["click"][0].clamp(0, 1).cpu().numpy()
                 delta = (click - trial["click_target"]) * trial["canvas_px"]
@@ -193,12 +288,25 @@ def main():
         except (ValueError, KeyError, RuntimeError) as error:
             rejected[str(path)] = str(error)
 
+    rmse = position_rmse(np.asarray(position_residuals), np.zeros_like(position_residuals))
+    dfd_values = [row["discrete_frechet_cm"] for row in position_by_trial]
+    dfd_summary = error_summary(dfd_values, "cm")
+    if dfd_summary:
+        dfd_summary["trials"] = dfd_summary.pop("frames")
+        dfd_summary["aggregation_unit"] = "trial"
+        dfd_summary["max_points_per_path"] = args.dfd_max_points
     result = {
         "checkpoint": str(args.checkpoint), "roots": args.root,
         "trials": {"accepted": len(accepted), "rejected": len(rejected),
                    "rejection_reasons": rejected},
         "gripper": None,
         "current_position_cm": error_summary(position_errors, "cm"),
+        "current_position": {
+            "euclidean_cm": error_summary(position_errors, "cm"),
+            "rmse": rmse,
+            "discrete_frechet_cm": dfd_summary,
+            "per_trial": position_by_trial,
+        },
         "pixel": {"euclidean_px": error_summary(pixel_errors, "px"),
                   "absolute_x_px": error_summary(pixel_x, "px"),
                   "absolute_y_px": error_summary(pixel_y, "px")},
@@ -234,6 +342,10 @@ def main():
             }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2))
+    if args.position_plot and position_by_trial:
+        draw_position_metrics(position_by_trial, args.position_plot)
+        result["position_plot"] = str(args.position_plot)
+        args.output.write_text(json.dumps(result, indent=2))
     print(json.dumps(result, indent=2))
 
 
