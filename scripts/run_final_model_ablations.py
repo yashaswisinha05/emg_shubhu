@@ -34,6 +34,11 @@ VARIANTS = {
     "frozen_pretrained": ["--classifier-mode", "frozen"],
 }
 
+LOWER_IS_BETTER = {
+    "current_position_cm", "pixel_error_px", "pixel_50_75_px",
+    "pixel_75_100_px", "future_200ms_cm", "future_200ms_hold_cm",
+}
+
 
 def value(source, *keys):
     for key in keys:
@@ -119,9 +124,6 @@ def main():
 
     full = rows.get("full")
     if full is not None:
-        lower_is_better = {
-            "current_position_cm", "pixel_error_px", "pixel_50_75_px",
-            "pixel_75_100_px", "future_200ms_cm"}
         for name, row in rows.items():
             delta = {}
             for key, baseline in full.items():
@@ -130,7 +132,7 @@ def main():
                         or not isinstance(candidate, (int, float)):
                     continue
                 change = candidate - baseline
-                delta[key] = -change if key in lower_is_better else change
+                delta[key] = -change if key in LOWER_IS_BETTER else change
             row["improvement_over_full"] = delta
 
     summary = {
