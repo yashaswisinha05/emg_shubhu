@@ -64,3 +64,28 @@ python minimal_emg_imu/compare_patchtst.py \
   --patchtst runs/patchtst_encoder_ablation/results.json \
   --output runs/patchtst_encoder_ablation/comparison.json
 ```
+
+## Chronos-2 encoder ablation
+
+Chronos-2 is used through its pretrained encoder rather than `predict_df`.
+The shared foundation model is frozen, its 768-dimensional patch embeddings
+are projected to width 128, and the same four task heads and losses are used.
+An explicit causal time-attention mask and patch-endpoint alignment prevent
+future leakage. Install the optional dependency and train with:
+
+```bash
+pip install -e '.[chronos2]'
+python minimal_emg_imu/train_chronos2.py \
+  --root data/participant_01_open data/participant_01_closed \
+         data/participant_02_open data/participant_02_closed \
+         data/participant_03_open data/participant_03_closed \
+  --device cuda --epochs 60 \
+  --output-dir runs/chronos2_encoder_ablation
+```
+
+```bash
+python minimal_emg_imu/compare_chronos2.py \
+  --baseline runs/minimal_emg_imu/results.json \
+  --chronos2 runs/chronos2_encoder_ablation/results.json \
+  --output runs/chronos2_encoder_ablation/comparison.json
+```
