@@ -39,3 +39,28 @@ python minimal_emg_imu/infer.py \
 For a live source, omit `--trial-csv` and send newline-delimited objects of the
 form `{"time_s": ..., "emg": [4 values], "imu": [24 values]}` to stdin, or
 import `MinimalEMGIMUStream` and call `update` directly.
+
+## PatchTST encoder ablation
+
+This controlled ablation replaces only the two primary causal encoders with
+randomly initialized Hugging Face PatchTST encoders. Preprocessing, split,
+heads, loss weights, optimizer, and evaluation remain unchanged. An explicit
+causal attention mask prevents later frames from leaking into earlier outputs.
+
+```bash
+python minimal_emg_imu/train_patchtst.py \
+  --root data/participant_01_open data/participant_01_closed \
+         data/participant_02_open data/participant_02_closed \
+         data/participant_03_open data/participant_03_closed \
+  --device cuda --epochs 60 \
+  --output-dir runs/patchtst_encoder_ablation
+```
+
+After training, compare it with the selected model:
+
+```bash
+python minimal_emg_imu/compare_patchtst.py \
+  --baseline runs/minimal_emg_imu/results.json \
+  --patchtst runs/patchtst_encoder_ablation/results.json \
+  --output runs/patchtst_encoder_ablation/comparison.json
+```
