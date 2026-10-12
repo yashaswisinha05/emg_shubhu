@@ -1,4 +1,4 @@
-"""Chronos-style patch transformer adapted for causal frame-level interaction."""
+"""Causal patch transformer with a parallel frame-level temporal path."""
 from __future__ import annotations
 
 import math
@@ -25,7 +25,8 @@ class CausalPatchBranch(nn.Module):
         self.patch_embed = nn.Conv1d(width, width, patch, stride=stride)
         layer = nn.TransformerEncoderLayer(width, heads, width * 4, dropout,
             activation="gelu", batch_first=True, norm_first=True)
-        self.transformer = nn.TransformerEncoder(layer, layers, nn.LayerNorm(width))
+        self.transformer = nn.TransformerEncoder(
+            layer, layers, nn.LayerNorm(width), enable_nested_tensor=False)
         self.output = nn.Sequential(nn.Linear(width * 2, width), nn.LayerNorm(width), nn.GELU())
         self.feature_mode = "both"
 

@@ -177,19 +177,11 @@ class MinimalEMGIMUModel(nn.Module):
         future_input = torch.cat((
             fused.unsqueeze(2).expand(-1, -1, self.future_steps, -1),
             basis.expand(*fused.shape[:2], -1, -1)), -1)
-        identity = fused.new_tensor([1., 0., 0., 0., 1., 0.])
         return {
             "gripper_state_logits": state_logits,
             "position": self.position_head(fused),
             "click": self.pixel_head(fused).sigmoid(),
             "future_position": self.future_head(future_input),
-            "orientation_6d": None,
-            # Compatibility placeholder for the shared evaluator. It is
-            # never optimized or exposed by the minimal inference API.
-            "future_orientation_6d": identity.view(1, 1, 1, 6).expand(
-                *fused.shape[:2], self.future_steps, 6),
-            "final_position": None,
-            "final_orientation_6d": None,
             "emg_correction_gate": correction_gate,
             "fusion_weights": context_weights,
             "local_fusion_weights": local_weights,

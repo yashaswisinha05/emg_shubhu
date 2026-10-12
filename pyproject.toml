@@ -5,22 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "emg-touch"
 version = "0.1.0"
-description = "Causal EMG/IMU touch-location prediction and EMG-only distillation"
+description = "Causal EMG/IMU state, position, screen-target, and future-motion prediction"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=2.0,<3",
   "pandas>=2.1,<3",
-  "PyYAML>=6.0,<7",
   "scipy>=1.11,<2",
   "scikit-learn>=1.4,<2",
-  "joblib>=1.3,<2",
   "torch>=2.2,<3",
-  "tqdm>=4.66,<5",
-  "transformers>=4.57,<6",
 ]
-
-[project.optional-dependencies]
-chronos2 = ["chronos-forecasting>=2.1,<3"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
